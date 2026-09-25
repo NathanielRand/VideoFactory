@@ -8,7 +8,7 @@ import type { AIModel, AIProvider, AIStatus } from '../lib/types'
  *  This PC first, always: Ollama and Whisper are the default and cost
  *  nothing. The cloud providers are for PCs that cannot run the models, and
  *  every one is bring-your-own-key: the user's key, the user's account, billed
- *  by the provider. Clips Kitty has no key of its own and proxies nothing.
+ *  by the provider. Video Factory has no key of its own and proxies nothing.
  *
  *  Compact on purpose: one dropdown per job, and only the chosen provider's
  *  key and model below it. Keys are per provider, so switching back and forth
@@ -299,7 +299,7 @@ function ProviderPanel({
       )}
 
       <p className="text-[11px] text-muted leading-snug">
-        {t('Billed by')} {provider.label} {t("to your account. Clips Kitty doesn't provide or pay for API use.")}{' '}
+        {t('Billed by')} {provider.label} {t("to your account. Video Factory doesn't provide or pay for API use.")}{' '}
         <button
           className="text-accent hover:underline"
           onClick={() => void window.studio.openExternal(provider.pricing_url)}

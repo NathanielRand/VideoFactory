@@ -1,4 +1,7 @@
-# Releasing Clips Kitty
+> **Video Factory note:** this is upstream's release process (their Hugging Face repo and
+> GitHub releases). It needs our own update feed and hosting before we ship anything.
+
+# Releasing Video Factory
 
 How to turn a commit into something a creator can install.
 
@@ -46,10 +49,10 @@ Measured at 0.1.0, the first build carrying the bundled runtime and weights:
 
 | File | Size | What it is |
 |---|---|---|
-| `nsis-web/ClipsStudio-Web-Setup-<v>.exe` | 813 KB | What people download. Fetches the payload and installs it. |
-| `nsis-web/clips-studio-<v>-x64.nsis.7z` | 5.88 GiB | The payload the setup downloads. |
+| `nsis-web/VideoFactory-Web-Setup-<v>.exe` | 813 KB | What people download. Fetches the payload and installs it. |
+| `nsis-web/video-factory-<v>-x64.nsis.7z` | 5.88 GiB | The payload the setup downloads. |
 | `nsis-web/latest.yml` | 586 B | Version + SHA512 of both. The update checker reads this. |
-| `ClipsStudio-<v>-x64.zip` | 6.90 GiB | Offline alternative: unzip, run `Clips Kitty.exe`. |
+| `VideoFactory-<v>-x64.zip` | 6.90 GiB | Offline alternative: unzip, run `Video Factory.exe`. |
 
 Installed, that unpacks to about **10 GB**. Roughly 4 GB of the growth is the
 bundled Ollama runtime and the two Whisper models; the rest is CUDA PyTorch,
@@ -71,14 +74,14 @@ Face for the website (see [MIRRORS.md](MIRRORS.md)); this is a second repo,
 
 | Where | What |
 |---|---|
-| Hugging Face `clips-studio-releases` | `clips-studio-<v>-x64.nsis.7z`, `latest.yml`, `ClipsStudio-<v>-x64.zip` |
-| GitHub release | `ClipsStudio-Web-Setup-<v>.exe` and the release notes |
+| Hugging Face `video-factory-releases` | `video-factory-<v>-x64.nsis.7z`, `latest.yml`, `VideoFactory-<v>-x64.zip` |
+| GitHub release | `VideoFactory-Web-Setup-<v>.exe` and the release notes |
 
 Tag the GitHub release to match the version in `ui/package.json` (`v0.1.0` for
 `0.1.0`).
 
 > **The setup and its payload must go up together.** The Web Setup fetches
-> `clips-studio-<v>-x64.nsis.7z` **by name, from the URL in the `publish`
+> `video-factory-<v>-x64.nsis.7z` **by name, from the URL in the `publish`
 > block of `ui/electron-builder.yml`**. Publish the setup before the payload
 > has finished uploading and every download fails partway through with a
 > confusing error, because the installer is a downloader with nothing to
@@ -134,7 +137,7 @@ To ship something stable users must not be pulled onto, upload it as
 ### The website's download buttons name the version
 
 All nine "Download for Windows" buttons across `site/` link to
-`releases/download/v<version>/ClipsStudio-Web-Setup-<version>.exe`, so **they
+`releases/download/v<version>/VideoFactory-Web-Setup-<version>.exe`, so **they
 have to be bumped with the version**. The CI website job checks that internal
 paths resolve; it cannot tell that an external GitHub URL now points at a
 release that does not exist.
@@ -154,7 +157,7 @@ Check after publishing:
 - [ ] Release notes mention the SmartScreen warning (see below)
 - [ ] Release notes written for creators: they appear inside the app, in the
       update bar's "What's new"
-- [ ] Downloaded the Web Setup on a machine that has never run Clips Kitty,
+- [ ] Downloaded the Web Setup on a machine that has never run Video Factory,
       and installed it end to end
 
 ## Testing it the way a stranger meets it
@@ -213,14 +216,14 @@ untested.
 **Included:** the Electron app, the frozen Python engine, every Python
 dependency, CUDA PyTorch, FFmpeg, the Ollama runtime, and the YOLO, TalkNet
 and Whisper weights. No Python install, no second installer, no PATH edits,
-no terminal. A creator installs Clips Kitty and nothing else.
+no terminal. A creator installs Video Factory and nothing else.
 
 The bundled Ollama listens on **127.0.0.1:11435**, not its default 11434, so
 it cannot collide with one the creator already runs. Electron starts it, tells
-the engine where it is via `CLIPS_STUDIO_OLLAMA_HOST`, and kills the process
-tree on quit. Its models go to `%LOCALAPPDATA%\Clips Studio\data\models`,
+the engine where it is via `VIDEO_FACTORY_OLLAMA_HOST`, and kills the process
+tree on quit. Its models go to `%LOCALAPPDATA%\Video Factory\data\models`,
 except on installs where 1.1.3 or 1.1.4 already downloaded them to
-`%LOCALAPPDATA%\Clips Kitty\data\models`, which keep using that folder.
+`%LOCALAPPDATA%\Video Factory\data\models`, which keep using that folder.
 
 **Not included:** the language model itself. Not for packaging reasons. It
 would fit, but licensing ones: Gemma and friends ship under terms the person
@@ -234,7 +237,7 @@ The app reports anything missing at `GET /health/preflight`, in words a
 creator can act on.
 
 Installed copies keep videos, clips and the database in
-`%LOCALAPPDATA%\Clips Studio\data`, never inside Program Files. Uninstalling
+`%LOCALAPPDATA%\Video Factory\data`, never inside Program Files. Uninstalling
 leaves that alone: removing a program must not delete someone's footage.
 
 ## SmartScreen

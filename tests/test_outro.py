@@ -12,6 +12,7 @@ import copy
 import hashlib
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,13 @@ def test_rig_is_the_shipped_mascot_pixel_for_pixel():
     assert outro.verify()["pixels_differing"] == 0
 
 
+_UPSTREAM_CARD = pytest.mark.skip(
+    reason="Video Factory: upstream Clips Kitty end-card artwork, off by default; "
+    "replaced by user intro/outro bumpers in Phase 2 (docs/plan.md)"
+)
+
+
+@_UPSTREAM_CARD
 def test_mascot_files_still_regenerate_identically():
     """`scripts/make_mascot.py` must keep producing the committed artwork.
 
@@ -61,12 +69,13 @@ def test_mascot_files_still_regenerate_identically():
     brand = ROOT / "docs" / "brand"
     before = {p: p.read_bytes() for p in
               (brand / "mascot.png", brand / "mascot-head.png")}
-    subprocess.run(["python", str(ROOT / "scripts" / "make_mascot.py")],
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "make_mascot.py")],
                    cwd=ROOT, capture_output=True, check=True)
     for path, original in before.items():
         assert path.read_bytes() == original, f"{path.name} changed"
 
 
+@_UPSTREAM_CARD
 def test_nothing_enters_a_platform_safe_zone():
     """TikTok covers the bottom 483px, the top 130 and a 140px action rail.
 
@@ -197,9 +206,9 @@ def test_prebuilt_cards_are_actually_committed():
 
 
 def test_spec_bundles_the_prebuilt_cards():
-    spec = (ROOT / "clips-studio.spec").read_text(encoding="utf-8")
+    spec = (ROOT / "video-factory.spec").read_text(encoding="utf-8")
     assert 'assets" / "outro"' in spec or "assets/outro" in spec, (
-        "clips-studio.spec must bundle assets/outro, or the frozen build "
+        "video-factory.spec must bundle assets/outro, or the frozen build "
         "renders every format from scratch")
 
 
@@ -243,7 +252,9 @@ def test_toggling_off_works_on_a_file_with_no_outro_line():
 
 def test_shipped_settings_yaml_has_the_key():
     cfg = yaml.safe_load((ROOT / "config" / "settings.yaml").read_text(encoding="utf-8"))
-    assert cfg["clips"]["outro"] is True
+    # Video Factory ships the upstream card OFF; the key must still be there,
+    # because patch_settings rewrites that line in place.
+    assert isinstance(cfg["clips"]["outro"], bool)
 
 
 def test_every_longform_mode_gets_a_card_by_construction():
@@ -342,6 +353,8 @@ def cfg(tmp_path):
     base = yaml.safe_load((ROOT / "config" / "settings.yaml").read_text(encoding="utf-8"))
     c = copy.deepcopy(base)
     c.setdefault("paths", {})["data_dir"] = str(tmp_path / "data")
+    # These exercise the append mechanism, not the shipped default (off in our fork).
+    c.setdefault("clips", {})["outro"] = True
     return c
 
 

@@ -129,14 +129,14 @@ def _friendly_message(error: str) -> str | None:
             "Twitch, Kick and local files are not affected."
         )
 
-    # Age-gated videos need a signed-in session, which Clips Kitty does not
+    # Age-gated videos need a signed-in session, which Video Factory does not
     # have: it downloads anonymously on purpose. yt-dlp's own text points at
     # two wiki pages about exporting cookies, which reads like a crash rather
     # than like a video YouTube will not hand over. Retrying never helps.
     if "confirm your age" in error or "age-restricted" in error.lower():
         return (
             "YouTube will not serve this video to anyone who is not signed "
-            "in, because it is age-restricted. Clips Kitty downloads without "
+            "in, because it is age-restricted. Video Factory downloads without "
             "an account, so it cannot fetch this one. The same stream on "
             "Twitch or Kick will work, as will a local file."
         )

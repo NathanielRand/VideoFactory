@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased: Video Factory fork
+
+- Forked from Clips Kitty v1.2.0 (`4bb531d`) and rebranded as **Video Factory**:
+  new name, logo and icon; `VIDEO_FACTORY_*` env vars; data under
+  `%LOCALAPPDATA%\Video Factory`.
+- Removed upstream's own infrastructure: website, Whop app, browser taster,
+  feedback relay, Twitch proxy, winget/Microsoft Store packaging, stats,
+  PayPal donations, affiliate links and the auto-update feed.
+- Upstream's end card is off by default. Feedback reports save locally.
+- GPU transcription fix: `nvidia-cublas-cu12` for ctranslate2 on cu130 PyTorch.
+- Dev mode runs the backend from the repo's `.venv`.
+
+Everything below is **Clips Kitty's** history before the fork.
+
+---
+
+
 What changed, written for people who use Clips Studio rather than people who
 read the commits. Dates are release dates.
 

@@ -90,7 +90,7 @@ def deliver(url: str, body: dict, secret: str = "") -> bool:
     if not is_deliverable(url):
         return False
     raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    headers = {"Content-Type": "application/json", "User-Agent": "clips-kitty"}
+    headers = {"Content-Type": "application/json", "User-Agent": "video-factory"}
     if secret:
         headers[HEADER] = signature(secret, raw)
     try:

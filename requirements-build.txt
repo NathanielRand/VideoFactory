@@ -1,5 +1,5 @@
 # Build-only dependencies — needed to PRODUCE the Windows installer, not to
-# run Clips Kitty. Install these on the build machine:
+# run Video Factory. Install these on the build machine:
 #
 #     pip install -r requirements-build.txt
 #

@@ -37,7 +37,7 @@ def main() -> int:
     for url in MIRRORS:
         print(f"Fetching {url.split('/')[3]}/{url.split('/')[4]} ...")
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "clips-studio"})
+            req = urllib.request.Request(url, headers={"User-Agent": "video-factory"})
             with urllib.request.urlopen(req, timeout=600) as r:
                 data = r.read()
         except Exception as e:

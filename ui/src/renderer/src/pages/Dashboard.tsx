@@ -11,7 +11,6 @@ import { useJobWatch } from '../lib/useJobWatch'
 import { t } from '../lib/i18n'
 import type { Clip, Settings, StudioEvent, Video } from '../lib/types'
 
-const DONATE_URL = 'https://paypal.me/clipsstudio'
 
 // The assistant shares the window with the two cards above it, so its
 // height is the user's call rather than ours. Remembered per machine.
@@ -667,7 +666,7 @@ export default function Dashboard({
                       publishing does; they are just not worth the card's space. */}
                   <p className="text-sm text-ink/80 mt-0.5">
                     {t(
-                      'One upload reaches YouTube, TikTok, Instagram, Facebook and X. The free plan connects two accounts. Connect them all and post everywhere at once. Then add your WoopSocial API key in Settings so Clips Kitty can post for you.'
+                      'One upload reaches YouTube, TikTok, Instagram, Facebook and X. The free plan connects two accounts. Connect them all and post everywhere at once. Then add your WoopSocial API key in Settings so Video Factory can post for you.'
                     )}
                   </p>
                   {/* Readable, not buried: it has to be legible to be a
@@ -675,7 +674,7 @@ export default function Dashboard({
                       link it describes — so both are here in every state. */}
                   <p className="text-xs text-ink/70 mt-1.5">
                     {t(
-                      'Affiliate link - Clips Kitty may earn a commission if you sign up through it, at no extra cost to you.'
+                      'Affiliate link - Video Factory may earn a commission if you sign up through it, at no extra cost to you.'
                     )}
                   </p>
                 </div>
@@ -693,35 +692,6 @@ export default function Dashboard({
             </div>
           )}
 
-          <div
-            className={`card bg-accent/20 border border-accent/40 !py-3 flex flex-col${
-              publishUrl ? '' : ' md:col-span-2'
-            }`}
-          >
-            {/* Same shape as the card opposite: the row fills the card and
-                the button centres on it, so the two buttons stay in line. */}
-            <div className="flex-1 flex items-center justify-between gap-4">
-              <div className="min-w-0 self-start">
-                <p className="font-bold text-lg text-ink">
-                  {t('Clips Kitty is free & open source ❤️')}
-                </p>
-                <p className="text-sm text-ink/80 mt-0.5">
-                  {t('It runs on your PC with no fees. Donations cover development.')}
-                </p>
-                {/* Mirrors the footnote opposite, so both cards read alike. */}
-                <p className="text-xs text-ink/70 mt-1.5">
-                  {t('Any amount, one-off or monthly, through PayPal. No account needed.')}
-                </p>
-              </div>
-              <button
-                onClick={() => window.studio.openDonateWindow()}
-                className="btn-accent shrink-0 text-lg px-8 py-3.5 font-semibold"
-                title={DONATE_URL}
-              >
-                {t('Donate ❤️')}
-              </button>
-            </div>
-          </div>
         </div>
 
         <div
@@ -731,7 +701,7 @@ export default function Dashboard({
           <div
             role="separator"
             aria-orientation="horizontal"
-            aria-label={t('Drag to resize Ask Clips Kitty')}
+            aria-label={t('Drag to resize Ask Video Factory')}
             tabIndex={0}
             onPointerDown={startResize}
             onPointerMove={onResize}

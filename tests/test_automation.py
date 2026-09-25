@@ -1,4 +1,4 @@
-"""Watched channels: a creator posts and Clips Kitty clips it, once.
+"""Watched channels: a creator posts and Video Factory clips it, once.
 
 The promises pinned here: adding a channel never queues its back catalogue, a
 video becomes at most one job however it is seen (twice in one feed, by two

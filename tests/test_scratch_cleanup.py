@@ -25,7 +25,7 @@ import pytest
 from core.paths import discard
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SKIP = {"vendor", "build", "dist", "release", "data", "site", "ui", "tests", ".git", "whop-app"}
+SKIP = {"vendor", "build", "dist", "release", "data", "site", "ui", "tests", ".git", "whop-app", ".venv", "venv"}
 
 
 def _sources():

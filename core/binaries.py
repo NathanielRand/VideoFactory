@@ -9,7 +9,7 @@ friction that makes them close the installer and never come back.
 So an installed copy ships its own and this module finds them. Resolution
 order, first hit wins:
 
-  1. CLIPS_STUDIO_FFMPEG / CLIPS_STUDIO_FFPROBE / CLIPS_STUDIO_OLLAMA —
+  1. VIDEO_FACTORY_FFMPEG / VIDEO_FACTORY_FFPROBE / VIDEO_FACTORY_OLLAMA —
      explicit override, for debugging or pinning a custom build.
   2. Next to the frozen executable — where the installer puts them.
   3. PATH — the developer case, and any system-wide install.
@@ -58,7 +58,7 @@ def _search_roots(folder: str) -> list[Path]:
 
 @cache
 def _resolve(name: str, folder: str) -> str:
-    override = os.environ.get(f"CLIPS_STUDIO_{name.upper()}")
+    override = os.environ.get(f"VIDEO_FACTORY_{name.upper()}")
     if override and Path(override).exists():
         return override
 

@@ -172,7 +172,7 @@ def stale_backend() -> tuple[Path, float] | None:
             mtime = path.stat().st_mtime
             if mtime > frozen_at and (newest is None or mtime > newest[1]):
                 newest = (path, mtime)
-    for name in ("main.py", "clips-studio.spec"):
+    for name in ("main.py", "video-factory.spec"):
         path = ROOT / name
         if path.exists() and path.stat().st_mtime > frozen_at:
             if newest is None or path.stat().st_mtime > newest[1]:

@@ -1,6 +1,6 @@
 """What the frozen build must and must not contain.
 
-These read clips-studio.spec as text rather than building anything: a real
+These read video-factory.spec as text rather than building anything: a real
 build is two and a half hours, so the mistakes worth catching here are the
 ones that only surface in an installed copy, hours later, on someone else's
 machine.
@@ -13,13 +13,13 @@ locally and breaks the release.
 import re
 from pathlib import Path
 
-SPEC = Path(__file__).resolve().parent.parent / "clips-studio.spec"
+SPEC = Path(__file__).resolve().parent.parent / "video-factory.spec"
 
 
 def _excludes() -> list[str]:
     text = SPEC.read_text(encoding="utf-8")
     block = re.search(r"^excludes = \[(.*?)^\]", text, re.S | re.M)
-    assert block, "clips-studio.spec no longer has an excludes list"
+    assert block, "video-factory.spec no longer has an excludes list"
     return re.findall(r'"([^"]+)"', block.group(1))
 
 

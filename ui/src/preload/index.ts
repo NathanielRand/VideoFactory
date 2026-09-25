@@ -24,8 +24,6 @@ contextBridge.exposeInMainWorld('studio', {
   readClipboardKey: (): Promise<string> => ipcRenderer.invoke('read-clipboard-key'),
   getDownloadsPath: (): Promise<string> => ipcRenderer.invoke('get-downloads-path'),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('pick-folder'),
-  // Donation popup: PayPal in a small in-app window (no external browser).
-  openDonateWindow: (): Promise<void> => ipcRenderer.invoke('open-donate-window'),
   // Desktop notification when a queued video finishes. Text only — the main
   // process builds the toast, so the renderer cannot attach actions or links.
   notify: (title: string, body: string): Promise<boolean> =>
@@ -34,7 +32,7 @@ contextBridge.exposeInMainWorld('studio', {
   // hosts are permitted, so this cannot be used to launch arbitrary URLs.
   openExternal: (url: string): Promise<boolean> =>
     ipcRenderer.invoke('open-external', url),
-  // Whether closing the window keeps Clips Kitty running in the tray, for
+  // Whether closing the window keeps Video Factory running in the tray, for
   // watched channels. Off unless turned on; the main process remembers it.
   tray: {
     get: (): Promise<{ keepInTray: boolean }> => ipcRenderer.invoke('tray:get'),

@@ -1,3 +1,17 @@
+Video Factory
+Copyright (C) 2026 Video Factory contributors
+
+Video Factory is a modified version of Clips Kitty (formerly Clips Studio),
+https://github.com/ColinGPT9/clips-studio, forked on 2026-09-25 at commit
+4bb531d (v1.2.0). It has been renamed and changed since; see the git history
+for every modification. The original work's notice follows unchanged, and its
+copyright remains with its author. Both are licensed under the GNU Affero
+General Public License, version 3 or later (see LICENSE).
+
+===============================================================================
+Original notice (Clips Kitty / Clips Studio)
+===============================================================================
+
 Clips Studio
 Copyright (C) 2026 ColinGPT9
 

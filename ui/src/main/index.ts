@@ -14,13 +14,11 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { setupUpdater } from './updater'
-import { isMicrosoftStore } from './distribution'
 
 const API_PORT = 8765
 
 // One definition for both routes below: the in-app popup and, for Store
 // copies, the system browser. They must not be able to drift apart.
-const DONATE_URL = 'https://paypal.me/clipsstudio'
 
 // The bundled Ollama listens here instead of on 11434, its default. A creator
 // who already runs Ollama owns that port, and two servers fighting over it
@@ -35,7 +33,7 @@ let ollama: ChildProcess | null = null
 //
 // Off by default, and while it is off nothing below changes anything: closing
 // the window quits, exactly as it always has. It exists for people who leave
-// Clips Kitty on a spare PC to watch channels (server/automation.py), where
+// Video Factory on a spare PC to watch channels (server/automation.py), where
 // closing the window must not stop the watching.
 
 let mainWindow: BrowserWindow | null = null
@@ -77,13 +75,13 @@ async function ensureTray(): Promise<void> {
     .catch(() => nativeImage.createEmpty())
   if (tray) return // a second close raced this one
   tray = new Tray(icon)
-  tray.setToolTip('Clips Kitty: watching for new videos')
+  tray.setToolTip('Video Factory: watching for new videos')
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: 'Open Clips Kitty', click: showWindow },
+      { label: 'Open Video Factory', click: showWindow },
       { type: 'separator' },
       {
-        label: 'Quit Clips Kitty',
+        label: 'Quit Video Factory',
         click: () => {
           quitting = true
           app.quit()
@@ -115,7 +113,7 @@ ipcMain.handle('tray:set', (_event, on: unknown) => {
 /** Start the Ollama runtime that ships inside the app.
  *
  *  Packaged builds carry their own copy (see scripts/fetch_ollama.py) so that
- *  installing Clips Kitty installs everything Clips Kitty needs. In a
+ *  installing Video Factory installs everything Video Factory needs. In a
  *  checkout there is nothing to start: a developer already has Ollama on its
  *  default port, and the engine falls back to that because startBackend only
  *  overrides the host when packaged.
@@ -132,15 +130,7 @@ function startOllama(): void {
   // in core/paths.py, or the engine and the runtime disagree about what is
   // downloaded.
   const localAppData = process.env.LOCALAPPDATA ?? join(app.getPath('home'), 'AppData', 'Local')
-  // The 1.1.3 rename (d708b34) moved this folder to "Clips Kitty" while
-  // core/paths.py rightly kept the data folder at "Clips Studio", so the two
-  // stopped matching: models from earlier versions were stranded and fetched
-  // again. Keep whichever folder already holds models, so 1.1.3 and 1.1.4
-  // installs keep theirs; otherwise use the data folder's own name.
-  const kittyModels = join(localAppData, 'Clips Kitty', 'data', 'models')
-  const models = existsSync(join(kittyModels, 'manifests'))
-    ? kittyModels
-    : join(localAppData, 'Clips Studio', 'data', 'models')
+  const models = join(localAppData, 'Video Factory', 'data', 'models')
 
   ollama = spawn(exe, ['serve'], {
     stdio: 'ignore',
@@ -200,7 +190,7 @@ function startBackend(): void {
   // Packaged builds run their own Ollama on a private port, so the engine has
   // to be told where it is — settings.yaml's default 11434 would send it to a
   // system install the creator may not have.
-  if (app.isPackaged) backendEnv.CLIPS_STUDIO_OLLAMA_HOST = `http://${OLLAMA_HOST}`
+  if (app.isPackaged) backendEnv.VIDEO_FACTORY_OLLAMA_HOST = `http://${OLLAMA_HOST}`
 
   // Dev: run the repo's Python directly (repo root is one level up from ui/).
   // Packaged: run the frozen backend exe shipped in resources/backend/.
@@ -216,7 +206,11 @@ function startBackend(): void {
     })
   } else if (process.env.BACKEND_EXTERNAL !== '1') {
     const repoRoot = join(app.getAppPath(), '..')
-    backend = spawn('python', ['main.py', 'serve', '--port', String(API_PORT)], {
+    // Prefer the repo's .venv: the PATH `python` may be a different version
+    // with none of the engine's dependencies installed.
+    const venvPython = join(repoRoot, '.venv', 'Scripts', 'python.exe')
+    const python = existsSync(venvPython) ? venvPython : 'python'
+    backend = spawn(python, ['main.py', 'serve', '--port', String(API_PORT)], {
       cwd: repoRoot,
       stdio: 'inherit',
       env: backendEnv
@@ -255,7 +249,7 @@ function createWindow(): void {
     if (!toldAboutTray && Notification.isSupported()) {
       toldAboutTray = true
       new Notification({
-        title: 'Clips Kitty is still watching',
+        title: 'Video Factory is still watching',
         body: 'It keeps running in the system tray. Quit it from the tray icon.'
       }).show()
     }
@@ -405,52 +399,6 @@ ipcMain.handle('pick-image-file', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
-// Donation popup: PayPal opens in a small in-app window instead of the
-// external browser. It is a locked-down Chromium window showing the REAL
-// paypal.me page — no Node access, no preload, and any attempt by the page
-// to open further windows goes to the system browser instead.
-ipcMain.handle('open-donate-window', (event) => {
-  // Store policy 10.8.2 permits a third-party payment API and says plainly
-  // that "users may be directed to a browser to complete registration or
-  // transactions". Taking that route means a Store copy hands PayPal to the
-  // system browser rather than hosting a payment page itself, so there is no
-  // in-app payment experience for certification to assess.
-  if (isMicrosoftStore()) {
-    void shell.openExternal(DONATE_URL)
-    return
-  }
-
-  const parent = BrowserWindow.fromWebContents(event.sender) ?? undefined
-  const win = new BrowserWindow({
-    width: 480,
-    height: 720,
-    parent,
-    modal: false,
-    autoHideMenuBar: true,
-    title: 'Donate — paypal.me/clipsstudio',
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true
-    }
-  })
-  // Keep the popup pinned to PayPal: external links (terms, help, …) go to
-  // the system browser rather than navigating the popup somewhere else.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
-    return { action: 'deny' }
-  })
-  win.webContents.on('will-navigate', (e, url) => {
-    if (!/^https:\/\/([\w-]+\.)*paypal\.(com|me)\//.test(url)) {
-      e.preventDefault()
-      shell.openExternal(url)
-    }
-  })
-  // The page title always shows where the user really is.
-  win.on('page-title-updated', (e) => e.preventDefault())
-  void win.loadURL(DONATE_URL)
-})
-
 // The OS Downloads folder — the default export destination, like other
 // video editors.
 // Open a link in the user's own browser. Allow-listed rather than open:
@@ -560,7 +508,7 @@ ipcMain.handle('pick-folder', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
-// One Clips Kitty at a time. A second launch used to start a second engine
+// One Video Factory at a time. A second launch used to start a second engine
 // that could not bind port 8765 and a window talking to the first one's; with
 // the window hidden in the tray it would look like the app had not started at
 // all. Now it brings the running one forward instead.
@@ -573,7 +521,7 @@ if (!app.requestSingleInstanceLock()) {
     // Windows shows the AppUserModelID as the notification's app name; without
     // it a toast is attributed to "electron.app.Electron". Must match
     // electron-builder.yml's appId so dev and packaged builds agree.
-    app.setAppUserModelId('com.clipsstudio.app')
+    app.setAppUserModelId('com.videofactory.app')
     keepInTray = loadKeepInTray()
     // Ollama first: it takes a moment to bind its port, and starting it before
     // the engine means the first preflight is more likely to find it up.

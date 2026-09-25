@@ -55,7 +55,7 @@ jobs:
         with:
           # Lowercase: GHCR rejects capitals in a repository name, and the
           # owner here has them.
-          images: ghcr.io/${{ github.repository_owner }}/clips-studio-engine
+          images: ghcr.io/${{ github.repository_owner }}/video-factory-engine
           tags: |
             type=ref,event=tag
             type=raw,value=latest

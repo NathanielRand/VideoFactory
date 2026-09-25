@@ -28,7 +28,7 @@ KEY_SECRET = "uploadpost_key"
 # connected social accounts. A creator with one set of accounts does not care
 # what it is called, so they are never asked: this is used unless they change
 # it. Someone managing several channels can still pick their own.
-DEFAULT_PROFILE = "clips-kitty"
+DEFAULT_PROFILE = "video-factory"
 
 # The approved Upload-Post referral URL, shipped to everyone.
 #

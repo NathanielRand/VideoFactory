@@ -1,12 +1,12 @@
 # The local API
 
-Clips Kitty is a desktop app on top of a **local HTTP service**. The desktop
+Video Factory is a desktop app on top of a **local HTTP service**. The desktop
 window is one client of it. Anything else can be another: a Discord bot that
 clips a stream on command, a batch runner, a web front end, an OBS integration,
 a script that queues last night's VOD every morning.
 
 Nothing needs to be added to the app for that to work. The service is already
-running whenever Clips Kitty is open, on `127.0.0.1:8765`.
+running whenever Video Factory is open, on `127.0.0.1:8765`.
 
 The service has 86 HTTP endpoints and a WebSocket. This document covers the
 subset meant to be built against. Most of the rest are the desktop UI talking
@@ -108,7 +108,7 @@ Easy to lose an hour to, so it is near the top:
 
 | How it is running | Where its database and videos live |
 |---|---|
-| Installed build | `%LOCALAPPDATA%\Clips Studio\data` |
+| Installed build | `%LOCALAPPDATA%\Video Factory\data` |
 | A source checkout | `<repo>/data` |
 
 These are **separate libraries with separate databases**. A checkout resolves
@@ -171,7 +171,7 @@ guarantee of never changing.
 The liveness check. Cheap enough to poll.
 
 - **`api_version`** changes only when a supported endpoint changes shape. A tool
-  can check it once and tell its user to update Clips Kitty, instead of failing
+  can check it once and tell its user to update Video Factory, instead of failing
   in some stranger way later.
 - **`app_version`** is the installed release.
 
@@ -479,7 +479,7 @@ Every processed video, newest first. A bare array:
     "description": "A short summary written by the model.",
     "hashtags": ["#clip", "#stream", "#funny"],
     "hook": "the transcript line the clip was chosen for",
-    "path": "C:\\Users\\you\\AppData\\Local\\Clips Studio\\data\\clips\\…\\clip_03574-03590.mp4",
+    "path": "C:\\Users\\you\\AppData\\Local\\Video Factory\\data\\clips\\…\\clip_03574-03590.mp4",
     "status": "queued", "scheduled_for": null,
     "created_at": "2026-08-12T22:00:50",
     "scores": {"text": 88, "audio": 54, "visual": 72, "reaction": 66,
@@ -556,7 +556,7 @@ on a slow connection is not an HTTP request you want to hold open.
 
 Local (Ollama and Whisper on this machine) is the default. For a machine that
 cannot run the models, a cloud provider can do the AI work, or the transcription,
-on **the user's own API key**, billed by that provider. There is no Clips Kitty key
+on **the user's own API key**, billed by that provider. There is no Video Factory key
 or proxy. See [AI-BACKENDS.md](AI-BACKENDS.md) for what each provider does.
 
 `GET /ai`:
@@ -775,13 +775,13 @@ video to someone's channel twice. Ask the user to check their channel instead.
 
 ## Streamer integrations
 
-For a tool that sits next to a livestream, such as the Clips Kitty OBS Plugin.
+For a tool that sits next to a livestream, such as the Video Factory OBS Plugin.
 
 - **Your tool** decides the stream has really ended, then hands it over.
-- **Clips Kitty** finds the VOD the platform publishes afterwards, queues it once,
+- **Video Factory** finds the VOD the platform publishes afterwards, queues it once,
   and reports progress in terms a small dock can show.
 
-Clips Kitty does not need to be running while the stream is live. Launch it
+Video Factory does not need to be running while the stream is live. Launch it
 after the stream, wait for `GET /health`, then post the stream.
 
 ### `POST /integrations/streams`
@@ -836,12 +836,12 @@ Returns the stream, as below, plus `"created": true` or `false`.
 Poll it every few seconds while a dock is open. It reads the queue live, so it
 never goes stale.
 
-**It never starts other videos.** Clips Kitty does not start processing on its
+**It never starts other videos.** Video Factory does not start processing on its
 own; the queue starts stopped. A stream you hand over counts as the go-ahead for
 that stream only.
 - **Nothing else waiting, queue stopped:** the queue starts.
 - **Other videos already waiting:** it stays stopped and `queue_paused` is
-  `true`. Tell the user to press Start in Clips Kitty.
+  `true`. Tell the user to press Start in Video Factory.
 
 The percentages use the same stage weights as the app, so a dock and the app
 never disagree about the same job.
@@ -946,13 +946,13 @@ and the type from a font already on the machine.
 
 ## Watched channels
 
-Clips Kitty watches a YouTube, Twitch or Kick channel. When the channel posts,
-Clips Kitty queues the video exactly once, like a pasted link, and then
+Video Factory watches a YouTube, Twitch or Kick channel. When the channel posts,
+Video Factory queues the video exactly once, like a pasted link, and then
 publishes the clips through WoopSocial, asks first, or leaves them alone,
 depending on the watch's settings. This is what the Watch page in the app uses.
 
 Nothing happens until automation is switched on (`PATCH /automation`) and the
-watch is enabled. Watching only happens while Clips Kitty is running. Anything
+watch is enabled. Watching only happens while Video Factory is running. Anything
 posted while it was closed is found on the next look, and the watch's `backlog`
 choice decides what happens to it.
 
@@ -1044,7 +1044,7 @@ PATCH takes any of the following, and changes only what it is sent:
 | `publish.ai_hashtags` | `false` leaves out the hashtags the AI chose, so only the ones above are used. |
 | `publish.footer` | Optional text under each caption. Links and "clipped from" wording can get TikTok posts flagged as unoriginal content. |
 | `publish.overrides` | Per platform, the fields WoopSocial takes: `youtube.privacy` (`public`, `unlisted`, `private`); `tiktok.privacyLevel` (`PUBLIC_TO_EVERYONE`, `FOLLOWER_OF_CREATOR`, `MUTUAL_FOLLOW_FRIENDS`, `SELF_ONLY`) and the booleans `allowComment`, `allowDuet`, `allowStitch`, `isYourBrand`, `isBrandedContent`; `instagram.postType` (`REEL`, `STORY`); `facebook.postType` (`REEL`, `VIDEO`, `STORY`); `pinterest.pinterestBoardId`. |
-| `backlog` | What to do when several videos appeared while Clips Kitty wasn't watching: `newest` (default), `all`, `day` (the last 24 hours) or `none`. Videos that aren't taken are listed as `skipped`, never dropped. |
+| `backlog` | What to do when several videos appeared while Video Factory wasn't watching: `newest` (default), `all`, `day` (the last 24 hours) or `none`. Videos that aren't taken are listed as `skipped`, never dropped. |
 | `min_minutes` | Shorter videos (Shorts) are skipped. |
 
 `DELETE` stops watching and forgets the watch's list. Jobs and clips it
@@ -1112,7 +1112,7 @@ The videos a watch has seen, newest first.
 | `waiting_for_video` | Live, premiering or still processing on the platform. Checked again every 15 minutes, for up to a week. `reason` says which. |
 | `waiting_for_queue` | Ready, but the queue is full. |
 | `queued` · `processing` · `complete` · `failed` · `cancelled` | Read live from the video's job, as in `GET /integrations/streams/{session_id}`, with the same extra fields. |
-| `skipped` | Set aside. `reason` says why: too short, posted while Clips Kitty wasn't watching, already clipped, members-only. |
+| `skipped` | Set aside. `reason` says why: too short, posted while Video Factory wasn't watching, already clipped, members-only. |
 
 `publish_state` is empty until the clips exist. Then it is one of:
 
@@ -1161,7 +1161,7 @@ Set aside a video that hasn't been queued yet, or decline an `ask`.
 
 ## MCP: let an AI agent drive it
 
-Clips Kitty ships an **MCP server**, so Claude, Cursor or any MCP client can use the
+Video Factory ships an **MCP server**, so Claude, Cursor or any MCP client can use the
 endpoints above in plain language: queue a stream, follow the job, read the clips it
 chose, export one. It is a translation layer over this same API, talking to the running
 engine on `127.0.0.1:8765`, and it needs no API key of any kind, because the model that
@@ -1169,11 +1169,11 @@ picks the clips is the one on this machine, or a cloud model the user chose in S
 AI on their own key, which the MCP client never sees.
 
 ```bash
-claude mcp add clips-kitty -- python main.py mcp
+claude mcp add video-factory -- python main.py mcp
 ```
 
 Installed builds ship the engine as `api.exe` in the app's `resourcesackend` folder, so
-the command there is `api.exe mcp`. `CLIPS_STUDIO_API` overrides the address if the engine
+the command there is `api.exe mcp`. `VIDEO_FACTORY_API` overrides the address if the engine
 is on another port.
 
 Thirteen tools. Processing: `queue_video`, `queue_local_file`, `job_status`,
@@ -1195,7 +1195,7 @@ The tools carry the traps in their own output, since an agent reads nothing else
 `job_id` of `null` means "not queued" rather than "failed", an unknown video id returns an
 empty clip list rather than a 404, and a paused queue looks exactly like a stalled app.
 
-An agent skill for clients that support them is in [`skills/clips-kitty/`](../skills/clips-kitty/).
+An agent skill for clients that support them is in [`skills/video-factory/`](../skills/video-factory/).
 
 ## WebSocket events
 
@@ -1334,8 +1334,6 @@ Collected because each one has cost somebody time:
 
 ## Building something?
 
-- **Get it listed:** add it to [PROJECTS.md](../PROJECTS.md) with a pull request,
-  so people can find it.
 - **Need an internal endpoint?** Open an issue saying what you are building. The
   fastest way to get one promoted to supported is for somebody to need it.
 

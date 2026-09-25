@@ -15,11 +15,13 @@ import { api } from './lib/api'
 import type { StudioEvent } from './lib/types'
 import { useEvents } from './lib/useEvents'
 import { useQueueNotifications } from './lib/queueNotifications'
-import mascot from './assets/mascot.png'
+import logo from './assets/logo.png'
 
 type Page = 'dashboard' | 'queue' | 'watch' | 'studio' | 'creators' | 'models' | 'settings'
 
-const GITHUB_URL = 'https://github.com/ColinGPT9/clips-studio'
+// Video Factory is a fork of Clips Kitty (AGPL-3.0). Until this fork has a
+// public repo of its own, the source offer points at the upstream it is based on.
+const UPSTREAM_URL = 'https://github.com/ColinGPT9/clips-studio'
 
 const NAV: { id: Page; label: string; icon: string }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: '◧' },
@@ -143,13 +145,12 @@ export default function App(): JSX.Element {
   return (
     <div className="flex h-screen" key={locale}>
       <aside className="w-52 shrink-0 bg-surface border-r border-raised/60 flex flex-col">
-        {/* Same lockup as the website header: Clippy, then the name and
-            tagline stacked beside him. `min-w-0` on the text column so a
-            longer translated tagline wraps instead of pushing Clippy out of
-            the sidebar — several of the 19 locales are wordier than English. */}
+        {/* Logo, then the name and tagline stacked beside it. `min-w-0` on
+            the text column so a longer translated tagline wraps instead of
+            pushing the logo out of the sidebar. */}
         <div className="px-5 py-5 flex items-center gap-2.5">
           <img
-            src={mascot}
+            src={logo}
             alt=""
             width={34}
             height={34}
@@ -157,9 +158,9 @@ export default function App(): JSX.Element {
           />
           <div className="min-w-0">
             <h1 className="text-lg font-bold leading-tight">
-              Clips <span className="text-accent">Kitty</span>
+              Video <span className="text-accent">Factory</span>
             </h1>
-            <p className="text-xs text-muted mt-px">{t('local-first AI clipping')}</p>
+            <p className="text-xs text-muted mt-px">{t('source to post, one flow')}</p>
           </div>
         </div>
         <nav className="flex-1 px-3 space-y-1">
@@ -196,12 +197,12 @@ export default function App(): JSX.Element {
         <ModelSwitcher />
         <div className="px-5 py-4 border-t border-raised/60">
           <a
-            href={GITHUB_URL}
+            href={UPSTREAM_URL}
             target="_blank"
             rel="noreferrer"
             className="text-xs text-muted hover:text-accent transition-colors"
           >
-            <span className="font-semibold">{t('Open source')}</span> — {t('view & modify on GitHub')} ↗
+            <span className="font-semibold">{t('Open source')}</span> — {t('based on Clips Kitty')} ↗
           </a>
           {/* The AGPL expects anyone running the program to be able to find
               its source. The link above is that offer, so it names the

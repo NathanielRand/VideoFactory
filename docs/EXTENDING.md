@@ -1,4 +1,4 @@
-# Extending Clips Kitty
+# Extending Video Factory
 
 The changes people most often want to make, and what each actually touches.
 All of them are deliberately small, if one of these turns into a sprawling
@@ -101,7 +101,7 @@ enforces this.
 
 ## Bring your own model
 
-Clips Kitty already runs YOLOv8 (ultralytics), OpenCV and TalkNet-ASD locally.
+Video Factory already runs YOLOv8 (ultralytics), OpenCV and TalkNet-ASD locally.
 If you care about a kind of footage it does not understand, you do not need
 permission or a redesign. You need one array.
 

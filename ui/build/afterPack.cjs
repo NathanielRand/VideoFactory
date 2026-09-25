@@ -1,4 +1,4 @@
-// Embed the app icon into Clips Studio.exe after packaging.
+// Embed the app icon into Video Factory.exe after packaging.
 //
 // electron-builder normally does this itself, with a tool called rcedit that
 // ships inside its winCodeSign download. That download also contains macOS

@@ -164,7 +164,7 @@ export default function FeedbackHub(): JSX.Element {
         const blob = new Blob([res.markdown], { type: 'text/markdown' })
         const a = document.createElement('a')
         a.href = URL.createObjectURL(blob)
-        a.download = `clips-studio-${kind}-report.md`
+        a.download = `video-factory-${kind}-report.md`
         a.click()
         URL.revokeObjectURL(a.href)
         setDone(
@@ -368,7 +368,7 @@ export default function FeedbackHub(): JSX.Element {
                 {kind === 'improvement' && (
                   <>
                     {field('what', 'What would you like improved?', 'e.g. The timeline is hard to use with a trackpad')}
-                    {field('why', 'Why would it improve Clips Kitty?', 'What gets easier or faster?')}
+                    {field('why', 'Why would it improve Video Factory?', 'What gets easier or faster?')}
                     {field('inspiration', 'Which app inspired this? (optional)', 'e.g. CapCut’s keyframe editor', 2, true)}
                     {field('links', 'Links / screenshots of that feature (optional)', 'A YouTube video, docs page…', 2, true)}
                   </>

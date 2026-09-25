@@ -208,10 +208,11 @@ def test_publishing_needs_a_title_and_a_platform(client, monkeypatch, tmp_path):
 
 
 def test_the_shipped_referral_url_reaches_the_app(client):
-    """What every install sees, so the call to action points somewhere real."""
+    """What every install sees. Video Factory ships no referral link, so the
+    app must make no affiliate claim; a real one must be a full https URL."""
     got = client.get("/woopsocial/status").json()["affiliate_url"]
     assert got == service.AFFILIATE_URL
-    assert got.startswith("https://"), "a bare domain would be refused by the allow-list"
+    assert got == "" or got.startswith("https://"), "a bare domain would be refused by the allow-list"
 
 
 def test_no_shipped_url_means_no_affiliate_claim(client, monkeypatch):

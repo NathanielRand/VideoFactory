@@ -403,7 +403,7 @@ function UpdateCard(): JSX.Element {
     // API must degrade to "updates unavailable", never take the window down.
     const updater = window.studio?.update
     if (!updater) {
-      setState({ state: 'error', message: 'Updates are unavailable — restart Clips Kitty.' })
+      setState({ state: 'error', message: 'Updates are unavailable — restart Video Factory.' })
       return
     }
     updater.prefs().then((p) => setChannel(p.channel))
@@ -411,7 +411,7 @@ function UpdateCard(): JSX.Element {
   }, [])
 
   const line = ((): string => {
-    if (!asked && !state) return 'Clips Kitty checks for updates when it starts.'
+    if (!asked && !state) return 'Video Factory checks for updates when it starts.'
     switch (state?.state) {
       case 'checking':
         return 'Checking…'
@@ -432,11 +432,11 @@ function UpdateCard(): JSX.Element {
       case 'dev':
         return 'Updates are disabled while running from source.'
       case 'store':
-        return 'Installed from the Microsoft Store, which keeps Clips Kitty up to date for you.'
+        return 'Installed from the Microsoft Store, which keeps Video Factory up to date for you.'
       case 'error':
         return `Could not check: ${state.message ?? 'unknown error'}`
       default:
-        return 'Clips Kitty checks for updates when it starts.'
+        return 'Video Factory checks for updates when it starts.'
     }
   })()
 
@@ -497,7 +497,7 @@ function SetupCard(): JSX.Element {
         <p className="text-sm text-muted">Checking what this install has…</p>
       ) : missing.length === 0 ? (
         <p className="text-sm text-muted">
-          Everything Clips Kitty needs is installed and working.
+          Everything Video Factory needs is installed and working.
         </p>
       ) : (
         <div className="text-sm">
@@ -533,7 +533,7 @@ function NotificationsCard(): JSX.Element {
     <div className="card space-y-3">
       <h3 className="font-semibold">{t('Notifications')}</h3>
       <p className="text-sm text-muted">
-        {t('Desktop notifications while a queue processes. Only shown when Clips Kitty is not the window you are looking at.')}
+        {t('Desktop notifications while a queue processes. Only shown when Video Factory is not the window you are looking at.')}
       </p>
       <label className="flex items-center gap-2 cursor-pointer text-sm">
         <input
@@ -597,7 +597,7 @@ function BrandingCard(): JSX.Element {
             }
           }}
         />
-        <span className="text-sm">{t('Add the Clips Kitty end card to every clip')}</span>
+        <span className="text-sm">{t('Add the Video Factory end card to every clip')}</span>
       </label>
     </div>
   )
@@ -628,7 +628,7 @@ export default function Settings(): JSX.Element {
       <UpdateCard />
 
       {/* WoopSocial first: its free plan covers most creators, and it is
-          the one Clips Kitty recommends. Upload-Post last, as the
+          the one Video Factory recommends. Upload-Post last, as the
           alternative for anyone who wants Bluesky, thumbnails or a queue. */}
       <WoopSocialCard />
       <YouTubeCard />

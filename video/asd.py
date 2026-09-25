@@ -11,7 +11,7 @@ judge whether a face's mouth movement matches the sound. It is the same class
 of model the commercial clipping tools use.
 
 Everything here runs locally. The weights ship with the app the same way the
-YOLO weights do (see clips-studio.spec) — nothing is fetched at runtime.
+YOLO weights do (see video-factory.spec) — nothing is fetched at runtime.
 
 COST, measured on a 60s clip on an RTX 3060, because the obvious way to feed
 this model is five times slower than the careful way and that is not evident

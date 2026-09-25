@@ -70,7 +70,7 @@
 # a `query-filters: - exclude: id: py/path-injection` here would end it
 # permanently, at the cost of hiding the rule repo-wide.
 
-name: Clips Kitty
+name: Video Factory
 
 paths-ignore:
   - third_party

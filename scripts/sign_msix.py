@@ -116,7 +116,7 @@ if ($existing) {{
   Write-Output "REUSED"
 }} else {{
   $c = New-SelfSignedCertificate -Type Custom -Subject '{publisher}' `
-    -KeyUsage DigitalSignature -FriendlyName 'Clips Kitty test signing' `
+    -KeyUsage DigitalSignature -FriendlyName 'Video Factory test signing' `
     -CertStoreLocation 'Cert:\\CurrentUser\\My' `
     -TextExtension @('2.5.29.37={{text}}1.3.6.1.5.5.7.3.3', '2.5.29.19={{text}}')
   Write-Output "CREATED"
@@ -157,7 +157,7 @@ Write-Output $c.Thumbprint
     print('        -CertStoreLocation Cert:\\LocalMachine\\TrustedPeople')
     print(f'    Add-AppxPackage "{signed}"')
     print("\nTo remove it again:\n")
-    print("    Get-AppxPackage *ClipsStudio* | Remove-AppxPackage")
+    print("    Get-AppxPackage *VideoFactory* | Remove-AppxPackage")
     return 0
 
 

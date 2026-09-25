@@ -1,9 +1,8 @@
 {
-  "name": "clips-studio",
+  "name": "video-factory",
   "version": "1.2.0",
-  "description": "Local-first AI clipping studio (desktop app)",
-  "author": "ColinGPT9",
-  "homepage": "https://github.com/ColinGPT9/clips-studio",
+  "description": "Video Factory: source-to-post video pipeline (desktop app). Based on Clips Kitty.",
+  "author": "Video Factory contributors",
   "license": "AGPL-3.0-only",
   "main": "./out/main/index.js",
   "private": true,

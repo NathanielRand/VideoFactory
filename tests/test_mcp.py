@@ -28,7 +28,7 @@ def test_initialize_agrees_on_the_client_version():
     reply = _send(_request(1, "initialize", {"protocolVersion": "2025-03-26"}))
     assert reply["result"]["protocolVersion"] == "2025-03-26"
     assert reply["result"]["capabilities"]["tools"] == {"listChanged": False}
-    assert reply["result"]["serverInfo"]["name"] == "clips-kitty"
+    assert reply["result"]["serverInfo"]["name"] == "video-factory"
 
 
 def test_initialize_offers_our_version_when_theirs_is_unknown():
@@ -178,7 +178,7 @@ def test_bad_json_gets_a_parse_error():
 
 
 def test_the_api_base_can_be_overridden(monkeypatch):
-    monkeypatch.setenv("CLIPS_STUDIO_API", "http://127.0.0.1:9999/")
+    monkeypatch.setenv("VIDEO_FACTORY_API", "http://127.0.0.1:9999/")
     assert mcp.api_base() == "http://127.0.0.1:9999"
 
 

@@ -93,6 +93,6 @@ def test_youtube_falls_back_to_existing_public_heatmap(monkeypatch):
 
 
 def test_missing_oauth_token_is_normal_fallback(monkeypatch, tmp_path):
-    monkeypatch.setenv("CLIPS_STUDIO_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("VIDEO_FACTORY_DATA_DIR", str(tmp_path))
 
     assert hype._youtube_organic_retention("video", 60.0) is None

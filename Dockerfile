@@ -1,6 +1,6 @@
-# Contributor environment for the Clips Studio engine.
+# Contributor environment for the Video Factory engine.
 #
-# This is NOT how anyone installs Clips Studio — that is the Windows
+# This is NOT how anyone installs Video Factory — that is the Windows
 # installer. This image exists so someone can work on the Python engine, run
 # the tests and hit the API without installing Python, FFmpeg, PyTorch and
 # the rest on their own machine, and so a contributor on Linux or macOS can
@@ -42,7 +42,7 @@ COPY . .
 
 # Data lives on a volume, not in the image — a container should never be
 # where someone's downloads and clips quietly accumulate.
-ENV CLIPS_STUDIO_DATA_DIR=/data
+ENV VIDEO_FACTORY_DATA_DIR=/data
 VOLUME ["/data"]
 
 EXPOSE 8765

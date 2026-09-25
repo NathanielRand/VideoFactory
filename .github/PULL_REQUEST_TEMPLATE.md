@@ -1,4 +1,4 @@
-<!-- Thanks for contributing to Clips Kitty. Keep this short. A few honest
+<!-- Thanks for contributing to Video Factory. Keep this short. A few honest
      sentences beat a filled-in form. Delete any section that doesn't apply. -->
 
 ## What this changes

@@ -89,7 +89,7 @@ export interface VideoCategory {
   title: string
 }
 
-const GATE_KEY = 'clips-kitty-youtube-enabled'
+const GATE_KEY = 'video-factory-youtube-enabled'
 
 /** Synchronous best guess, for the first render. Defaults to off. */
 export function youtubeEnabledSync(): boolean {

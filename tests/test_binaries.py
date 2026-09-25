@@ -18,7 +18,7 @@ def test_env_override_wins(monkeypatch, tmp_path):
     """The escape hatch for debugging a specific build."""
     fake = tmp_path / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
     fake.write_text("")
-    monkeypatch.setenv("CLIPS_STUDIO_FFMPEG", str(fake))
+    monkeypatch.setenv("VIDEO_FACTORY_FFMPEG", str(fake))
     binaries._resolve.cache_clear()
 
     assert binaries.ffmpeg() == str(fake)
@@ -28,7 +28,7 @@ def test_env_override_wins(monkeypatch, tmp_path):
 def test_override_pointing_at_nothing_is_ignored(monkeypatch):
     """A stale override must not brick the app — fall through to the normal
     search instead."""
-    monkeypatch.setenv("CLIPS_STUDIO_FFMPEG", "/nowhere/at/all/ffmpeg")
+    monkeypatch.setenv("VIDEO_FACTORY_FFMPEG", "/nowhere/at/all/ffmpeg")
     binaries._resolve.cache_clear()
 
     assert binaries.ffmpeg() != "/nowhere/at/all/ffmpeg"
@@ -45,7 +45,7 @@ def test_frozen_build_looks_beside_its_executable(monkeypatch, tmp_path):
 
     monkeypatch.setattr(binaries.sys, "frozen", True, raising=False)
     monkeypatch.setattr(binaries.sys, "executable", str(exe_dir / "api.exe"))
-    monkeypatch.delenv("CLIPS_STUDIO_FFMPEG", raising=False)
+    monkeypatch.delenv("VIDEO_FACTORY_FFMPEG", raising=False)
     binaries._resolve.cache_clear()
 
     assert binaries.ffmpeg() == str(bundled)
@@ -81,7 +81,7 @@ def test_frozen_build_finds_its_bundled_ollama(monkeypatch, tmp_path):
 
     monkeypatch.setattr(binaries.sys, "frozen", True, raising=False)
     monkeypatch.setattr(binaries.sys, "executable", str(exe_dir / "api.exe"))
-    monkeypatch.delenv("CLIPS_STUDIO_OLLAMA", raising=False)
+    monkeypatch.delenv("VIDEO_FACTORY_OLLAMA", raising=False)
     binaries._resolve.cache_clear()
 
     assert binaries.ollama() == str(bundled)
@@ -98,7 +98,7 @@ def test_a_system_ollama_on_path_does_not_count_as_bundled(monkeypatch, tmp_path
     so keying this off "did anything resolve" would tell them their own
     install is our bug, and would flip depending on whose machine ran it.
     """
-    monkeypatch.delenv("CLIPS_STUDIO_OLLAMA", raising=False)
+    monkeypatch.delenv("VIDEO_FACTORY_OLLAMA", raising=False)
     monkeypatch.setattr(binaries, "_search_roots", lambda _folder: [tmp_path])
     monkeypatch.setattr(binaries.shutil, "which", lambda _name: "C:/tools/ollama.exe")
     binaries._resolve.cache_clear()
@@ -154,7 +154,7 @@ def test_no_module_calls_ffmpeg_by_bare_name():
 
     root = pathlib.Path(binaries.__file__).resolve().parent.parent
     offenders = []
-    skip = {"vendor", "build", "dist", "release", "data", "site", "ui", "tests", ".git"}
+    skip = {"vendor", "build", "dist", "release", "data", "site", "ui", "tests", ".git", ".venv", "venv"}
 
     for path in root.rglob("*.py"):
         if set(path.relative_to(root).parts) & skip or path.name == "binaries.py":
@@ -188,7 +188,7 @@ def test_yolo_weights_are_never_loaded_by_bare_name():
 
     root = pathlib.Path(binaries.__file__).resolve().parent.parent
     offenders = []
-    skip = {"vendor", "build", "dist", "release", "data", "site", "ui", "tests", ".git"}
+    skip = {"vendor", "build", "dist", "release", "data", "site", "ui", "tests", ".git", ".venv", "venv"}
 
     for path in root.rglob("*.py"):
         if set(path.relative_to(root).parts) & skip or path.name == "binaries.py":

@@ -276,7 +276,7 @@ def _app_version() -> dict:
     candidates = [root / "ui" / "package.json"]
     if getattr(sys, "frozen", False):
         # Bundled at the root of the unpack dir; see the datas block in
-        # clips-studio.spec. Tried first, because in a frozen build the
+        # video-factory.spec. Tried first, because in a frozen build the
         # checkout path is the one that cannot work.
         candidates.insert(0, Path(getattr(sys, "_MEIPASS", root)) / "package.json")
 
@@ -411,7 +411,7 @@ REQUIRED_FIELDS: dict[str, list[tuple[str, str]]] = {
     ],
     "improvement": [
         ("what", "What would you like improved?"),
-        ("why", "Why would it improve Clips Kitty?"),
+        ("why", "Why would it improve Video Factory?"),
     ],
 }
 
@@ -454,7 +454,7 @@ def build_markdown(kind: str, answers: dict, diagnostics: dict | None) -> str:
         if a.get("inspiration"):
             lines.append(f"**Inspired by:** {a['inspiration']}\n")
         sec("What would you like improved?", "what")
-        sec("Why would it improve Clips Kitty?", "why")
+        sec("Why would it improve Video Factory?", "why")
         sec("Links / references", "links")
 
     if diagnostics:

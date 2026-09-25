@@ -45,7 +45,7 @@ _YT_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
 _RETENTION_BASELINE_RADIUS = 4
 _RETENTION_IGNORE_START_RATIO = 0.05
 
-# Clips Kitty consumes audience as a CLIP-level signal: fusion averages the
+# Video Factory consumes audience as a CLIP-level signal: fusion averages the
 # curve across each candidate and only bonuses windows whose mean is near the
 # top. Organic retention, however, arrives as narrow 1%-of-video samples.
 # Spread each local-retention peak into a short, gently-decaying interest zone
@@ -161,12 +161,12 @@ def _twitch_chat(vod_id: str, duration: float) -> list[tuple[float, str]]:
 def _youtube_token_path() -> Path:
     """The token written by `python main.py auth`.
 
-    Electron passes CLIPS_STUDIO_DATA_DIR for installed builds. A source
+    Electron passes VIDEO_FACTORY_DATA_DIR for installed builds. A source
     checkout with default settings resolves to repo/data. A custom CLI data
     directory that is not also exported through the environment simply means
     this optional signal is unavailable, so the public fallback still works.
     """
-    override = os.environ.get("CLIPS_STUDIO_DATA_DIR")
+    override = os.environ.get("VIDEO_FACTORY_DATA_DIR")
     if override:
         return Path(override) / "youtube_token.json"
 
@@ -232,7 +232,7 @@ def _youtube_organic_retention(video_id: str, duration: float) -> np.ndarray | N
 
 
 def _retention_rows_to_curve(rows: list, duration: float) -> np.ndarray | None:
-    """Convert Analytics retention rows into Clips Kitty's per-second 0..1 signal.
+    """Convert Analytics retention rows into Video Factory's per-second 0..1 signal.
 
     audienceWatchRatio naturally slopes down through almost every video. Using
     the raw values would therefore label the intro as the hottest part even
@@ -240,13 +240,13 @@ def _retention_rows_to_curve(rows: list, duration: float) -> np.ndarray | None:
     is compared with the median on both sides (the same local-prominence idea
     validated against YouTube Studio), then those lifts are percentile-ranked
     within the video, matching the normalization convention used by the other
-    Clips Kitty signals.
+    Video Factory signals.
 
     The first 5% is deliberately suppressed: startup retention is dominated by
     autoplay, immediate exits and values over 100%, not a meaningful "moment".
 
     Finally, the per-second prominence curve is converted into a clip-scale
-    interest envelope. Clips Kitty averages audience values over a whole clip;
+    interest envelope. Video Factory averages audience values over a whole clip;
     a genuine 1%-bin retention spike would otherwise be diluted almost to
     nothing inside a 25-60s candidate. The envelope keeps the maximum at the
     exact same second and lets its influence decay gently for 12s on either
@@ -338,7 +338,7 @@ def _clip_scale_interest(curve: np.ndarray) -> np.ndarray:
     This is a MAX envelope, not smoothing/averaging: measured peaks never move
     and weaker neighbours cannot reduce them. Values stay in 0..1.
 
-    Why 12 seconds: Clips Kitty grows signal candidates to ~25 seconds. A
+    Why 12 seconds: Video Factory grows signal candidates to ~25 seconds. A
     +/-12s envelope therefore makes one genuine retention peak meaningful over
     approximately one candidate-sized window, while remaining much narrower
     than the 60s maximum clip length.

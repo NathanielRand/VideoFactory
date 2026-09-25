@@ -188,7 +188,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
     def connect(body: ConnectIn):
         """Hand back a hosted page for linking social accounts.
 
-        The renderer opens this in the real browser. Clips Kitty never sees a
+        The renderer opens this in the real browser. Video Factory never sees a
         social password and runs no OAuth of its own — Upload-Post owns those
         connections, which is the point of using it.
         """
@@ -313,7 +313,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
                     thumbnail=thumbnail,
                     # Stable per clip, so a retry after a timeout cannot post
                     # the same clip to the same places twice.
-                    idempotency_key=f"clips-kitty-{clip_id}-{clip['created_at']}",
+                    idempotency_key=f"video-factory-{clip_id}-{clip['created_at']}",
                 )
             except PublishError as e:
                 raise _fail(e) from e
@@ -424,7 +424,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
                         Path(clip["path"]),
                         platforms=body.platforms,
                         fields=fields,
-                        idempotency_key=f"clips-kitty-{clip_id}-{clip['created_at']}",
+                        idempotency_key=f"video-factory-{clip_id}-{clip['created_at']}",
                     )
                 except PublishError as e:
                     # One clip's problem must not cost the rest of the batch,

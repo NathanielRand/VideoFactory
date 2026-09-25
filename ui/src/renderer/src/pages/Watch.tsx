@@ -25,7 +25,7 @@ const PLACEHOLDER: Record<WatchPlatform, string> = {
   kick: 'https://kick.com/channel or channel name'
 }
 
-/** Watched channels: a creator posts, Clips Kitty clips it, nobody pastes a link.
+/** Watched channels: a creator posts, Video Factory clips it, nobody pastes a link.
  *
  *  Everything here is off until switched on, and each channel is its own
  *  go-ahead. The page only shows and edits; the watching itself happens in
@@ -164,7 +164,7 @@ export default function Watch({
       <div className="flex items-baseline gap-3 flex-wrap">
         <h1 className="text-xl font-bold">{t('Watched channels')}</h1>
         <p className="text-sm text-muted">
-          {t('When a channel posts, Clips Kitty clips the new video and publishes the clips the way you set it up.')}
+          {t('When a channel posts, Video Factory clips the new video and publishes the clips the way you set it up.')}
         </p>
       </div>
 
@@ -176,7 +176,7 @@ export default function Watch({
             <h2 className="font-semibold">{t('Watch channels')}</h2>
             <p className="text-sm text-muted mt-1 max-w-2xl">
               {status?.enabled
-                ? `${t('Each channel is checked every')} ${status.interval_minutes} ${t('minutes while Clips Kitty is open. Hands-off channels are queued, clipped and published with nobody at the PC, so leave Clips Kitty running.')}`
+                ? `${t('Each channel is checked every')} ${status.interval_minutes} ${t('minutes while Video Factory is open. Hands-off channels are queued, clipped and published with nobody at the PC, so leave Video Factory running.')}`
                 : t('Off. Nothing is checked, queued or published until you switch it on.')}
             </p>
           </div>
@@ -221,7 +221,7 @@ export default function Watch({
               {t('Keep watching when the window is closed')}
               <span className="block text-xs text-muted">
                 {t(
-                  'Closing the window leaves Clips Kitty running in the system tray. Quit it from the tray icon. Windows going to sleep still stops it.'
+                  'Closing the window leaves Video Factory running in the system tray. Quit it from the tray icon. Windows going to sleep still stops it.'
                 )}
               </span>
             </span>
@@ -382,7 +382,7 @@ export default function Watch({
         {platform === 'kick' && (
           <p className="text-xs text-warn">
             {t(
-              'Kick has no official way to list a channel’s videos. Clips Kitty uses the same unofficial one its Kick downloads rely on, so it can stop working without notice.'
+              'Kick has no official way to list a channel’s videos. Video Factory uses the same unofficial one its Kick downloads rely on, so it can stop working without notice.'
             )}
           </p>
         )}

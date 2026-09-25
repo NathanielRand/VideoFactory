@@ -76,7 +76,7 @@ def check_ffmpeg() -> list[Check]:
             ok=bool(version),
             detail=version or "not found",
             fix="" if version else
-                "This should ship with Clips Kitty. Reinstall the app, or "
+                "This should ship with Video Factory. Reinstall the app, or "
                 "install FFmpeg and put it on your PATH.",
         ))
     return checks
@@ -101,12 +101,12 @@ def check_ollama(host: str, model: str) -> list[Check]:
             name="ollama",
             ok=False,
             detail=f"not reachable at {host} ({type(e).__name__})",
-            fix="The AI runtime that ships with Clips Kitty did not start. "
+            fix="The AI runtime that ships with Video Factory did not start. "
                 "Restarting the app usually fixes it. If it keeps happening, "
                 "please report it — this one is not your fault."
                 if has_bundled_ollama() else
                 "Install Ollama from https://ollama.com and let it run in the "
-                "background. Clips Kitty uses it for the AI that picks and "
+                "background. Video Factory uses it for the AI that picks and "
                 "titles clips.",
         )]
 
@@ -238,7 +238,7 @@ def check_gpu() -> Check:
     # CPU genuinely works — but it is not "fine", and the two cases share no
     # remedy at all.
     if reason == NO_GPU:
-        fix = ("Clips Kitty works without a GPU, but processing is much "
+        fix = ("Video Factory works without a GPU, but processing is much "
                "slower. An NVIDIA GPU gives the biggest speed-up.")
     elif gpu_too_old(reason):
         # Told to wait for a newer build, a GTX 10-series owner would be
@@ -251,7 +251,7 @@ def check_gpu() -> Check:
                "future release will not change it.")
     else:
         fix = ("Processing will run on the CPU, which works but is slower. "
-               "Nothing to do on your end: this needs a Clips Kitty build "
+               "Nothing to do on your end: this needs a Video Factory build "
                "made against a newer CUDA, which a future release will carry.")
 
     return Check(name="gpu", ok=False, blocking=False,

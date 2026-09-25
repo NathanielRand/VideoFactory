@@ -1,6 +1,6 @@
 # Where the AI runs
 
-Clips Kitty is local first. Out of the box, everything runs on your own PC:
+Video Factory is local first. Out of the box, everything runs on your own PC:
 
 - **Ollama** runs the language model that picks clips, writes titles and
   descriptions, learns about creators, translates, and answers the assistant.
@@ -17,7 +17,7 @@ work to a cloud provider instead, using **an API key from your own account** wit
 that provider.
 
 - **It is your key and your bill.** The provider charges your account for what
-  you use, at its own prices. Clips Kitty has no key of its own, sells no
+  you use, at its own prices. Video Factory has no key of its own, sells no
   credits, and runs no server in between: requests go from your PC straight to
   the provider.
 - **Two separate choices.** The AI work and the transcription can each stay on
@@ -73,7 +73,7 @@ video can use up.
 
 Each provider handles what it receives under its own privacy policy, which can
 differ between free and paid plans. The full list of everything the app sends
-anywhere is in the [privacy policy](https://colingpt9.github.io/clips-studio/privacy.html).
+anywhere is in the [privacy policy](https://colingpt9.github.io/video-factory/privacy.html).
 
 ### Your key
 
@@ -89,12 +89,12 @@ an MCP client can read.
 Every request made to OpenRouter carries three headers:
 
 ```
-HTTP-Referer: https://colingpt9.github.io/clips-studio/
-X-OpenRouter-Title: Clips Kitty
+HTTP-Referer: https://colingpt9.github.io/video-factory/
+X-OpenRouter-Title: Video Factory
 X-OpenRouter-Categories: video-gen
 ```
 
-They credit the usage to Clips Kitty in OpenRouter's app rankings. `video-gen`
+They credit the usage to Video Factory in OpenRouter's app rankings. `video-gen`
 is the category in OpenRouter's Creative section that fits; a bare `creative`
 is not a category, and OpenRouter drops values it does not recognise. They are
 built in one place, `llm/providers/openrouter.py`, and put on every OpenRouter

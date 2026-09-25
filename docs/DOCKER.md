@@ -61,11 +61,11 @@ docker compose run --rm engine python tests/assets/make_sample_video.py
 
 ## What this is for
 
-Working on Clips Kitty without installing Python, FFmpeg, PyTorch, OpenCV,
+Working on Video Factory without installing Python, FFmpeg, PyTorch, OpenCV,
 Node and the rest on your own machine, and letting someone on Linux or
 macOS contribute to a project whose app only ships for Windows.
 
-**It is not how anyone installs Clips Kitty.** Creators use the Windows
+**It is not how anyone installs Video Factory.** Creators use the Windows
 installer. Nothing here replaces that.
 
 ## The one piece that is not in the container: Electron
@@ -126,7 +126,7 @@ plumbing and nothing about the judgment. See
 | `CHOKIDAR_USEPOLLING` on `ui` | inotify does not cross a bind mount from a Windows or macOS host, so hot reload needs polling |
 | `clips-data` volume at `/data` | Downloads and clips survive a rebuild, and never bloat the image |
 | `ollama-models` volume | Models are gigabytes; losing them on every rebuild would be miserable |
-| `CLIPS_STUDIO_OLLAMA_HOST` | Inside compose, Ollama is a service name, not localhost |
+| `VIDEO_FACTORY_OLLAMA_HOST` | Inside compose, Ollama is a service name, not localhost |
 | Ports bound to `127.0.0.1` | The API has no authentication and can read and write video files. It must not be reachable from the network. |
 
 The engine binds `0.0.0.0` **inside** the container, because there

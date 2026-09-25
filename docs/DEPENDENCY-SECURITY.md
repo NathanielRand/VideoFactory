@@ -17,7 +17,7 @@ Last assessed: **2026-07-26**, against electron 31.7.7 / electron-builder
 | `brace-expansion` | No: build tooling | No | Transitive |
 | `esbuild`, `vite` | No: dev server only | No | Dev-time only |
 
-Only the first row can reach anyone who installs Clips Kitty. Everything
+Only the first row can reach anyone who installs Video Factory. Everything
 else lives in tooling that produces the installer and is never inside it.
 
 ## electron 31.7.7: the one that matters
@@ -34,11 +34,6 @@ app has almost none:
 
 - The main window loads **local files only**, under a CSP of
   `default-src 'self'` with a `connect-src` limited to the local engine.
-- The one window that loads **remote** content is the PayPal donate popup in
-  `ui/src/main/index.ts`, and it is about as locked down as Electron allows:
-  `sandbox: true`, `nodeIntegration: false`, `contextIsolation: true`, no
-  preload, `window.open` denied, and `will-navigate` refuses anything that is
-  not `paypal.com` / `paypal.me`.
 
 So the sandboxed remote-content window is the realistic surface, and it has
 no bridge into the app. That is mitigation, not a fix. A renderer sandbox

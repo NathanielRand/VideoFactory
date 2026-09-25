@@ -1,6 +1,9 @@
-# Architecture: Clips Kitty
+# Architecture: the Clips Kitty engine
 
-Clips Kitty is a local-first AI clipping engine with a desktop front end. It ingests a
+> Upstream's architecture document, kept as the engine deep-dive (with names updated).
+> Video Factory's own map and extension points are in [docs/architecture.md](docs/architecture.md).
+
+Video Factory is a local-first AI clipping engine with a desktop front end. It ingests a
 long video, finds the moments worth posting using a local LLM plus multimodal signal
 analysis, renders speaker-tracked captioned vertical clips, and hands them to a review
 and editing studio. Nothing is sent to a cloud AI service, and there is no paid
@@ -33,7 +36,7 @@ document: design notes that used to live separately have been folded in here.
 
 ```
                         ┌───────────────────────────────┐
-                        │   Clips Kitty desktop app    │
+                        │   Video Factory desktop app    │
                         │   Electron + React + Vite     │
                         └───────────────┬───────────────┘
                                         │  HTTP + WebSocket (127.0.0.1:8765)
@@ -84,7 +87,7 @@ chat-replay request. Whisper, the LLM, YOLOv8, and FFmpeg are all local.
 ## 2. Repository structure
 
 ```
-clips-studio/
+video-factory/
 ├── main.py                     # CLI entry: process, serve, models, status, channels
 ├── config/
 │   ├── settings.yaml           # quick setup at the top, advanced below

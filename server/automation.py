@@ -1,4 +1,4 @@
-"""Watched channels: a creator posts, Clips Kitty clips it, nobody pastes a link.
+"""Watched channels: a creator posts, Video Factory clips it, nobody pastes a link.
 
 This is orchestration only. Detection is sources/channel_feed.py, processing is
 the ordinary queue and worker, and publishing is woopsocial_service. What lives
@@ -71,7 +71,7 @@ PUBLISH_START_ATTEMPTS = 6
 #     already used. Only the rejected ones are sent again, 6 and 24 hours on.
 DELIVERY_RETRY_DELAYS = (6 * 60 * 60, 24 * 60 * 60)
 
-_MISSED = "Posted while Clips Kitty wasn't watching."
+_MISSED = "Posted while Video Factory wasn't watching."
 _BASELINE = "Posted before you started watching this channel."
 
 _JOB_STATES = {
@@ -600,7 +600,7 @@ class ChannelWatcher(threading.Thread):
             )
             if outcome == "done":
                 d.set_watch_item(item["id"], state="skipped",
-                                 reason="Already clipped in Clips Kitty.")
+                                 reason="Already clipped in Video Factory.")
                 continue
             if outcome == "full":
                 full = f"Waiting for room in the queue ({queue.MAX_ACTIVE} videos at most)."

@@ -22,7 +22,7 @@ def encode(
     destination and that repetition is what makes one request fan out, which a
     dict would collapse to a single value.
     """
-    boundary = "----ClipsKitty" + uuid.uuid4().hex
+    boundary = "----VideoFactory" + uuid.uuid4().hex
     marker = f"--{boundary}".encode()
     parts: list[bytes] = []
 

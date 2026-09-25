@@ -259,7 +259,7 @@ class SettingsPatch(BaseModel):
     privacy: str | None = None
     content_language: str | None = None  # auto / ISO code (es, pt, hi, id...)
     translation_model: str | None = None  # local model used for translation
-    outro: bool | None = None  # append the Clips Kitty end card (clips.outro)
+    outro: bool | None = None  # append the Video Factory end card (clips.outro)
 
 
 class TranslateIn(BaseModel):
@@ -445,10 +445,15 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
     from server import feedback as feedback_mod
 
     feedback_mod.install_log_capture()  # pipeline prints -> bug-report log tail
-    app = FastAPI(title="Clips Kitty API", version="0.1")
+    app = FastAPI(title="Video Factory API", version="0.1")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],  # Vite dev server
+        # 5273: the Electron dev renderer (ui/electron.vite.config.ts).
+        # 5173: `npm run dev:web`, the browser-only UI (ui/vite.config.mts).
+        allow_origins=[
+            "http://localhost:5273", "http://127.0.0.1:5273",
+            "http://localhost:5173", "http://127.0.0.1:5173",
+        ],
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -574,8 +579,8 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
     @app.get("/health")
     def health():
-        # Integrations such as the OBS plugin read these to tell "Clips Kitty is
-        # running" apart from "this Clips Kitty is too old for me". api_version
+        # Integrations such as the OBS plugin read these to tell "Video Factory is
+        # running" apart from "this Video Factory is too old for me". api_version
         # moves only when a supported endpoint changes shape.
         return {"ok": True, "app_version": app_version, "api_version": API_VERSION}
 

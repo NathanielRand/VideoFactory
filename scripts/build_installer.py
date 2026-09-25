@@ -11,7 +11,7 @@ explanation rather than a stack trace:
     4. build the Electron front end
     5. wrap both in an NSIS installer -> release/
 
-The result is release/ClipsStudio-Setup-<version>.exe, which installs the app,
+The result is release/VideoFactory-Setup-<version>.exe, which installs the app,
 the Python engine, FFmpeg, the Ollama runtime, and the YOLO, TalkNet and
 Whisper weights together. A creator installs nothing else: the one remaining
 download is the language model, which the app pulls itself on first launch
@@ -137,7 +137,7 @@ def ensure_vendored() -> None:
 def freeze_backend() -> None:
     say("3/5", "freezing the Python engine (several minutes, PyTorch is large)")
     run(
-        [sys.executable, "-m", "PyInstaller", str(ROOT / "clips-studio.spec"),
+        [sys.executable, "-m", "PyInstaller", str(ROOT / "video-factory.spec"),
          "--noconfirm", "--distpath", str(ROOT / "build" / "dist"),
          "--workpath", str(ROOT / "build" / "work"), "--log-level", "WARN"],
         ROOT,
@@ -182,12 +182,12 @@ def _refresh_sandbox_test(release: Path) -> None:
       OLD build. That happened, cost a full install cycle, and looked like a
       broken release rather than a stale file.
     * The payload must stay out. An installer that finds
-      clips-studio-<v>-x64.nsis.7z sitting next to it has no reason to download
+      video-factory-<v>-x64.nsis.7z sitting next to it has no reason to download
       one, and the download is the thing the sandbox run exists to prove.
 
     So: exactly one file in here, always the current one.
     """
-    setups = list(release.glob("nsis-web/ClipsStudio-Web-Setup-*.exe"))
+    setups = list(release.glob("nsis-web/VideoFactory-Web-Setup-*.exe"))
     if not setups:
         return  # nsis-web target disabled; nothing to stage
 
@@ -238,7 +238,7 @@ def package_installer() -> None:
         "                     install that reads it starts downloading at once.\n"
         "      GitHub release the Web Setup .exe and the notes. Nothing else\n"
         "                     fits; the payload upload is rejected outright.\n"
-        "    The .zip is the offline alternative: unzip and run Clips Kitty.exe."
+        "    The .zip is the offline alternative: unzip and run Video Factory.exe."
     )
 
 

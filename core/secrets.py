@@ -27,7 +27,7 @@ import os
 import sys
 from pathlib import Path
 
-_ENTROPY = b"clips-kitty/publish/v1"
+_ENTROPY = b"video-factory/publish/v1"
 
 # Deliberately not "*token*.json": the CI secret check greps tracked files for
 # that pattern, and while data/ is gitignored, a name that cannot trip the

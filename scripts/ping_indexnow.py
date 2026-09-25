@@ -40,7 +40,7 @@ KEY = "eb67c51a9415c8625a7fd0f85a479cbe"
 # The site lives in a subdirectory, so the key cannot sit at the host root:
 # that root belongs to a different repository. keyLocation exists for exactly
 # this, and scopes the key to the URLs underneath it.
-KEY_LOCATION = f"https://{HOST}/clips-studio/{KEY}.txt"
+KEY_LOCATION = f"https://{HOST}/video-factory/{KEY}.txt"
 
 ENDPOINT = "https://api.indexnow.org/indexnow"
 

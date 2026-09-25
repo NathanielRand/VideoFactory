@@ -24,6 +24,15 @@ def _add_gpu_dlls() -> None:
         lib = Path(torch.__file__).parent / "lib"
         if lib.exists():
             os.add_dll_directory(str(lib))
+        # The cu130 PyTorch wheels carry cuBLAS 13, but ctranslate2's wheels
+        # are built against cuBLAS 12 ("cublas64_12.dll is not found"). The
+        # nvidia-cublas-cu12 wheel supplies it; cuDNN 9 still comes from torch.
+        # ctranslate2 loads cuBLAS lazily with a plain LoadLibrary, which
+        # searches PATH and ignores add_dll_directory, so it goes on PATH too.
+        cublas12 = lib.parent.parent / "nvidia" / "cublas" / "bin"
+        if cublas12.exists():
+            os.add_dll_directory(str(cublas12))
+            os.environ["PATH"] = str(cublas12) + os.pathsep + os.environ.get("PATH", "")
     except Exception as e:
         # Whisper falls back to CPU further down and just looks slow.
         # This line is the difference between that and a mystery.

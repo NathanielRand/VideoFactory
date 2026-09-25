@@ -45,7 +45,7 @@ TOOL_OUTPUT_LIMIT = 4000
 HUMAN_ONLY: set[str] = set()
 
 SYSTEM = (
-    "You drive Clips Kitty, a local video clipping app, through its tools.\n"
+    "You drive Video Factory, a local video clipping app, through its tools.\n"
     "NEVER ask the person for something you can look up. If they describe a "
     "video by its subject or title, call list_videos and match it yourself. If "
     "you need clip ids, call list_clips. Asking for an id you could have "

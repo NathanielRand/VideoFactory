@@ -55,3 +55,9 @@ nvidia-ml-py>=12.575.51,<14
 # Voices are NOT bundled: ~60 MB each across 15 languages, downloaded on
 # demand into data/voices/ the first time a language is dubbed.
 piper-tts>=1.5.0,<2
+
+# ---- GPU transcription -------------------------------------------------------
+# ctranslate2 (faster-whisper) is built against cuBLAS 12, but the cu130
+# PyTorch wheels only carry cuBLAS 13. transcription/transcriber.py adds this
+# wheel's DLL folder to the search path. Windows/Linux only; harmless on CPU.
+nvidia-cublas-cu12>=12.4,<13; sys_platform != "darwin"

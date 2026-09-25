@@ -99,11 +99,11 @@ def load_config(path: Path) -> dict:
     # a private port so it cannot collide with one the creator already runs,
     # and passes the address in here rather than rewriting settings.yaml
     # underneath them.
-    ollama_host = os.environ.get("CLIPS_STUDIO_OLLAMA_HOST")
+    ollama_host = os.environ.get("VIDEO_FACTORY_OLLAMA_HOST")
     if ollama_host:
         config.setdefault("llm", {})["ollama_host"] = ollama_host.rstrip("/")
 
-    data_dir = os.environ.get("CLIPS_STUDIO_DATA_DIR")
+    data_dir = os.environ.get("VIDEO_FACTORY_DATA_DIR")
     if data_dir:
         config.setdefault("paths", {})["data_dir"] = data_dir
 

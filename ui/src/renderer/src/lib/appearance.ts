@@ -27,7 +27,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
   textColor: '#f1f5f9'
 }
 
-const KEY = 'clips-studio-appearance'
+const KEY = 'video-factory-appearance'
 
 export function loadAppearance(): Appearance {
   try {
