@@ -314,6 +314,7 @@ export default function Compilations(): JSX.Element {
           library={library}
           options={options}
           canAdd={!!comp && !busy}
+          hasCompilation={!!comp}
           onAdd={addSegment}
           onCreditSaved={refreshLibrary}
         />
@@ -705,6 +706,7 @@ function Library(props: {
   library: LibraryVideo[]
   options: CompilationOptions | null
   canAdd: boolean
+  hasCompilation: boolean
   onAdd: (seg: SegmentSpec) => void
   onCreditSaved: () => void
 }): JSX.Element {
@@ -717,6 +719,11 @@ function Library(props: {
   return (
     <div className="space-y-3">
       <h2 className="font-semibold">{t('Library')}</h2>
+      {!props.hasCompilation && (
+        <p className="text-xs text-yellow-300">
+          {t('Open or create a compilation (left) to add segments to it.')}
+        </p>
+      )}
       <input
         className="input w-full"
         placeholder={t('Search videos or creators')}
@@ -764,6 +771,15 @@ function LibraryItem(props: {
   useEffect(() => {
     if (open && clips === null) api.clips(v.video_id).then(setClips).catch(() => setClips([]))
   }, [open, clips, v.video_id])
+
+  // In and out can be set in either order; the range is whichever is first.
+  const rangeStart = Math.min(inPt, outPt)
+  const rangeEnd = Math.max(inPt, outPt)
+  const rangeHint = !canAdd
+    ? t('Open or create a compilation first.')
+    : rangeEnd - rangeStart < 0.5
+      ? t('Play or scrub to a moment, press Set in, move on, then press Set out (at least 0.5s apart).')
+      : ''
 
   const saveCredit = async (patch: { channel_name?: string; rights?: Rights }): Promise<void> => {
     await compilationsApi.setCredit(v.video_id, patch).catch(() => undefined)
@@ -844,12 +860,22 @@ function LibraryItem(props: {
                 </button>
                 <button
                   className="btn-accent px-2 py-0.5 ml-auto"
-                  disabled={!canAdd || outPt - inPt < 0.5}
-                  onClick={() => onAdd({ video_id: v.video_id, start: Math.round(inPt * 10) / 10, end: Math.round(outPt * 10) / 10 })}
+                  disabled={!!rangeHint}
+                  title={rangeHint}
+                  onClick={() => {
+                    onAdd({
+                      video_id: v.video_id,
+                      start: Math.round(rangeStart * 10) / 10,
+                      end: Math.round(rangeEnd * 10) / 10
+                    })
+                    setInPt(0)
+                    setOutPt(0)
+                  }}
                 >
-                  + {t('Add range')}
+                  + {t('Add range')} {rangeEnd - rangeStart >= 0.5 ? `(${fmt(rangeEnd - rangeStart)})` : ''}
                 </button>
               </div>
+              {rangeHint && <p className="text-xs text-muted">{rangeHint}</p>}
             </div>
           )}
         </div>
