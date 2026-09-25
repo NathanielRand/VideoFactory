@@ -99,11 +99,14 @@ Sketch of a recipe:
 - [x] Rebrand to **Video Factory**: name, logo and icon, env vars, data folder; upstream infrastructure, donations, affiliate links and the update feed removed. (Details are in [architecture.md](architecture.md#fork-housekeeping-done-rebranded-to-video-factory).)
 
 ### Phase 2: Compilation mode and templates
-- [ ] Recipe schema + multi-source timeline model.
-- [ ] Credit captions from ingest metadata, banner overlay, intro/outro.
-- [ ] Transitions and effects (blur, blur-fill, zoom).
-- [ ] Template save/load.
-- [ ] Simple review timeline UI.
+- [x] Recipe schema + multi-source timeline model (`compilation/recipe.py`, `compilations` table).
+- [x] Ingest credit metadata: `source_url`, `channel_url`, `rights` per video; editable via `PATCH /videos/{id}/credit`.
+- [x] Credit captions from ingest metadata, banner (branding profile: text burned per segment, image overlaid once), intro/outro files.
+- [x] Transitions (12 xfade types + hard cut), blur regions, blur-fill / pad / crop for mismatched shapes, per-segment volume, loudness evening.
+- [x] Template save/load (`compilation_templates`: the recipe minus its segments).
+- [x] Compilations page: library (AI-found moments or scrub-and-pick ranges), segment list, look settings, render, preview.
+- [ ] Zoom / punch-in effect.
+- [ ] Drag-to-draw custom blur regions (presets only for now: top, bottom, both).
 
 ### Phase 3: Multi-platform render
 - [ ] Output profile definitions.

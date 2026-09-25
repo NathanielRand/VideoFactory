@@ -213,4 +213,5 @@ def download(url: str, output_dir: Path) -> DownloadedVideo:
         path=path,
         duration=float(info.get("duration") or 0),
         channel=info.get("channel") or info.get("uploader") or "",
+        channel_url=info.get("channel_url") or info.get("uploader_url") or "",
     )

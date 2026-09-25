@@ -17,6 +17,7 @@ class DownloadedVideo:
     path: Path
     duration: float  # seconds
     channel: str = ""  # channel/uploader display name
+    channel_url: str = ""  # the channel's page, for crediting it in compilations
 
 
 @dataclass

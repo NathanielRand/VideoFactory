@@ -323,6 +323,30 @@ CREATE TABLE IF NOT EXISTS watch_items (
     updated_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_watch_items_watch ON watch_items(watch_id, id);
+
+-- ---- Video Factory: compilations (compilation/ module) ----------------------
+-- A compilation is one video assembled from segments of MANY sources, with
+-- credits, transitions, banner and intro/outro. `recipe` is the JSON the
+-- compilation/recipe.py schema validates; a template is a recipe's reusable
+-- look (everything except the title and segments).
+
+CREATE TABLE IF NOT EXISTS compilations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    recipe      TEXT NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL DEFAULT 'draft',   -- draft | queued | rendering | done | failed
+    output_path TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS compilation_templates (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    config     TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
 """
 
 # Columns set_stream() may change. Names are interpolated into SQL, so they come
@@ -388,6 +412,15 @@ class StateDB:
             self.conn.execute("ALTER TABLE videos ADD COLUMN process_seconds REAL DEFAULT 0")
         if "creator_id" not in video_cols:
             self.conn.execute("ALTER TABLE videos ADD COLUMN creator_id INTEGER")
+        # Video Factory: who to credit when a video is reused in a compilation.
+        # rights: own | licensed | permission | fair_use | unknown.
+        for column, ddl in (
+            ("source_url", "TEXT DEFAULT ''"),
+            ("channel_url", "TEXT DEFAULT ''"),
+            ("rights", "TEXT DEFAULT 'unknown'"),
+        ):
+            if column not in video_cols:
+                self.conn.execute(f"ALTER TABLE videos ADD COLUMN {column} {ddl}")
         if "duration" not in video_cols:
             # Source length in seconds. Processing cost scales with it, so the
             # queue's time estimate divides by this instead of assuming every
@@ -784,17 +817,53 @@ class StateDB:
         title: str = "",
         channel_name: str = "",
         duration: float = 0.0,
+        source_url: str = "",
+        channel_url: str = "",
     ) -> None:
         self.conn.execute(
-            """INSERT INTO videos (video_id, channel_id, title, channel_name, duration, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 'queued', ?, ?)
+            """INSERT INTO videos (video_id, channel_id, title, channel_name, duration,
+                                  source_url, channel_url, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
                ON CONFLICT(video_id) DO UPDATE SET
                  title = CASE WHEN excluded.title != '' THEN excluded.title ELSE videos.title END,
                  channel_name = CASE WHEN excluded.channel_name != '' THEN excluded.channel_name ELSE videos.channel_name END,
-                 duration = CASE WHEN excluded.duration > 0 THEN excluded.duration ELSE videos.duration END""",
-            (video_id, channel_id, title, channel_name, round(duration, 1), _now(), _now()),
+                 duration = CASE WHEN excluded.duration > 0 THEN excluded.duration ELSE videos.duration END,
+                 source_url = CASE WHEN excluded.source_url != '' THEN excluded.source_url ELSE videos.source_url END,
+                 channel_url = CASE WHEN excluded.channel_url != '' THEN excluded.channel_url ELSE videos.channel_url END""",
+            (video_id, channel_id, title, channel_name, round(duration, 1),
+             source_url, channel_url, _now(), _now()),
         )
         self.conn.commit()
+
+    RIGHTS = ("own", "licensed", "permission", "fair_use", "unknown")
+
+    def set_video_credit(
+        self,
+        video_id: str,
+        *,
+        channel_name: str | None = None,
+        channel_url: str | None = None,
+        rights: str | None = None,
+    ) -> bool:
+        """Edit who a video is credited to, and on what basis it is reused.
+        None leaves a field as it is. False when there is no such video."""
+        if rights is not None and rights not in self.RIGHTS:
+            raise ValueError(f"rights must be one of {', '.join(self.RIGHTS)}")
+        sets, args = [], []
+        for col, val in (("channel_name", channel_name), ("channel_url", channel_url), ("rights", rights)):
+            if val is not None:
+                sets.append(f"{col} = ?")
+                args.append(val.strip())
+        if not sets:
+            return self.conn.execute(
+                "SELECT 1 FROM videos WHERE video_id = ?", (video_id,)
+            ).fetchone() is not None
+        cur = self.conn.execute(
+            f"UPDATE videos SET {', '.join(sets)}, updated_at = ? WHERE video_id = ?",
+            (*args, _now(), video_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
 
     def set_video_status(self, video_id: str, status: str) -> None:
         self.conn.execute(

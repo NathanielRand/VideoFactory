@@ -187,6 +187,8 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         title=video.title,
         channel_name=video.channel,
         duration=video.duration,
+        source_url="" if url.startswith("local:") else url,
+        channel_url=video.channel_url,
     )
     # Creator intelligence: attach the video to its creator profile (created
     # on first sight of this channel). Failure-safe — never blocks processing.

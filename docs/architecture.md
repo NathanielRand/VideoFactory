@@ -46,7 +46,16 @@ Electron + React (ui/)  ──HTTP/WS 127.0.0.1:8765──►  FastAPI (server/a
 
 ## Extension points, by phase
 
-### Phase 2: compilation mode
+### Phase 2: compilation mode (built)
+As built: `compilation/` holds `recipe.py` (schema and validation), `credits.py` (ASS lower-thirds),
+`render.py` (one FFmpeg pass per part, then a concat copy for hard cuts or one xfade chain for
+transitions, then the image banner) and `store.py` (CRUD and the `compile` job). Routes are in
+`server/compilations_api.py`, and the UI is `pages/Compilations.tsx` + `lib/compilations.ts`. Every part
+renders at identical parameters (canvas size, 30fps CFR, yuv420p, 48 kHz stereo AAC), so hard cuts
+join losslessly. Render starts a paused queue only when nothing else is waiting (`queue.start_if_alone`).
+Tests: `tests/test_compilation.py`, including real multi-source renders.
+
+Original design notes:
 - **New package `compilation/`**, a sibling of `longform/`, built on its patterns:
   - `recipe.py`: dataclasses and validation for the recipe (segments across **many**
     `video_id`s, template ref, outputs). Stored as a new `compilations` table plus

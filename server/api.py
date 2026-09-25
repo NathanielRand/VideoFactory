@@ -546,6 +546,14 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
     ai_api.install(app, config=config, db=db, data_dir=data_dir, settings_path=settings_path)
 
+    # Video Factory: compilations (many sources -> one video), their templates,
+    # and the per-video credit details they print.
+    from server import compilations_api
+
+    compilations_api.install(
+        app, config=config, db=db, data_dir=data_dir, worker=worker, broadcaster=broadcaster
+    )
+
     # Streamer integrations such as the OBS plugin: hand over a finished stream,
     # find its VOD, report progress. Its own module for the same reason.
     from server import integrations

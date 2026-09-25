@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import Dashboard from './pages/Dashboard'
 import ClipStudio from './pages/ClipStudio'
+import Compilations from './pages/Compilations'
 import Creators from './pages/Creators'
 import Models from './pages/Models'
 import Queue from './pages/Queue'
@@ -17,7 +18,7 @@ import { useEvents } from './lib/useEvents'
 import { useQueueNotifications } from './lib/queueNotifications'
 import logo from './assets/logo.png'
 
-type Page = 'dashboard' | 'queue' | 'watch' | 'studio' | 'creators' | 'models' | 'settings'
+type Page = 'dashboard' | 'queue' | 'watch' | 'studio' | 'compilations' | 'creators' | 'models' | 'settings'
 
 // Video Factory is a fork of Clips Kitty (AGPL-3.0). Until this fork has a
 // public repo of its own, the source offer points at the upstream it is based on.
@@ -31,6 +32,7 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   // enough to block the Microsoft Store listing, so do not change it back —
   // "Clip Editor" is also just what the page is.
   { id: 'studio', label: 'Clip Editor', icon: '✂' },
+  { id: 'compilations', label: 'Compilations', icon: '▦' },
   { id: 'creators', label: 'Creators', icon: '◉' },
   { id: 'models', label: 'Models', icon: '⬢' },
   { id: 'settings', label: 'Settings', icon: '⚙' }
@@ -224,6 +226,7 @@ export default function App(): JSX.Element {
         {page === 'studio' && (
           <ClipStudio target={studioTarget} onTargetConsumed={() => setStudioTarget(null)} />
         )}
+        {page === 'compilations' && <Compilations />}
         {page === 'creators' && (
           <Creators initialSelected={creatorTarget} onTargetConsumed={() => setCreatorTarget(null)} />
         )}

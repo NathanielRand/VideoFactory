@@ -43,6 +43,8 @@ _STAGES = {
     "ranking": (0.65, 0.05, "Ranking the best moments"),
     "reactions": (0.70, 0.08, "Scoring on-screen reactions"),
     "render": (0.78, 0.22, "Rendering clips"),
+    # Video Factory: a compilation job is one stage from start to finish.
+    "compile": (0.0, 1.0, "Rendering compilation"),
 }
 
 
@@ -227,6 +229,20 @@ class Worker(threading.Thread):
                     self._rerender_clip(db, payload)
                 elif job["type"] == "translate":
                     self._translate_clips(db, payload)
+                elif job["type"] == "compile":
+                    from compilation import store as compilations
+
+                    def compile_progress(i: int, total: int, label: str) -> None:
+                        progress.emit(stage="compile", current=i + 1, total=total, message=label)
+
+                    comp_key = compilations.cancel_key(int(payload["compilation_id"]))
+                    # Registered like a video, so the queue's existing Cancel reaches it.
+                    cancel.clear(comp_key)
+                    cancel.set_active(comp_key)
+                    compilations.run(
+                        db, int(payload["compilation_id"]), copy.deepcopy(self.config),
+                        on_progress=compile_progress,
+                    )
                 else:
                     raise ValueError(f"Unknown job type {job['type']!r}")
                 db.finish_job(job["id"], "done")
@@ -273,6 +289,8 @@ class Worker(threading.Thread):
         fraction = min(0.99, base + weight * min(1.0, max(0.0, within)))
         if event.get("stage") == "render" and event.get("clip") and event.get("total"):
             label = f"Rendering clip {event['clip']}/{event['total']}"
+        if event.get("stage") == "compile" and event.get("message"):
+            label = str(event["message"])
         with self._progress_lock:
             entry = self._progress.get(job_id)
             if entry is None:
