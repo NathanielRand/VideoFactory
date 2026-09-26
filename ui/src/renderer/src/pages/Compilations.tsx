@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
+import { CANVAS_ORDER, formatsApi, platformsFor, type FormatsInfo } from '../lib/formats'
 import type { BrandingProfile, Clip } from '../lib/types'
 import {
   compilationsApi,
@@ -362,6 +363,14 @@ function Editor(props: {
   }
 
   const canvas = r.canvas ?? '16:9'
+  const outputs = r.outputs && r.outputs.length > 0 ? r.outputs : [canvas]
+  const [formats, setFormats] = useState<FormatsInfo | null>(null)
+  const done = Object.keys(comp.outputs ?? {}).length > 0 ? Object.keys(comp.outputs) : [canvas]
+  const [shown, setShown] = useState<string>(done[0])
+  useEffect(() => {
+    formatsApi.info().then(setFormats).catch(() => undefined)
+  }, [])
+  useEffect(() => setShown(done[0]), [comp.id, comp.updated_at]) // eslint-disable-line react-hooks/exhaustive-deps
   const transition = r.transition ?? { type: 'none', duration: 0.5 }
   const credits = r.credits ?? {}
 
@@ -388,41 +397,78 @@ function Editor(props: {
       {comp.problem && segs.length > 0 && (
         <div className="text-sm text-yellow-300">{comp.problem}</div>
       )}
+      {Object.entries(comp.warnings ?? {}).map(([c, ws]) => (
+        <div key={c} className="text-xs text-yellow-400">
+          ⚠ {c}: {ws.join(' ')}
+        </div>
+      ))}
       {comp.status === 'failed' && comp.error && (
         <pre className="card text-xs text-red-300 whitespace-pre-wrap max-h-40 overflow-y-auto">{comp.error}</pre>
       )}
 
       {comp.status === 'done' && comp.output_path && (
         <div className="card space-y-2">
+          {done.length > 1 && (
+            <div className="flex gap-1">
+              {done.map((c) => (
+                <button
+                  key={c}
+                  className={`px-3 py-1 rounded text-sm ${shown === c ? 'bg-accent/15 text-accent' : 'hover:bg-raised'}`}
+                  onClick={() => setShown(c)}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          )}
           <video
-            key={comp.updated_at}
+            key={`${comp.updated_at}-${shown}`}
             className="max-h-[420px] mx-auto rounded bg-black"
             controls
-            src={compilationsApi.mediaUrl(comp.id, comp.updated_at)}
+            src={compilationsApi.mediaUrl(comp.id, comp.updated_at, done.length > 1 ? shown : '')}
           />
-          <div className="text-xs text-muted break-all">{comp.output_path}</div>
+          <div className="text-xs text-muted break-all">{comp.outputs?.[shown] ?? comp.output_path}</div>
         </div>
       )}
 
       {/* look */}
       <fieldset className="card grid grid-cols-2 lg:grid-cols-4 gap-3" disabled={busy}>
-        <label className="space-y-1">
-          <span className="label">{t('Format')}</span>
-          <select
-            className="input w-full"
-            value={canvas}
-            onChange={(e) => editRecipe((rr) => ({ ...rr, canvas: e.target.value as Recipe['canvas'] }))}
-          >
-            {Object.entries(options?.canvases ?? { '16:9': {}, '9:16': {}, '1:1': {}, '4:5': {} }).map(
-              ([k, v]) => (
-                <option key={k} value={k}>
-                  {k}
-                  {'width' in v ? ` (${v.width}×${v.height})` : ''}
-                </option>
+        <div className="space-y-1 col-span-2 lg:col-span-4">
+          <span className="label">{t('Formats to render (first is the main one)')}</span>
+          <div className="flex flex-wrap gap-2">
+            {CANVAS_ORDER.map((c) => {
+              const on = outputs.includes(c)
+              const size = options?.canvases?.[c]
+              return (
+                <label
+                  key={c}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-sm cursor-pointer ${
+                    on ? 'border-accent/60 bg-accent/10' : 'border-raised'
+                  }`}
+                  title={platformsFor(formats, c)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={(e) =>
+                      editRecipe((rr) => {
+                        const cur = rr.outputs ?? [rr.canvas ?? '16:9']
+                        const next = e.target.checked ? [...cur, c] : cur.filter((x) => x !== c)
+                        if (next.length === 0) return rr // always keep one format
+                        return { ...rr, outputs: next, canvas: next[0] }
+                      })
+                    }
+                  />
+                  <span className="font-medium">{c}</span>
+                  {outputs[0] === c && outputs.length > 1 && <span className="text-xs text-accent">{t('main')}</span>}
+                  <span className="text-xs text-muted">
+                    {size ? `${size.width}×${size.height}` : ''} · {platformsFor(formats, c)}
+                  </span>
+                </label>
               )
-            )}
-          </select>
-        </label>
+            })}
+          </div>
+        </div>
         <label className="space-y-1">
           <span className="label">{t('Fill mismatched shapes')}</span>
           <select

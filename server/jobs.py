@@ -45,6 +45,7 @@ _STAGES = {
     "render": (0.78, 0.22, "Rendering clips"),
     # Video Factory: a compilation job is one stage from start to finish.
     "compile": (0.0, 1.0, "Rendering compilation"),
+    "variants": (0.0, 1.0, "Rendering other formats"),
 }
 
 
@@ -229,6 +230,16 @@ class Worker(threading.Thread):
                     self._rerender_clip(db, payload)
                 elif job["type"] == "translate":
                     self._translate_clips(db, payload)
+                elif job["type"] == "variants":
+                    from formats import variants
+
+                    def variants_progress(i: int, total: int, label: str) -> None:
+                        progress.emit(stage="variants", current=i + 1, total=total, message=label)
+
+                    variants.render(
+                        db, int(payload["clip_id"]), payload.get("canvases") or [],
+                        copy.deepcopy(self.config), on_progress=variants_progress,
+                    )
                 elif job["type"] == "compile":
                     from compilation import store as compilations
 
@@ -289,7 +300,7 @@ class Worker(threading.Thread):
         fraction = min(0.99, base + weight * min(1.0, max(0.0, within)))
         if event.get("stage") == "render" and event.get("clip") and event.get("total"):
             label = f"Rendering clip {event['clip']}/{event['total']}"
-        if event.get("stage") == "compile" and event.get("message"):
+        if event.get("stage") in ("compile", "variants") and event.get("message"):
             label = str(event["message"])
         with self._progress_lock:
             entry = self._progress.get(job_id)
@@ -684,6 +695,10 @@ class Worker(threading.Thread):
             restore["render_opts"] = _json.dumps(render_opts)
             db.set_clip(new_row["id"], **restore)
             db.reattach_clip_rows(new_row["id"], detached)
+            # Video Factory: the clip changed, so its other-format renders no
+            # longer match it. Kept (they may be posted), flagged for refresh.
+            db.conn.execute("UPDATE clip_variants SET stale = 1 WHERE clip_id = ?", (new_row["id"],))
+            db.conn.commit()
         elif detached:
             # The re-render produced no row to hang them off. Say so rather
             # than dropping a translation or an upload record in silence.

@@ -231,6 +231,7 @@ def render_clip(
     ass_path: Path | None = None,
     vf_extra: str = "",
     normalize: bool = True,
+    size: tuple[int, int] = (1080, 1920),
 ) -> None:
     """Render by the analyzer's decision through the existing renderer —
     nothing podcast-specific left at render time."""
@@ -238,5 +239,5 @@ def render_clip(
 
     render_vertical(
         intermediate, decision, output_path,
-        ass_path=ass_path, vf_extra=vf_extra, normalize=normalize,
+        ass_path=ass_path, vf_extra=vf_extra, normalize=normalize, size=size,
     )

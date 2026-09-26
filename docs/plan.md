@@ -109,9 +109,11 @@ Sketch of a recipe:
 - [ ] Drag-to-draw custom blur regions (presets only for now: top, bottom, both).
 
 ### Phase 3: Multi-platform render
-- [ ] Output profile definitions.
-- [ ] Parallel GPU render of the selected profiles.
-- [ ] Per-profile preview.
+- [x] Output profile definitions (`formats/profiles.py`): 4 canvases (9:16, 16:9, 4:5, 1:1) and 8 platform profiles with length caps. Over-length output gets warnings, not refusals.
+- [x] AI clips in any shape: the cropper and pipeline take a target canvas; captions, hook and branding are laid out per canvas; subject tracking is computed once and shared (`formats/variants.py`, `clip_variants` table, marked stale when the clip is re-rendered).
+- [x] Compilations render several formats at once (`recipe.outputs`).
+- [x] Parallel GPU render: extra formats render concurrently (`video.parallel_renders`).
+- [x] Per-profile preview: a Formats section in the clip editor, and format tabs on a finished compilation.
 
 ### Phase 4: Publish and schedule
 - [ ] Per-platform metadata editor (AI drafts).

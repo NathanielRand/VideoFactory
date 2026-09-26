@@ -76,7 +76,17 @@ Original design notes:
   alongside `process` and `render` in `server/jobs.py`.
 - **UI:** new `pages/Compilations` + a segment timeline. Reuse `TimelineEditor.tsx` pieces.
 
-### Phase 3: multi-format render
+### Phase 3: multi-format render (built)
+As built: `formats/profiles.py` is the one canvas table (compilations import it too).
+`video/cropper.render_vertical(..., size=)` renders any canvas. 9:16 output stays byte-identical to
+upstream, and the split (webcam over gameplay) layout falls back to blur-fill in other shapes.
+`core/pipeline._render_files` reads `render_opts["canvas"]`, tags the file (`clip_...4x5.mp4`) and takes
+a shared `tracking_cache`. `formats/variants.py` renders the first extra shape alone (which fills the
+cache), then the rest in a thread pool. Routes: `server/formats_api.py`; `variants` job type. UI:
+`components/FormatVariants.tsx` (in the clip editor) and the format picker and tabs on the Compilations page.
+Tests: `tests/test_formats.py`, which renders every cropper mode at every canvas.
+
+Original design notes:
 - Parameterize the canvas in `video/cropper.py` (`W×H` instead of literal 1080×1920).
   The 9:16 "never reshape the crop window" contract generalizes to "crop at the target
   aspect".

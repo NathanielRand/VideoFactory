@@ -25,7 +25,8 @@ const STAGES: Record<string, { base: number; weight: number; label: string }> = 
   reactions: { base: 0.7, weight: 0.08, label: 'Scoring on-screen reactions' },
   render: { base: 0.78, weight: 0.22, label: 'Rendering clips' },
   // Video Factory: a compilation job is one stage (server/jobs.py _STAGES).
-  compile: { base: 0.0, weight: 1.0, label: 'Rendering compilation' }
+  compile: { base: 0.0, weight: 1.0, label: 'Rendering compilation' },
+  variants: { base: 0.0, weight: 1.0, label: 'Rendering other formats' }
 }
 
 export const emptyProgress: JobProgress = {
@@ -69,7 +70,7 @@ export function applyEvent(p: JobProgress, e: StudioEvent): JobProgress {
   const label =
     e.stage === 'render' && e.clip && e.total
       ? `Rendering clip ${e.clip}/${e.total}`
-      : e.stage === 'compile' && e.message
+      : (e.stage === 'compile' || e.stage === 'variants') && e.message
         ? String(e.message)
         : stage.label
 

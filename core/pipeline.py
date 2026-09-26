@@ -7,6 +7,7 @@ runs: a crash resumes at the failed stage, a 'done' video is never
 reprocessed, and the clips table's UNIQUE constraint blocks duplicates.
 """
 
+import copy
 import json
 import re
 import threading
@@ -579,6 +580,7 @@ def _render_files(
     config: dict,
     render_opts: dict | None = None,
     content_language: str = "en",
+    tracking_cache: dict | None = None,
 ) -> tuple[Path, str]:
     """Pure file work — cut, track, crop, captions, color. NO database access
     and NO LLM call, so it is safe to run in a worker thread. Returns the
@@ -586,8 +588,14 @@ def _render_files(
 
     render_opts (all optional, persisted per clip, set by the user or the AI
     edit assistant): captions, caption_style, caption_lines, crop, filter,
-    adjust.
+    adjust. Video Factory adds "canvas" (formats/profiles.py): render this
+    clip in another shape; the file gets a tag, e.g. clip_...4x5.mp4.
+
+    tracking_cache: a dict shared across renders of the SAME clip in several
+    shapes. The subject path does not depend on the output shape, so it is
+    computed once and every other format reuses it.
     """
+    from formats.profiles import CANVASES, tag
     from video.filters import combined_chain
 
     # Rendering a clip is FFmpeg plus per-frame tracking — minutes each, and a
@@ -600,6 +608,9 @@ def _render_files(
     opts = render_opts or {}
     # Deterministic timestamp-based name: re-runs overwrite instead of piling up.
     stem = f"clip_{int(candidate.start):05d}-{int(candidate.end):05d}"
+    variant = opts.get("canvas") if opts.get("canvas") in CANVASES else None
+    if variant and variant != "9:16" and not opts.get("profile"):
+        stem = f"{stem}.{tag(variant)}"
     final_path = clip_dir / f"{stem}.mp4"
     clip_dir.mkdir(parents=True, exist_ok=True)
 
@@ -621,7 +632,7 @@ def _render_files(
     # Longform rendering profile (render_opts["profile"], set only by the
     # longform module): 16:9 1920x1080 output, no vertical crop/tracking.
     # Absent for every existing Shorts clip — their path is unchanged.
-    landscape = bool(opts.get("profile"))
+    landscape = bool(opts.get("profile")) or variant == "16:9"
     # Loudness: on unless this clip opted out (see settings/editor).
     normalize = bool(opts.get("normalize_audio", True))
     # Podcast: opt-in, per video. Multi-cam/multi-person footage renders as a
@@ -629,7 +640,7 @@ def _render_files(
     # video/podcast.py). Read from the job config or a persisted per-clip flag.
     # When false the tracking path below is entered exactly as before.
     podcast = bool(opts.get("podcast") or config["clips"].get("podcast"))
-    canvas = (1920, 1080) if landscape else (1080, 1920)
+    canvas = CANVASES[variant] if variant else ((1920, 1080) if landscape else (1080, 1920))
 
     # Color: preset filter (per-clip wins over job/config default) + manual
     # brightness/saturation/contrast adjustments.
@@ -737,11 +748,16 @@ def _render_files(
                 from video import podcast as podcast_mod
 
                 tracking_cfg = config["tracking"]
-                decision = podcast_mod.analyze(
-                    intermediate,
-                    model_name=tracking_cfg["detector"],
-                    sample_fps=tracking_cfg["sample_fps"],
-                )
+                if tracking_cache is not None and "podcast" in tracking_cache:
+                    decision = copy.deepcopy(tracking_cache["podcast"])
+                else:
+                    decision = podcast_mod.analyze(
+                        intermediate,
+                        model_name=tracking_cfg["detector"],
+                        sample_fps=tracking_cfg["sample_fps"],
+                    )
+                    if tracking_cache is not None:
+                        tracking_cache["podcast"] = copy.deepcopy(decision)
                 # The editor's Layout buttons still win on a podcast clip.
                 crop_mode = opts.get("crop", "track")
                 if crop_mode == "center":
@@ -750,7 +766,7 @@ def _render_files(
                     decision = {"mode": "fit_blur", "region": None}
                 podcast_mod.render_clip(
                     intermediate, render_path, decision, ass_path=ass_path,
-                    vf_extra=vf_extra, normalize=normalize,
+                    vf_extra=vf_extra, normalize=normalize, size=canvas,
                 )
             else:
                 from video.cropper import render_vertical
@@ -759,6 +775,8 @@ def _render_files(
                 crop_mode = opts.get("crop", "track")
                 if crop_mode == "center":
                     tracking = {"mode": "track", "path": [(0.0, 0.5)]}
+                elif tracking_cache is not None and "tracking" in tracking_cache:
+                    tracking = copy.deepcopy(tracking_cache["tracking"])
                 else:
                     tracking_cfg = config["tracking"]
                     tracking = compute_tracking(
@@ -776,9 +794,11 @@ def _render_files(
                     if tracking["mode"] == "track" and crop_mode in ("bias_left", "bias_right"):
                         shift = -0.12 if crop_mode == "bias_left" else 0.12
                         tracking["path"] = [(t, x + shift) for t, x in tracking["path"]]
+                    if tracking_cache is not None:
+                        tracking_cache["tracking"] = copy.deepcopy(tracking)
                 render_vertical(
                     intermediate, tracking, render_path, ass_path=ass_path, vf_extra=vf_extra,
-                    normalize=normalize,
+                    normalize=normalize, size=canvas,
                 )
         else:
             if edit is not None:

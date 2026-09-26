@@ -20,7 +20,8 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from compilation import credits as credits_mod
@@ -28,6 +29,7 @@ from compilation.recipe import Recipe, SegmentSpec
 from core import cancel
 from core.binaries import ffmpeg, ffprobe
 from core.paths import discard
+from formats.profiles import tag
 from video.encoding import LOUDNORM, video_encoder_args
 
 FPS = 30
@@ -321,3 +323,41 @@ def render(
             work.rmdir()
         except OSError:
             pass
+
+
+def render_all(
+    recipe: Recipe,
+    sources: dict[str, SourceInfo],
+    out_dir: Path,
+    base_name: str,
+    *,
+    banner: dict | None = None,
+    banner_assets: Path | None = None,
+    cancel_key: str = "",
+    on_progress: Progress | None = None,
+    parallel: int = 2,
+) -> dict[str, Path]:
+    """Render every format in recipe.outputs. Returns {canvas: path}. Formats
+    render in parallel (each is its own chain of GPU encodes); a single
+    format is written as '<base>.mp4', several as '<base> 9x16.mp4' etc."""
+    canvases = recipe.outputs or [recipe.canvas]
+    total = len(canvases)
+
+    def one(canvas: str) -> tuple[str, Path]:
+        name = f"{base_name}.mp4" if total == 1 else f"{base_name} {tag(canvas)}.mp4"
+
+        def progress(i: int, n: int, label: str) -> None:
+            if on_progress:
+                on_progress(i, n, label if total == 1 else f"[{canvas}] {label}")
+
+        path = render(
+            replace(recipe, canvas=canvas), sources, out_dir / name,
+            banner=banner, banner_assets=banner_assets,
+            cancel_key=cancel_key, on_progress=progress,
+        )
+        return canvas, path
+
+    if total == 1:
+        return dict([one(canvases[0])])
+    with ThreadPoolExecutor(max_workers=max(1, min(parallel, total)), thread_name_prefix="compile") as pool:
+        return dict(pool.map(one, canvases))

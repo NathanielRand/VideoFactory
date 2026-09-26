@@ -28,6 +28,8 @@ export interface CreditStyle {
 
 export interface Recipe {
   canvas?: Canvas
+  /** Every format to render; [0] is the primary (canvas). */
+  outputs?: Canvas[]
   fit?: Fit
   segments?: SegmentSpec[]
   transition?: { type: string; duration?: number }
@@ -44,10 +46,14 @@ export interface Compilation {
   recipe: Recipe
   status: 'draft' | 'queued' | 'rendering' | 'done' | 'failed'
   output_path: string
+  /** {canvas: path} for every rendered format. */
+  outputs: Record<string, string>
   error: string
   created_at: string
   updated_at: string
   problem?: string
+  /** Per format: the platforms this is too long for. */
+  warnings?: Record<string, string[]>
 }
 
 export interface CompilationTemplate {
@@ -110,8 +116,8 @@ export const compilationsApi = {
   remove: (id: number) => request<{ ok: boolean }>(`/compilations/${id}`, { method: 'DELETE' }),
   render: (id: number) =>
     request<{ job_id: number; started: boolean }>(`/compilations/${id}/render`, { method: 'POST' }),
-  mediaUrl: (id: number, updatedAt: string) =>
-    `${API_BASE}/compilations/${id}/media?v=${encodeURIComponent(updatedAt)}`,
+  mediaUrl: (id: number, updatedAt: string, canvas = '') =>
+    `${API_BASE}/compilations/${id}/media?canvas=${encodeURIComponent(canvas.replace(':', 'x'))}&v=${encodeURIComponent(updatedAt)}`,
   sourceUrl: (videoId: string) => `${API_BASE}/compilations/source/${encodeURIComponent(videoId)}`,
   templates: () => request<CompilationTemplate[]>('/compilation-templates'),
   saveTemplate: (name: string, config: Recipe) =>

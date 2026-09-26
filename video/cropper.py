@@ -28,6 +28,7 @@ from video.encoding import audio_filter_args, video_encoder_args
 
 CAM_H = 672    # webcam band height in the 1080x1920 split layout (35%)
 GAME_H = 1248  # gameplay band height (65%)
+VERTICAL = (1080, 1920)  # the Shorts canvas; every other size is a Video Factory format variant
 
 
 def render_vertical(
@@ -38,11 +39,18 @@ def render_vertical(
     vf_extra: str = "",
     cam_position: str = "top",
     normalize: bool = True,
+    size: tuple[int, int] = VERTICAL,
 ) -> Path:
     """vf_extra: an optional FFmpeg filter fragment (color preset) applied
     after scaling and before captions, so captions stay unfiltered.
     cam_position: 'top' | 'bottom' — which band the facecam occupies in the
-    split (gameplay + webcam) layout. Ignored by the other modes."""
+    split (gameplay + webcam) layout. Ignored by the other modes.
+    size: output frame (W, H). 1080x1920 unless a format variant asks for
+    1:1 / 4:5 / 16:9; the crop follows the target shape, never stretched."""
+    if tracking["mode"] == "split" and tuple(size) != VERTICAL:
+        # The stacked webcam-over-gameplay layout is a vertical design; in any
+        # other shape the honest fallback is the whole frame on a blur.
+        tracking = {**tracking, "mode": "fit_blur", "region": None}
     if tracking["mode"] == "split":
         return _render_split(
             clip_path, tracking["webcam_box"], output_path, ass_path, vf_extra,
@@ -51,11 +59,11 @@ def render_vertical(
     if tracking["mode"] == "fit_blur":
         return _render_fit_blur(
             clip_path, tracking.get("region"), output_path, ass_path, vf_extra,
-            normalize=normalize,
+            normalize=normalize, size=size,
         )
     return _render_tracked(
         clip_path, tracking["path"], output_path, ass_path, vf_extra,
-        face_y=tracking.get("face_y"), normalize=normalize,
+        face_y=tracking.get("face_y"), normalize=normalize, size=size,
     )
 
 
@@ -66,6 +74,7 @@ def _render_fit_blur(
     ass_path: Path | None,
     vf_extra: str = "",
     normalize: bool = True,
+    size: tuple[int, int] = VERTICAL,
 ) -> Path:
     """The subject's bounding region (normalized x0,y0,x1,y1) shown at FULL
     output width on a heavily blurred backdrop — blurred bands land on the top
@@ -80,19 +89,25 @@ def _render_fit_blur(
     rw, rh, rx, ry = x1 - x0, y1 - y0, x0, y0
     crop_region = f"crop=iw*{rw:.4f}:ih*{rh:.4f}:iw*{rx:.4f}:ih*{ry:.4f}"
 
-    # Background: the same crop, blown up to COVER 1080x1920, then destroyed:
+    W, H = size
+    sw, sh = max(2, W // 8 // 2 * 2), max(2, H // 8 // 2 * 2)
+    # Background: the same crop, blown up to COVER the canvas, then destroyed:
     # downscaled hard + blurred + upscaled = an unrecognizable color wash.
     bg = (
-        f"{crop_region},scale=1080:1920:force_original_aspect_ratio=increase,"
-        f"crop=1080:1920,scale=135:240,gblur=sigma=12,scale=1080:1920:flags=bilinear"
+        f"{crop_region},scale={W}:{H}:force_original_aspect_ratio=increase,"
+        f"crop={W}:{H},scale={sw}:{sh},gblur=sigma=12,scale={W}:{H}:flags=bilinear"
     )
-    # Foreground: full width; height follows the region's own aspect ratio
-    # (capped at the screen so an unusually tall region can never overflow).
-    fg = (
-        f"{crop_region},scale=1080:-2:flags=lanczos,crop=w=1080:h=min(ih\\,1920)"
-        + (f",{vf_extra}" if vf_extra else "")
-    )
-    filters = f"[0:v]split=2[a][b];[a]{bg}[bg];[b]{fg}[fg];[bg][fg]overlay=0:(H-h)/2,setsar=1[v]"
+    if (W, H) == VERTICAL:
+        # Foreground: full width; height follows the region's own aspect ratio
+        # (capped at the screen so an unusually tall region can never overflow).
+        fg = f"{crop_region},scale=1080:-2:flags=lanczos,crop=w=1080:h=min(ih\\,1920)"
+    else:
+        # Other shapes: as large as fits, keeping the region's aspect ratio.
+        fg = (f"{crop_region},scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+              f"scale=trunc(iw/2)*2:trunc(ih/2)*2")
+    if vf_extra:
+        fg += f",{vf_extra}"
+    filters = f"[0:v]split=2[a][b];[a]{bg}[bg];[b]{fg}[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v]"
     if ass_path is not None:
         filters += f";[v]subtitles={ass_path.name}[v2]"
         vout = "[v2]"
@@ -129,7 +144,10 @@ def _render_tracked(
     vf_extra: str = "",
     face_y: float | None = None,
     normalize: bool = True,
+    size: tuple[int, int] = VERTICAL,
 ) -> Path:
+    W, H = size
+    vertical = tuple(size) == VERTICAL
     with video_capture(clip_path) as cap:
 
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -141,8 +159,9 @@ def _render_tracked(
         # instead: shown at full output width it's shorter than the screen, so it
         # can start below the tab area — blurred bands land on top/bottom ONLY
         # (never at the sides), and the wider view shows more of the scene.
-        top_safe = face_y is not None and face_y < 0.25
-        crop_w = int(src_h * (4 / 5 if top_safe else 9 / 16))
+        # Only the 9:16 Shorts canvas sits under a platform tab bar.
+        top_safe = vertical and face_y is not None and face_y < 0.25
+        crop_w = int(src_h * (4 / 5 if top_safe else W / H))
         crop_w -= crop_w % 2  # even width required by H.264
         crop_w = min(crop_w, src_w)
 
@@ -238,8 +257,15 @@ def _render_tracked(
             _run_ffmpeg_piped(cmd, ass_path, produce)
             return output_path
 
-        # Uniform scale to 1080x1920 + color filter + captions + mux audio.
-        vf = "scale=1080:1920:flags=lanczos,setsar=1"
+        # Uniform scale to the canvas + color filter + captions + mux audio.
+        # The crop already has the canvas's shape, unless the source was too
+        # narrow for it (a vertical source asked for 1:1): then fit and pad
+        # rather than stretch.
+        if abs(crop_w * H - src_h * W) <= 2 * H:
+            vf = f"scale={W}:{H}:flags=lanczos,setsar=1"
+        else:
+            vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                  f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1")
         if vf_extra:
             vf += f",{vf_extra}"
         if ass_path is not None:

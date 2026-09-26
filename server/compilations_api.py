@@ -52,11 +52,19 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
         return comp
 
     def _problem(d, recipe: dict, *, require_segments: bool) -> str:
+        return _check(d, recipe, require_segments=require_segments)[0]
+
+    def _check(d, recipe: dict, *, require_segments: bool) -> tuple[str, dict]:
+        """(problem, {format: [platforms it is too long for]})."""
         try:
-            store.validate(d, recipe, config, require_segments=require_segments)
-            return ""
+            parsed = store.validate(d, recipe, config, require_segments=require_segments)
         except RecipeError as e:
-            return str(e)
+            return str(e), {}
+        return "", store.warnings(parsed)
+
+    def _annotate(d, comp: dict) -> dict:
+        comp["problem"], comp["warnings"] = _check(d, comp["recipe"], require_segments=False)
+        return comp
 
     # ---- options the editor offers ------------------------------------------
 
@@ -125,9 +133,7 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
     def get_compilation(comp_id: int):
         d = db()
         try:
-            comp = _get(d, comp_id)
-            comp["problem"] = _problem(d, comp["recipe"], require_segments=False)
-            return comp
+            return _annotate(d, _get(d, comp_id))
         finally:
             d.close()
 
@@ -139,9 +145,7 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
             if comp["status"] in ("queued", "rendering"):
                 raise HTTPException(409, "This compilation is rendering. Wait for it to finish, or cancel it.")
             store.update(d, comp_id, title=body.title, recipe=body.recipe)
-            comp = store.get(d, comp_id)
-            comp["problem"] = _problem(d, comp["recipe"], require_segments=False)
-            return comp
+            return _annotate(d, store.get(d, comp_id))
         finally:
             d.close()
 
@@ -181,15 +185,18 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
         return {"job_id": job_id, "started": started}
 
     @app.get("/compilations/{comp_id}/media")
-    def compilation_media(comp_id: int):
+    def compilation_media(comp_id: int, canvas: str = ""):
+        """The rendered file; `canvas` (e.g. 4x5 or 4:5) picks one format."""
         d = db()
         try:
             comp = _get(d, comp_id)
         finally:
             d.close()
-        if not comp["output_path"]:
-            raise HTTPException(404, "not rendered yet")
-        path = Path(comp["output_path"]).resolve()
+        wanted = canvas.replace("x", ":")
+        chosen = (comp.get("outputs") or {}).get(wanted) if wanted else comp["output_path"]
+        if not chosen:
+            raise HTTPException(404, "not rendered in that format yet")
+        path = Path(chosen).resolve()
         if not path.exists() or Path(data_dir).resolve() not in path.parents:
             raise HTTPException(404, "rendered file missing")
         return FileResponse(path, media_type="video/mp4")

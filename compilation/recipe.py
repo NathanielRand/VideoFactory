@@ -5,7 +5,8 @@ before anything renders. Every limit is enforced by clamping or refusing in
 this one place, so render.py can trust what it is handed.
 
     {
-      "canvas": "16:9",                 # 16:9 | 9:16 | 1:1 | 4:5
+      "canvas": "16:9",                 # 16:9 | 9:16 | 1:1 | 4:5 (the primary format)
+      "outputs": ["16:9", "9:16"],      # every format to render; default [canvas]
       "fit": "blur",                    # blur | pad | crop: filling a mismatched aspect
       "segments": [
         {"video_id": "abc123", "start": 42.0, "end": 58.5,
@@ -29,12 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-CANVASES: dict[str, tuple[int, int]] = {
-    "16:9": (1920, 1080),
-    "9:16": (1080, 1920),
-    "1:1": (1080, 1080),
-    "4:5": (1080, 1350),
-}
+from formats.profiles import CANVASES
+
 FITS = ("blur", "pad", "crop")
 
 # FFmpeg xfade transition names we expose. "none" is a hard cut, joined
@@ -50,7 +47,7 @@ MIN_SEGMENT = 0.5          # seconds; shorter is a flash, not a clip
 MAX_SEGMENTS = 200
 MAX_TRANSITION = 2.0
 MAX_BLUR_REGIONS = 8
-TEMPLATE_KEYS = ("canvas", "fit", "transition", "credits", "banner", "intro", "outro", "normalize_audio")
+TEMPLATE_KEYS = ("canvas", "outputs", "fit", "transition", "credits", "banner", "intro", "outro", "normalize_audio")
 
 
 class RecipeError(ValueError):
@@ -83,6 +80,7 @@ class CreditStyle:
 @dataclass
 class Recipe:
     canvas: str = "16:9"
+    outputs: list[str] = field(default_factory=list)  # every format; [0] is `canvas`
     fit: str = "blur"
     segments: list[SegmentSpec] = field(default_factory=list)
     transition: str = "none"
@@ -145,6 +143,17 @@ def parse(
     canvas = str(data.get("canvas") or "16:9")
     if canvas not in CANVASES:
         raise RecipeError(f"canvas must be one of {', '.join(CANVASES)}")
+    raw_outputs = data.get("outputs") or [canvas]
+    if not isinstance(raw_outputs, list):
+        raise RecipeError("outputs must be a list of formats")
+    outputs: list[str] = []
+    for o in raw_outputs:
+        if str(o) not in CANVASES:
+            raise RecipeError(f"output format {o!r} is not one of {', '.join(CANVASES)}")
+        if str(o) not in outputs:
+            outputs.append(str(o))
+    # The primary format is always the first output.
+    canvas = outputs[0]
     fit = str(data.get("fit") or "blur")
     if fit not in FITS:
         raise RecipeError(f"fit must be one of {', '.join(FITS)}")
@@ -214,6 +223,7 @@ def parse(
 
     return Recipe(
         canvas=canvas,
+        outputs=outputs,
         fit=fit,
         segments=segments,
         transition=ttype,

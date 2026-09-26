@@ -554,6 +554,11 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         app, config=config, db=db, data_dir=data_dir, worker=worker, broadcaster=broadcaster
     )
 
+    # Video Factory: output formats, and AI clips rendered in other shapes.
+    from server import formats_api
+
+    formats_api.install(app, db=db, data_dir=data_dir, worker=worker, broadcaster=broadcaster)
+
     # Streamer integrations such as the OBS plugin: hand over a finished stream,
     # find its VOD, report progress. Its own module for the same reason.
     from server import integrations

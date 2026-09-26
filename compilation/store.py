@@ -13,8 +13,9 @@ from datetime import datetime
 from pathlib import Path
 
 from compilation import recipe as recipe_mod
-from compilation.render import SourceInfo, render
+from compilation.render import SourceInfo, render_all
 from core.paths import cached_source, resolve_data_dir
+from formats.profiles import length_warnings
 
 STATUSES = ("draft", "queued", "rendering", "done", "failed")
 
@@ -27,10 +28,11 @@ def _row(r: sqlite3.Row | None) -> dict | None:
     if r is None:
         return None
     d = dict(r)
-    try:
-        d["recipe"] = json.loads(d.get("recipe") or "{}")
-    except ValueError:
-        d["recipe"] = {}
+    for key in ("recipe", "outputs"):
+        try:
+            d[key] = json.loads(d.get(key) or "{}")
+        except ValueError:
+            d[key] = {}
     return d
 
 
@@ -74,8 +76,13 @@ def update(db, comp_id: int, *, title: str | None = None, recipe: dict | None = 
     return cur.rowcount > 0
 
 
-def set_status(db, comp_id: int, status: str, *, output_path: str | None = None, error: str = "") -> None:
+def set_status(
+    db, comp_id: int, status: str, *, output_path: str | None = None,
+    outputs: dict[str, str] | None = None, error: str = "",
+) -> None:
     assert status in STATUSES, status
+    if outputs is not None:
+        db.conn.execute("UPDATE compilations SET outputs = ? WHERE id = ?", (json.dumps(outputs), comp_id))
     if output_path is None:
         db.conn.execute(
             "UPDATE compilations SET status = ?, error = ?, updated_at = ? WHERE id = ?",
@@ -206,9 +213,18 @@ def resolve_banner(db, banner: dict | None) -> dict | None:
     return banner
 
 
-def _file_name(title: str, comp_id: int) -> str:
+def _base_name(title: str, comp_id: int) -> str:
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title).strip().rstrip(". ")[:60].strip()
-    return f"{cleaned or 'Compilation'} [{comp_id}].mp4"
+    return f"{cleaned or 'Compilation'} [{comp_id}]"
+
+
+def warnings(parsed: recipe_mod.Recipe) -> dict[str, list[str]]:
+    """Per format, the platforms this compilation is too long for."""
+    segs = parsed.segments
+    total = sum(s.duration for s in segs)
+    if parsed.transition != "none" and len(segs) > 1:
+        total -= (len(segs) - 1) * parsed.transition_duration
+    return {c: w for c in (parsed.outputs or [parsed.canvas]) if (w := length_warnings(c, total))}
 
 
 def output_dir(config: dict) -> Path:
@@ -225,20 +241,26 @@ def run(db, comp_id: int, config: dict, on_progress=None) -> Path:
     try:
         parsed = validate(db, comp["recipe"], config)
         sources = sources_for(db, [s.video_id for s in parsed.segments], data_dir / "downloads")
-        out = render(
+        outs = render_all(
             parsed,
             sources,
-            output_dir(config) / _file_name(comp["title"], comp_id),
+            output_dir(config),
+            _base_name(comp["title"], comp_id),
             banner=resolve_banner(db, parsed.banner),
             banner_assets=data_dir / "branding" / "assets",
             cancel_key=cancel_key(comp_id),
             on_progress=on_progress,
+            parallel=int((config.get("video") or {}).get("parallel_renders", 2)),
         )
     except Exception as e:
         set_status(db, comp_id, "failed", error=str(e)[:2000])
         raise
-    set_status(db, comp_id, "done", output_path=str(out))
-    return out
+    primary = outs[parsed.outputs[0]]
+    set_status(
+        db, comp_id, "done", output_path=str(primary),
+        outputs={c: str(p) for c, p in outs.items()},
+    )
+    return primary
 
 
 def cancel_key(comp_id: int) -> str:

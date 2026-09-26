@@ -336,9 +336,21 @@ CREATE TABLE IF NOT EXISTS compilations (
     recipe      TEXT NOT NULL DEFAULT '{}',
     status      TEXT NOT NULL DEFAULT 'draft',   -- draft | queued | rendering | done | failed
     output_path TEXT NOT NULL DEFAULT '',
+    outputs     TEXT NOT NULL DEFAULT '{}',      -- {canvas: path}, one per rendered format
     error       TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
+);
+
+-- A clip rendered in another shape (formats/variants.py). `stale` is set when
+-- the clip itself is re-rendered, so the UI can offer to refresh its variants.
+CREATE TABLE IF NOT EXISTS clip_variants (
+    clip_id    INTEGER NOT NULL,
+    canvas     TEXT NOT NULL,              -- 9:16 | 16:9 | 1:1 | 4:5
+    path       TEXT NOT NULL,
+    stale      INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (clip_id, canvas)
 );
 
 CREATE TABLE IF NOT EXISTS compilation_templates (
@@ -412,6 +424,10 @@ class StateDB:
             self.conn.execute("ALTER TABLE videos ADD COLUMN process_seconds REAL DEFAULT 0")
         if "creator_id" not in video_cols:
             self.conn.execute("ALTER TABLE videos ADD COLUMN creator_id INTEGER")
+        # Video Factory: compilations gained per-format outputs after the table shipped.
+        comp_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(compilations)")}
+        if comp_cols and "outputs" not in comp_cols:
+            self.conn.execute("ALTER TABLE compilations ADD COLUMN outputs TEXT NOT NULL DEFAULT '{}'")
         # Video Factory: who to credit when a video is reused in a compilation.
         # rights: own | licensed | permission | fair_use | unknown.
         for column, ddl in (
@@ -644,7 +660,7 @@ class StateDB:
     # These two lift the dependent rows out of the way and put them back on
     # the new id.
 
-    _CLIP_DEPENDENTS = ("uploads", "clip_translations", "clip_feedback")
+    _CLIP_DEPENDENTS = ("uploads", "clip_translations", "clip_feedback", "clip_variants")
 
     def detach_clip_rows(self, clip_id: int) -> dict[str, list[dict]]:
         """Read and remove every row that REFERENCES this clip, so the clip
