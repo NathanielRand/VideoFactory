@@ -41,7 +41,7 @@ Run the checks without installing Python:
 ```
 docker compose run --rm engine pytest
 docker compose run --rm engine ruff check .
-docker compose run --rm ui npm run typecheck
+docker compose run --rm ui pnpm run typecheck
 ```
 
 Pull a model the first time:
@@ -85,7 +85,7 @@ the console and you will see exactly which call it was.
 Without Docker, the same thing is:
 
 ```
-cd ui && npm run dev:web
+cd ui && pnpm run dev:web
 ```
 
 That covers most interface work. When you need the real thing: anything
@@ -94,7 +94,7 @@ app. Run Electron on your host against the containerised engine:
 
 ```
 docker compose up -d engine ollama      # engine on :8765
-cd ui && BACKEND_EXTERNAL=1 npm run dev
+cd ui && BACKEND_EXTERNAL=1 pnpm run dev
 ```
 
 `BACKEND_EXTERNAL=1` stops Electron spawning its own backend, so it talks to

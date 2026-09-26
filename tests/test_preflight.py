@@ -208,11 +208,23 @@ def test_absent_whisper_weights_warn_without_blocking(monkeypatch):
     would be wrong — but it happens with no progress bar, minutes into a job,
     and is indistinguishable from a hang. Say so instead."""
     monkeypatch.setattr(preflight, "bundled_whisper_sizes", list)
+    monkeypatch.setattr(preflight, "cached_whisper_sizes", lambda _c: [])
     check = preflight.check_whisper("auto")
 
     assert check.ok is False
     assert check.blocking is False
     assert check.fix, "the user should be told the pause is coming"
+
+
+def test_weights_already_in_the_download_cache_are_fine(monkeypatch):
+    """A checkout bundles nothing, but a model faster-whisper already fetched
+    will not be fetched again, so there is no pause to warn about."""
+    monkeypatch.setattr(preflight, "bundled_whisper_sizes", list)
+    monkeypatch.setattr(preflight, "cached_whisper_sizes", lambda _c: ["large-v3-turbo"])
+    check = preflight.check_whisper("auto")
+
+    assert check.ok is True
+    assert "downloaded" in check.detail
 
 
 def test_auto_needs_both_sizes(monkeypatch):

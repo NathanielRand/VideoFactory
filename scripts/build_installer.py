@@ -41,7 +41,7 @@ def say(step: str, message: str) -> None:
 
 
 def run(cmd: list[str], cwd: Path, what: str) -> None:
-    # npm and npx are .CMD batch files on Windows, and CreateProcess cannot
+    # pnpm, npm and npx are .CMD batch files on Windows, and CreateProcess cannot
     # run those by bare name — it needs the resolved path. Resolving here
     # (rather than using shell=True) keeps arguments from being re-parsed by
     # cmd.exe, which matters for paths with spaces.
@@ -168,8 +168,8 @@ def smoke_test_backend() -> None:
 def build_ui() -> None:
     say("4/5", "building the desktop front end")
     if not (UI / "node_modules").exists():
-        run(["npm", "install"], UI, "npm install")
-    run(["npm", "run", "build"], UI, "Renderer build")
+        run(["pnpm", "install", "--frozen-lockfile"], UI, "pnpm install")
+    run(["pnpm", "run", "build"], UI, "Renderer build")
 
 
 def _refresh_sandbox_test(release: Path) -> None:

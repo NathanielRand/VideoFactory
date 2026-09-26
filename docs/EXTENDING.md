@@ -183,7 +183,7 @@ tested and what changed.
 ```
 pytest                 # deterministic logic
 ruff check .           # lint
-cd ui && npm run typecheck && npm run build
+cd ui && pnpm run typecheck && pnpm run build
 ```
 
 CI runs all of that. It is fast, and it is narrow: a runner has no GPU, no

@@ -15,6 +15,11 @@ More:
 import argparse
 import os
 import sys
+
+# Windows without Developer Mode cannot make symlinks, so the Hugging Face cache
+# falls back to plain copies (works, a little more disk) and prints a long
+# warning on every transcription. The fallback is fine; the noise is not.
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 from pathlib import Path
 
 

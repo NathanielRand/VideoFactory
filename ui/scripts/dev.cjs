@@ -4,7 +4,7 @@
 delete process.env.ELECTRON_RUN_AS_NODE
 
 const { spawnSync } = require('node:child_process')
-const result = spawnSync('npx', ['electron-vite', 'dev'], {
+const result = spawnSync('pnpm', ['exec', 'electron-vite', 'dev'], {
   stdio: 'inherit',
   shell: true,
   env: process.env

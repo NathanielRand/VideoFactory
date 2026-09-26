@@ -144,7 +144,7 @@ Say plainly which kind of problem you found, because the fixes are unrelated:
 If you want to make the change yourself:
 
 1. Fork, and edit `ui/src/renderer/src/locales/<code>.json`.
-2. Run it: `cd ui && npm install && npm run dev`, then switch to your language.
+2. Run it: `cd ui && pnpm install && pnpm run dev`, then switch to your language.
 3. Open a pull request that mentions the issue number.
 
 Change only your own locale file. Nothing else needs touching, and a pull

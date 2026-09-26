@@ -1,4 +1,4 @@
-/** Serves the renderer on its own, in a browser — `npm run dev:web`.
+/** Serves the renderer on its own, in a browser — `pnpm run dev:web`.
  *
  *  The app is built by electron-vite, which reads `electron.vite.config.ts`
  *  and knows about three bundles (main, preload, renderer). That config

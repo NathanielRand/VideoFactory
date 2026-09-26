@@ -30,23 +30,23 @@ The roadmap is in [docs/plan.md](docs/plan.md). How the code fits together is in
 
 ## Dev setup (Windows)
 
-Needs Python **3.11**, Node 18+, FFmpeg on PATH, [Ollama](https://ollama.com), and an
+Needs Python **3.11**, Node 22+ with pnpm 11 (`corepack enable` picks the pinned version), FFmpeg on PATH, [Ollama](https://ollama.com), and an
 NVIDIA GPU for the fast path (CPU works, slowly).
 
 ```powershell
 py -3.11 -m venv .venv
 .venv\Scripts\python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-.venv\Scripts\python -m pip install -r requirements.txt ruff pytest
+.venv\Scripts\python -m pip install -r requirements.txt ruff pytest httpx2
 ollama pull gemma:7b          # the model the scoring is tuned on (8 GB VRAM)
 
 cd ui
-npm install
-npm run dev                   # Electron + the backend (uses ..\.venv automatically)
+pnpm install
+pnpm run dev                   # Electron + the backend (uses ..\.venv automatically)
 ```
 
 - The processing queue **starts paused** on purpose. Press Start once you've added videos.
 - Backend only: `.venv\Scripts\python main.py serve`, then `GET http://127.0.0.1:8765/health/preflight`.
-- Tests: `.venv\Scripts\python -m pytest -m "not slow"`. UI: `cd ui && npm run typecheck`.
+- Tests: `.venv\Scripts\python -m pytest -m "not slow"`. UI: `cd ui && pnpm run typecheck`.
 - Settings: `config/settings.yaml`. Every LLM prompt: `config/prompts/`.
 - Local API reference: [docs/API.md](docs/API.md).
 

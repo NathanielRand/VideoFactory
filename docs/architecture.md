@@ -25,7 +25,7 @@ Electron + React (ui/)  ──HTTP/WS 127.0.0.1:8765──►  FastAPI (server/a
 - **Per-job settings** are a JSON snapshot in `jobs.payload`, applied onto a deep copy
   of `config/settings.yaml`.
 - **The UI never touches Python or the filesystem.** Everything goes through the API.
-  `npm run dev:web` runs the UI in a browser.
+  `pnpm run dev:web` runs the UI in a browser.
 
 ## Where each plan stage lives today
 
@@ -139,7 +139,7 @@ Original design notes:
   `channel` there is what our credit captions will read.
 - Tests: `.venv/Scripts/python -m pytest -m "not slow"` (940 pass). Two upstream scan tests needed
   `.venv` added to their skip lists, and the outro tests now force the card on inside their fixture.
-- UI: `cd ui && npm install && npm run dev`. This launches Electron and spawns the backend. We patched
+- UI: `cd ui && pnpm install && pnpm run dev`. This launches Electron and spawns the backend. We patched
   `ui/src/main/index.ts` so dev mode uses `.venv/Scripts/python.exe` when it exists (upstream calls the bare PATH
   `python`, which here is 3.14 with no dependencies). Stop any standalone `main.py serve` first, because both use port 8765.
 - The Electron dev renderer is pinned to **port 5273** (`strictPort`), which is in the engine's CORS list.

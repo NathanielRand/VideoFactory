@@ -491,8 +491,9 @@ ipcMain.handle('open-external', (_event, url: unknown) => {
 // sitting on the clipboard is never readable from the page.
 const KEY_SHAPE = /^[A-Za-z0-9_\-.]{20,200}$/
 
-ipcMain.handle('read-clipboard-key', () => {
-  const text = clipboard.readText().trim()
+ipcMain.handle('read-clipboard-key', async () => {
+  // Async since Electron 44 (clipboard reads return a Promise).
+  const text = (await clipboard.readText()).trim()
   return KEY_SHAPE.test(text) ? text : ''
 })
 

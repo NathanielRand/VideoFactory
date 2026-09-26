@@ -1,0 +1,31 @@
+# pnpm settings for the desktop app (Video Factory switched from npm to pnpm).
+
+# Packages allowed to run install scripts. esbuild's fetches its native build.
+# Electron 44 has no install script (it downloads its binary on first launch
+# into its own cache); it stays allowed so an older Electron still installs.
+# electron-winstaller only matters for Squirrel installers; we build NSIS.
+allowBuilds:
+  electron: true
+  esbuild: true
+  electron-winstaller: false
+
+# An npm-style flat node_modules. electron-builder packages the app by walking
+# node_modules, and pnpm's default symlinked layout trips it up.
+nodeLinker: hoisted
+
+# Carried over from npm's "overrides" in package.json: tar below 7.5.22 has
+# published path-traversal advisories, and electron-builder pulls it in.
+overrides:
+  tar: ^7.5.22
+
+# Deprecated packages that even the latest electron-builder (26.x) and
+# electron-updater (6.x) still depend on. They run only at build/update time,
+# never inside the app, and forcing newer majors under them breaks their APIs.
+# Listed so a NEW deprecation still stands out. Re-check on each upgrade.
+allowedDeprecatedVersions:
+  boolean: 3.2.0          # global-agent <- @electron/get <- app-builder-lib
+  glob: 7.2.3             # @electron/asar <- app-builder-lib
+  inflight: 1.0.6         # glob@7
+  rimraf: 2.6.3           # temp <- electron-winstaller (Squirrel only)
+  lodash.isequal: 4.5.0   # electron-updater
+

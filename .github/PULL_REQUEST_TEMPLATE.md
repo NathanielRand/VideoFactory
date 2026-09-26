@@ -17,7 +17,7 @@ Fixes #
      is useful; "works fine" isn't. If it touches clipping, tracking, captions, or
      rendering, please test on a REAL video, not just a unit-sized one. -->
 
-- [ ] `npm run typecheck` passes (in `ui/`)
+- [ ] `pnpm run typecheck` passes (in `ui/`)
 - [ ] Tried the affected flow in the running app
 - [ ] Tested on a real video: platform and length:
 

@@ -25,12 +25,12 @@ usernames are redacted before reports ever leave the reporter's machine.
 
 ```
 pip install -r requirements.txt
-pip install ruff pytest          # the checks CI runs
-cd ui && npm install
-npm run dev                      # starts Electron + the backend together
+pip install ruff pytest httpx2   # the checks CI runs (httpx2: FastAPI's test client)
+cd ui && pnpm install
+pnpm run dev                      # starts Electron + the backend together
 ```
 
-Working on the interface only? `npm run dev:web` serves it in a browser
+Working on the interface only? `pnpm run dev:web` serves it in a browser
 instead, with no Electron and no rebuild loop. The Electron-only calls
 (file pickers, the donate window) are stubbed there. See
 `ui/src/renderer/src/lib/browserShim.ts`.
@@ -40,7 +40,7 @@ Before a PR:
 ```
 pytest                                   # deterministic logic
 ruff check .                             # lint
-cd ui && npm run typecheck && npm run build
+cd ui && pnpm run typecheck && pnpm run build
 ```
 
 Want to add a language, a model, a platform or an export format? Each is a
@@ -143,7 +143,7 @@ Things worth knowing before you change any of it:
 ## Pull requests
 
 - Keep PRs focused on one issue; link it ("Fixes #123").
-- `npm run typecheck` clean; try the affected flow in the running app.
+- `pnpm run typecheck` clean; try the affected flow in the running app.
 - Match the style around you: comments explain *why*, not *what*.
 
 CI runs on every PR: Python compiles, config and prompts parse, the desktop

@@ -179,6 +179,30 @@ def check_cloud_transcription(provider: str, data_dir) -> Check:
     return Check(name="transcription", ok=True, detail=f"online with {spec.label} (your API key)")
 
 
+# faster-whisper's Hugging Face repos for the sizes the app loads ("auto"
+# picks large-v3-turbo on a GPU, small on CPU). Kept here instead of importing
+# faster_whisper, which pulls in CTranslate2 and costs seconds per check.
+_WHISPER_REPOS = {
+    "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "small": "Systran/faster-whisper-small",
+}
+
+
+def cached_whisper_sizes(configured: str) -> list[str]:
+    """Sizes already in the local Hugging Face cache (no network)."""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except ImportError:
+        return []
+    wanted = ("large-v3-turbo", "small") if configured == "auto" else (configured,)
+    found = []
+    for size in wanted:
+        repo = _WHISPER_REPOS.get(size)
+        if repo and isinstance(try_to_load_from_cache(repo, "model.bin"), str):
+            found.append(size)
+    return found
+
+
 def check_whisper(configured: str) -> Check:
     """Transcription weights.
 
@@ -189,6 +213,17 @@ def check_whisper(configured: str) -> Check:
     """
     have = bundled_whisper_sizes()
     if not have:
+        # A checkout has nothing bundled, but faster-whisper keeps what it
+        # fetched in the Hugging Face cache: already there means no download.
+        cached = cached_whisper_sizes(configured)
+        if cached:
+            return Check(
+                name="whisper",
+                ok=True,
+                blocking=False,
+                detail=f"{', '.join(cached)} downloaded",
+                fix="",
+            )
         return Check(
             name="whisper",
             ok=False,

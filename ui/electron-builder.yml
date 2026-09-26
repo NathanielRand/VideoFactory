@@ -92,7 +92,7 @@ win:
 
 # Microsoft Store packaging. NOT part of the default build: `win.target` above
 # is untouched, and this target is selected explicitly by
-# scripts/build_msix.py, so `npm run package` still produces exactly the
+# scripts/build_msix.py, so `pnpm run package` still produces exactly the
 # installer it always did.
 #
 # Only one capability is declared — runFullTrust — because that is all a

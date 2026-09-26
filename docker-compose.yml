@@ -62,7 +62,7 @@ services:
     # `vite` would find no config: the app is built by electron-vite, whose
     # config describes three bundles and cannot serve one of them on its own.
     command: >
-      sh -c "npm install && npm run dev:web"
+      sh -c "corepack enable && pnpm install --frozen-lockfile && pnpm run dev:web"
     environment:
       # Vite needs polling to see edits made on a Windows or macOS host
       # through a bind mount; inotify does not cross that boundary.

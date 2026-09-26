@@ -14,6 +14,7 @@ import shutil
 import threading
 import traceback
 import urllib.error
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import requests as _requests
@@ -445,11 +446,23 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
     from server import feedback as feedback_mod
 
     feedback_mod.install_log_capture()  # pipeline prints -> bug-report log tail
-    app = FastAPI(title="Video Factory API", version="0.1")
+
+    # Startup/shutdown as a lifespan (FastAPI deprecated @app.on_event). The
+    # two hooks are defined further down, once the workers they start exist;
+    # this runs only when the server starts, by which time they all do.
+    @asynccontextmanager
+    async def _lifespan(_app):
+        await _startup()
+        try:
+            yield
+        finally:
+            await _shutdown()
+
+    app = FastAPI(title="Video Factory API", version="0.1", lifespan=_lifespan)
     app.add_middleware(
         CORSMiddleware,
         # 5273: the Electron dev renderer (ui/electron.vite.config.ts).
-        # 5173: `npm run dev:web`, the browser-only UI (ui/vite.config.mts).
+        # 5173: `pnpm run dev:web`, the browser-only UI (ui/vite.config.mts).
         allow_origins=[
             "http://localhost:5273", "http://127.0.0.1:5273",
             "http://localhost:5173", "http://127.0.0.1:5173",
@@ -485,7 +498,6 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
     publish_worker = PublishWorker(config, db_path, data_dir)
 
-    @app.on_event("startup")
     async def _startup():
         broadcaster.attach_loop(asyncio.get_running_loop())
         worker.start()
@@ -493,7 +505,6 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         stream_watcher.start()
         channel_watcher.start()
 
-    @app.on_event("shutdown")
     async def _shutdown():
         worker.stop()
         publish_worker.stop()
