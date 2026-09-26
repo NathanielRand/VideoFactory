@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from compilation import store
 from compilation.recipe import CANVASES, FITS, POSITIONS, TRANSITIONS, RecipeError
 from core import queue
-from core.paths import cached_source
+from core.paths import cached_source, discard
 
 
 class CompilationIn(BaseModel):
@@ -145,6 +145,10 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
             if comp["status"] in ("queued", "rendering"):
                 raise HTTPException(409, "This compilation is rendering. Wait for it to finish, or cancel it.")
             store.update(d, comp_id, title=body.title, recipe=body.recipe)
+            if body.title is not None and body.title.strip() != comp["title"]:
+                # Keep the files named after the compilation, so a rename
+                # never leaves videos behind under the old name.
+                store.rename_files(d, comp_id, store.get(d, comp_id)["title"])
             return _annotate(d, store.get(d, comp_id))
         finally:
             d.close()
@@ -201,6 +205,116 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
             raise HTTPException(404, "rendered file missing")
         return FileResponse(path, media_type="video/mp4")
 
+    # ---- versions: every render kept, with the recipe it was made from --------------
+
+    def _serve(path_str: str | None) -> FileResponse:
+        if not path_str:
+            raise HTTPException(404, "not rendered in that format")
+        path = Path(path_str).resolve()
+        if not path.exists() or Path(data_dir).resolve() not in path.parents:
+            raise HTTPException(404, "rendered file missing")
+        return FileResponse(path, media_type="video/mp4")
+
+    @app.get("/compilations/{comp_id}/renders")
+    def list_compilation_renders(comp_id: int):
+        d = db()
+        try:
+            _get(d, comp_id)
+            return store.renders(d, comp_id)
+        finally:
+            d.close()
+
+    @app.get("/compilations/{comp_id}/renders/{render_id}/media")
+    def compilation_render_media(comp_id: int, render_id: int, canvas: str = ""):
+        d = db()
+        try:
+            row = store.get_render(d, comp_id, render_id)
+        finally:
+            d.close()
+        if row is None:
+            raise HTTPException(404, "no such version")
+        outputs = row["outputs"]
+        wanted = canvas.replace("x", ":")
+        return _serve(outputs.get(wanted) if wanted else next(iter(outputs.values()), None))
+
+    @app.post("/compilations/{comp_id}/renders/{render_id}/restore")
+    def restore_compilation_render(comp_id: int, render_id: int):
+        """Put a version's settings and segments back as the current recipe."""
+        d = db()
+        try:
+            comp = _get(d, comp_id)
+            if comp["status"] in ("queued", "rendering"):
+                raise HTTPException(409, "This compilation is rendering. Wait for it to finish, or cancel it.")
+            row = store.get_render(d, comp_id, render_id)
+            if row is None:
+                raise HTTPException(404, "no such version")
+            if row["recipe"] is None:
+                raise HTTPException(400, "This version was rendered before settings were saved with each render.")
+            store.update(d, comp_id, recipe=row["recipe"])
+            return _annotate(d, store.get(d, comp_id))
+        finally:
+            d.close()
+
+    @app.delete("/compilations/{comp_id}/renders/{render_id}")
+    def delete_compilation_render(comp_id: int, render_id: int):
+        d = db()
+        try:
+            comp = _get(d, comp_id)
+            if comp["status"] in ("queued", "rendering"):
+                raise HTTPException(409, "Wait for the render to finish before deleting versions.")
+            if store.get_render(d, comp_id, render_id) is None:
+                raise HTTPException(404, "no such version")
+            gone = store.delete_render(d, comp_id, render_id)
+            return {"deleted": gone, "compilation": _annotate(d, store.get(d, comp_id))}
+        finally:
+            d.close()
+
+    @app.get("/compilation-settings")
+    def get_compilation_settings():
+        d = db()
+        try:
+            return store.load_settings(d)
+        finally:
+            d.close()
+
+    @app.put("/compilation-settings")
+    def put_compilation_settings(body: dict):
+        """Saving a lower keep_versions prunes every compilation to it now,
+        not only at its next render, so the space comes back when asked."""
+        d = db()
+        try:
+            try:
+                saved = store.save_settings(d, body)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "keep_versions must be a whole number")
+            removed = sum(
+                store.prune(d, c["id"]) for c in store.list_all(d) if c["status"] not in ("queued", "rendering")
+            )
+            return {**saved, "removed": removed}
+        finally:
+            d.close()
+
+    @app.get("/compilation-files/unused")
+    def list_unused_compilation_files():
+        d = db()
+        try:
+            files = store.unused_files(d, store.output_dir(config))
+        finally:
+            d.close()
+        return [{"name": p.name, "bytes": p.stat().st_size} for p in files]
+
+    @app.delete("/compilation-files/unused")
+    def delete_unused_compilation_files():
+        """Delete the videos no compilation points at. Listed again at the
+        moment of deleting, so only files that are still unused go."""
+        d = db()
+        try:
+            files = store.unused_files(d, store.output_dir(config))
+        finally:
+            d.close()
+        deleted = [p.name for p in files if discard(p)]
+        return {"deleted": deleted, "kept": [p.name for p in files if p.name not in deleted]}
+
     # ---- templates --------------------------------------------------------------------
 
     @app.get("/compilation-templates")
@@ -218,6 +332,10 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
             problem = _problem(d, body.config, require_segments=False)
             if problem:
                 raise HTTPException(400, problem)
+            # Names are how templates are picked, so two of the same name
+            # would be indistinguishable. Replacing one is a PUT to its id.
+            if store.template_named(d, body.name) is not None:
+                raise HTTPException(409, f"A template called {body.name.strip()!r} already exists")
             tid = store.save_template(d, body.name, body.config)
             return store.get_template(d, tid)
         finally:
@@ -232,6 +350,9 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
             problem = _problem(d, body.config, require_segments=False)
             if problem:
                 raise HTTPException(400, problem)
+            other = store.template_named(d, body.name)
+            if other is not None and other != template_id:
+                raise HTTPException(409, f"A template called {body.name.strip()!r} already exists")
             store.save_template(d, body.name, body.config, template_id)
             return store.get_template(d, template_id)
         finally:

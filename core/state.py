@@ -359,6 +359,19 @@ CREATE TABLE IF NOT EXISTS compilation_templates (
     config     TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL
 );
+
+-- Every render of a compilation that is still on disk: its files and the
+-- exact recipe it was made from (NULL for a render from before versions were
+-- kept). The compilation row's outputs are always the newest of these.
+CREATE TABLE IF NOT EXISTS compilation_renders (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    compilation_id INTEGER NOT NULL,
+    version        INTEGER NOT NULL,
+    recipe         TEXT,
+    outputs        TEXT NOT NULL DEFAULT '{}',   -- {canvas: path}
+    created_at     TEXT NOT NULL,
+    UNIQUE (compilation_id, version)
+);
 """
 
 # Columns set_stream() may change. Names are interpolated into SQL, so they come

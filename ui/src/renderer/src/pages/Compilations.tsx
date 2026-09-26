@@ -6,6 +6,8 @@
 // Every edit autosaves; the server re-validates and reports a `problem`.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import CompilationVersions from '../components/CompilationVersions'
+import CreditControls from '../components/CreditControls'
 import { t } from '../lib/i18n'
 import { CANVAS_ORDER, formatsApi, platformsFor, type FormatsInfo } from '../lib/formats'
 import type { BrandingProfile, Clip } from '../lib/types'
@@ -86,6 +88,24 @@ export default function Compilations(): JSX.Element {
     }
   }, [])
 
+  // Videos in the compilations folder that nothing points at any more.
+  const [unused, setUnused] = useState<{ name: string; bytes: number }[]>([])
+  const refreshUnused = useCallback(async () => {
+    setUnused(await compilationsApi.unusedFiles().catch(() => []))
+  }, [])
+  const cleanUnused = async (): Promise<void> => {
+    const size = unused.reduce((n, f) => n + f.bytes, 0) / 1e6
+    const names = unused.slice(0, 8).map((f) => `• ${f.name}`).join('\n') + (unused.length > 8 ? '\n…' : '')
+    if (!window.confirm(`${t('Delete these videos no compilation uses?')} (${size.toFixed(0)} MB)\n\n${names}`)) return
+    try {
+      const out = await compilationsApi.cleanUnused()
+      if (out.kept.length) setError(`${t('Could not delete (open in another program?)')}: ${out.kept.join(', ')}`)
+    } catch (e) {
+      setError(String((e as Error).message))
+    }
+    void refreshUnused()
+  }
+
   const refreshLibrary = useCallback(async () => {
     try {
       setLibrary(await compilationsApi.library())
@@ -97,10 +117,11 @@ export default function Compilations(): JSX.Element {
   useEffect(() => {
     void refreshList()
     void refreshLibrary()
+    void refreshUnused()
     compilationsApi.templates().then(setTemplates).catch(() => undefined)
     compilationsApi.options().then(setOptions).catch(() => undefined)
     api.branding().then(setBranding).catch(() => undefined)
-  }, [refreshList, refreshLibrary])
+  }, [refreshList, refreshLibrary, refreshUnused])
 
   // Load the selected compilation, and keep polling while it renders.
   useEffect(() => {
@@ -130,13 +151,16 @@ export default function Compilations(): JSX.Element {
       try {
         const c = await compilationsApi.get(selectedId)
         setComp(c)
-        if (c.status !== 'queued' && c.status !== 'rendering') void refreshList()
+        if (c.status !== 'queued' && c.status !== 'rendering') {
+          void refreshList()
+          void refreshUnused() // pruning or a rename may have changed it
+        }
       } catch {
         /* next tick */
       }
     }, 2000)
     return () => clearInterval(id)
-  }, [busy, selectedId, refreshList])
+  }, [busy, selectedId, refreshList, refreshUnused])
 
   /** Apply a change locally now and save it shortly after the last edit. */
   const editRecipe = (fn: (r: Recipe) => Recipe): void => {
@@ -188,10 +212,12 @@ export default function Compilations(): JSX.Element {
     }
   }
 
-  const saveTemplate = async (name: string): Promise<void> => {
+  /** Save the look as a new template, or over `replaceId`. */
+  const saveTemplate = async (name: string, replaceId?: number): Promise<void> => {
     if (!comp || !name.trim()) return
     try {
-      await compilationsApi.saveTemplate(name, comp.recipe)
+      if (replaceId != null) await compilationsApi.updateTemplate(replaceId, name.trim(), comp.recipe)
+      else await compilationsApi.saveTemplate(name.trim(), comp.recipe)
       setTemplates(await compilationsApi.templates())
     } catch (e) {
       setError(String((e as Error).message))
@@ -201,35 +227,43 @@ export default function Compilations(): JSX.Element {
   const libById = useMemo(() => Object.fromEntries(library.map((v) => [v.video_id, v])), [library])
 
   return (
-    <div className="flex h-full min-h-0">
+    // Three columns on a wide screen. Narrower (a portrait monitor), they
+    // stack: the list, the editor, then the library, and the page scrolls as
+    // one. Stacked, the list and library are each capped to a share of the
+    // screen and scroll on their own, and the list lays out in a grid, so
+    // neither crowds out the other.
+    <div className="flex flex-col xl:flex-row xl:h-full xl:min-h-0">
       {/* ---- compilations + templates ---- */}
-      <section className="w-64 shrink-0 border-r border-raised/60 p-4 space-y-4 overflow-y-auto">
+      <section className="xl:w-64 xl:shrink-0 border-b xl:border-b-0 xl:border-r border-raised/60 p-4 space-y-4 max-h-[40vh] xl:max-h-none overflow-y-auto">
         <div className="space-y-2">
           <h2 className="font-semibold">{t('Compilations')}</h2>
-          <input
-            className="input w-full"
-            placeholder={t('New compilation title')}
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && void create()}
-          />
-          <select
-            className="input w-full"
-            value={newTemplate}
-            onChange={(e) => setNewTemplate(e.target.value ? Number(e.target.value) : '')}
-          >
-            <option value="">{t('No template')}</option>
-            {templates.map((tp) => (
-              <option key={tp.id} value={tp.id}>
-                {tp.name}
-              </option>
-            ))}
-          </select>
-          <button className="btn-accent w-full" onClick={() => void create()}>
-            {t('New compilation')}
-          </button>
+          {/* One row when stacked; a column in the narrow left pane. */}
+          <div className="flex flex-col sm:flex-row xl:flex-col gap-2">
+            <input
+              className="input w-full sm:flex-1 xl:flex-none"
+              placeholder={t('New compilation title')}
+              value={newTitle}
+              onChange={(e) => setNewTitle(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && void create()}
+            />
+            <select
+              className="input w-full sm:!w-48 xl:!w-full"
+              value={newTemplate}
+              onChange={(e) => setNewTemplate(e.target.value ? Number(e.target.value) : '')}
+            >
+              <option value="">{t('No template')}</option>
+              {templates.map((tp) => (
+                <option key={tp.id} value={tp.id}>
+                  {tp.name}
+                </option>
+              ))}
+            </select>
+            <button className="btn-accent w-full sm:w-auto xl:w-full shrink-0" onClick={() => void create()}>
+              {t('New compilation')}
+            </button>
+          </div>
         </div>
-        <ul className="space-y-1">
+        <ul className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-1 gap-1">
           {list.map((c) => (
             <li key={c.id}>
               <button
@@ -248,7 +282,7 @@ export default function Compilations(): JSX.Element {
               </button>
             </li>
           ))}
-          {list.length === 0 && <li className="text-xs text-muted">{t('No compilations yet.')}</li>}
+          {list.length === 0 && <li className="text-xs text-muted col-span-full">{t('No compilations yet.')}</li>}
         </ul>
         {templates.length > 0 && (
           <div className="space-y-1">
@@ -269,10 +303,23 @@ export default function Compilations(): JSX.Element {
             ))}
           </div>
         )}
+        {unused.length > 0 && (
+          <div className="space-y-1 col-span-full">
+            <h3 className="label">{t('Storage')}</h3>
+            <div className="flex items-center justify-between gap-2 text-xs text-muted">
+              <span title={unused.map((f) => f.name).join('\n')}>
+                {unused.length} {t('unused video(s)')} · {(unused.reduce((n, f) => n + f.bytes, 0) / 1e6).toFixed(0)} MB
+              </span>
+              <button type="button" className="text-accent hover:underline shrink-0" onClick={() => void cleanUnused()}>
+                {t('Clean up…')}
+              </button>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* ---- editor ---- */}
-      <section className="flex-1 min-w-0 p-5 space-y-4 overflow-y-auto">
+      <section className="xl:flex-1 min-w-0 p-5 space-y-4 xl:overflow-y-auto">
         {error && <div className="card border border-red-500/40 text-sm text-red-300">{error}</div>}
         {!comp && (
           <div className="card text-muted text-sm">
@@ -290,17 +337,25 @@ export default function Compilations(): JSX.Element {
               const saved = await compilationsApi.update(comp.id, { title }).catch(() => null)
               if (saved) setComp({ ...comp, title: saved.title })
               void refreshList()
+              void refreshUnused()
             }}
             editRecipe={editRecipe}
             setSegments={setSegments}
             onRender={() => void render()}
-            onSaveTemplate={(name) => void saveTemplate(name)}
+            onReplaced={(c) => {
+              setComp(c)
+              void refreshList()
+              void refreshUnused()
+            }}
+            templates={templates}
+            onSaveTemplate={(name, replaceId) => void saveTemplate(name, replaceId)}
             onDelete={async () => {
-              if (!window.confirm(t('Delete this compilation? The rendered file stays on disk.'))) return
+              if (!window.confirm(t('Delete this compilation? Its rendered videos stay on disk; remove them any time with Storage → Clean up.'))) return
               try {
                 await compilationsApi.remove(comp.id)
                 setSelectedId(null)
                 void refreshList()
+                void refreshUnused()
               } catch (e) {
                 setError(String((e as Error).message))
               }
@@ -310,7 +365,7 @@ export default function Compilations(): JSX.Element {
       </section>
 
       {/* ---- library ---- */}
-      <section className="w-96 shrink-0 border-l border-raised/60 p-4 overflow-y-auto">
+      <section className="xl:w-96 xl:shrink-0 border-t xl:border-t-0 xl:border-l border-raised/60 p-4 max-h-[50vh] xl:max-h-none overflow-y-auto">
         <Library
           library={library}
           options={options}
@@ -326,6 +381,64 @@ export default function Compilations(): JSX.Element {
 
 // ---- editor -----------------------------------------------------------------------------------
 
+const sameName = (a: string, b: string): boolean => a.trim().toLowerCase() === b.trim().toLowerCase()
+
+/** "Name (2)", "Name (3)", …: the first one no template has. */
+function nextFreeName(name: string, templates: CompilationTemplate[]): string {
+  const base = name.trim().replace(/\s*\(\d+\)$/, '')
+  for (let n = 2; ; n++) {
+    const candidate = `${base} (${n})`
+    if (!templates.some((tp) => sameName(tp.name, candidate))) return candidate
+  }
+}
+
+/** Name the template. A name already in use is caught as you type, with the
+ *  choice to replace that template or save alongside it under a new name. */
+function SaveTemplateForm(props: {
+  name: string
+  setName: (name: string) => void
+  templates: CompilationTemplate[]
+  onSave: (name: string, replaceId?: number) => void
+  onCancel: () => void
+}): JSX.Element {
+  const { name, setName, templates, onSave, onCancel } = props
+  const clash = templates.find((tp) => sameName(tp.name, name))
+  const alt = clash ? nextFreeName(name, templates) : ''
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      <input
+        className="input !w-56"
+        autoFocus
+        placeholder={t('Template name')}
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && name.trim() && !clash && onSave(name)}
+        aria-describedby={clash ? 'template-clash' : undefined}
+      />
+      {clash ? (
+        <>
+          <span id="template-clash" className="text-xs text-amber-400">
+            {t('A template with this name exists.')}
+          </span>
+          <button type="button" className="btn-accent" onClick={() => onSave(clash.name, clash.id)}>
+            {t('Replace it')}
+          </button>
+          <button type="button" className="btn-ghost" onClick={() => onSave(alt)}>
+            {t('Save as')} “{alt}”
+          </button>
+        </>
+      ) : (
+        <button type="button" className="btn-accent" disabled={!name.trim()} onClick={() => onSave(name)}>
+          {t('Save')}
+        </button>
+      )}
+      <button type="button" className="btn-ghost" onClick={onCancel}>
+        {t('Cancel')}
+      </button>
+    </div>
+  )
+}
+
 function Editor(props: {
   comp: Compilation
   busy: boolean
@@ -336,7 +449,10 @@ function Editor(props: {
   editRecipe: (fn: (r: Recipe) => Recipe) => void
   setSegments: (fn: (s: SegmentSpec[]) => SegmentSpec[]) => void
   onRender: () => void
-  onSaveTemplate: (name: string) => void
+  /** The server changed the compilation (a version restored or deleted). */
+  onReplaced: (c: Compilation) => void
+  templates: CompilationTemplate[]
+  onSaveTemplate: (name: string, replaceId?: number) => void
   onDelete: () => void
 }): JSX.Element {
   const { comp, busy, options, branding, libById, editRecipe, setSegments } = props
@@ -365,12 +481,9 @@ function Editor(props: {
   const canvas = r.canvas ?? '16:9'
   const outputs = r.outputs && r.outputs.length > 0 ? r.outputs : [canvas]
   const [formats, setFormats] = useState<FormatsInfo | null>(null)
-  const done = Object.keys(comp.outputs ?? {}).length > 0 ? Object.keys(comp.outputs) : [canvas]
-  const [shown, setShown] = useState<string>(done[0])
   useEffect(() => {
     formatsApi.info().then(setFormats).catch(() => undefined)
   }, [])
-  useEffect(() => setShown(done[0]), [comp.id, comp.updated_at]) // eslint-disable-line react-hooks/exhaustive-deps
   const transition = r.transition ?? { type: 'none', duration: 0.5 }
   const credits = r.credits ?? {}
 
@@ -406,30 +519,7 @@ function Editor(props: {
         <pre className="card text-xs text-red-300 whitespace-pre-wrap max-h-40 overflow-y-auto">{comp.error}</pre>
       )}
 
-      {comp.status === 'done' && comp.output_path && (
-        <div className="card space-y-2">
-          {done.length > 1 && (
-            <div className="flex gap-1">
-              {done.map((c) => (
-                <button
-                  key={c}
-                  className={`px-3 py-1 rounded text-sm ${shown === c ? 'bg-accent/15 text-accent' : 'hover:bg-raised'}`}
-                  onClick={() => setShown(c)}
-                >
-                  {c}
-                </button>
-              ))}
-            </div>
-          )}
-          <video
-            key={`${comp.updated_at}-${shown}`}
-            className="max-h-[420px] mx-auto rounded bg-black"
-            controls
-            src={compilationsApi.mediaUrl(comp.id, comp.updated_at, done.length > 1 ? shown : '')}
-          />
-          <div className="text-xs text-muted break-all">{comp.outputs?.[shown] ?? comp.output_path}</div>
-        </div>
-      )}
+      <CompilationVersions comp={comp} onChanged={props.onReplaced} />
 
       {/* look */}
       <fieldset className="card grid grid-cols-2 lg:grid-cols-4 gap-3" disabled={busy}>
@@ -511,51 +601,17 @@ function Editor(props: {
           />
         </label>
 
-        <label className="flex items-center gap-2 col-span-2 lg:col-span-1">
-          <input
-            type="checkbox"
-            checked={credits.enabled ?? true}
-            onChange={(e) => editRecipe((rr) => ({ ...rr, credits: { ...credits, enabled: e.target.checked } }))}
-          />
-          <span className="text-sm">{t('Credit each creator')}</span>
-        </label>
-        <label className="space-y-1">
-          <span className="label">{t('Credit text')}</span>
-          <input
-            className="input w-full"
-            value={credits.template ?? 'Clip: {channel}'}
-            onChange={(e) => editRecipe((rr) => ({ ...rr, credits: { ...credits, template: e.target.value } }))}
-            title="{channel} {title} {url}"
-          />
-        </label>
-        <label className="space-y-1">
-          <span className="label">{t('Credit position')}</span>
-          <select
-            className="input w-full"
-            value={credits.position ?? 'bottom_left'}
-            onChange={(e) => editRecipe((rr) => ({ ...rr, credits: { ...credits, position: e.target.value } }))}
-          >
-            {(options?.credit_positions ?? ['bottom_left']).map((p) => (
-              <option key={p} value={p}>
-                {p.replace('_', ' ')}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="space-y-1">
-          <span className="label">{t('Credit seconds')}</span>
-          <input
-            type="number"
-            min={1}
-            max={15}
-            step={0.5}
-            className="input w-full"
-            value={credits.seconds ?? 4}
-            onChange={(e) =>
-              editRecipe((rr) => ({ ...rr, credits: { ...credits, seconds: Number(e.target.value) } }))
-            }
-          />
-        </label>
+        <CreditControls
+          credits={credits}
+          positions={options?.credit_positions ?? ['bottom_left']}
+          formats={outputs}
+          sizes={options?.canvases ?? {}}
+          samples={segs.map((s) => {
+            const v = libById[s.video_id]
+            return { channel: v?.channel_name ?? '', title: v?.title ?? '', url: v?.source_url ?? '' }
+          })}
+          onChange={(patch) => editRecipe((rr) => ({ ...rr, credits: { ...(rr.credits ?? {}), ...patch } }))}
+        />
 
         <label className="space-y-1 col-span-2">
           <span className="label">{t('Banner (branding profile)')}</span>
@@ -607,29 +663,16 @@ function Editor(props: {
               {t('Save look as template')}
             </button>
           ) : (
-            <>
-              <input
-                className="input"
-                autoFocus
-                placeholder={t('Template name')}
-                value={templateName}
-                onChange={(e) => setTemplateName(e.target.value)}
-              />
-              <button
-                type="button"
-                className="btn-accent"
-                disabled={!templateName.trim()}
-                onClick={() => {
-                  props.onSaveTemplate(templateName)
-                  setTemplateName(null)
-                }}
-              >
-                {t('Save')}
-              </button>
-              <button type="button" className="btn-ghost" onClick={() => setTemplateName(null)}>
-                {t('Cancel')}
-              </button>
-            </>
+            <SaveTemplateForm
+              name={templateName}
+              setName={setTemplateName}
+              onCancel={() => setTemplateName(null)}
+              templates={props.templates}
+              onSave={(name, replaceId) => {
+                props.onSaveTemplate(name, replaceId)
+                setTemplateName(null)
+              }}
+            />
           )}
           <button type="button" className="btn-ghost text-red-300" onClick={props.onDelete}>
             {t('Delete compilation')}
@@ -666,7 +709,7 @@ function Editor(props: {
                 type="number"
                 step={0.1}
                 min={0}
-                className="input w-20"
+                className="input !w-20"
                 value={s.start}
                 disabled={busy}
                 onChange={(e) => patchSeg(i, { start: Number(e.target.value) })}
@@ -677,7 +720,7 @@ function Editor(props: {
                 type="number"
                 step={0.1}
                 min={0}
-                className="input w-20"
+                className="input !w-20"
                 value={s.end}
                 disabled={busy}
                 onChange={(e) => patchSeg(i, { end: Number(e.target.value) })}
@@ -694,7 +737,7 @@ function Editor(props: {
                 {t('credit')}
               </label>
               <select
-                className="input w-28 text-xs"
+                className="input !w-28 text-xs"
                 value={presetOf(s.blur_regions)}
                 disabled={busy}
                 onChange={(e) =>

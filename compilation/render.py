@@ -1,8 +1,9 @@
 """Render a validated Recipe into one video.
 
     1. Every part (intro, each segment, outro) is rendered on its own, in ONE
-       FFmpeg pass each: cut -> blur regions -> fit to the canvas -> credit and
-       text banner burned (ASS) -> loudness -> the GPU encoder. Every part
+       FFmpeg pass each: cut -> blur regions -> fit to the canvas -> credit
+       plate image (if any) -> credit and text banner burned (ASS) ->
+       loudness -> the GPU encoder. Every part
        comes out with identical parameters (size, 30fps CFR, yuv420p, 48 kHz
        stereo AAC).
     2. The parts are joined:
@@ -67,6 +68,20 @@ def probe(path: Path) -> tuple[float, bool]:
 # ---- filter graph pieces --------------------------------------------------------------
 
 
+def image_size(path: Path) -> tuple[int, int]:
+    """(width, height) of an image file."""
+    r = subprocess.run(
+        [ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+         "-of", "json", str(path)],
+        capture_output=True, text=True,
+    )
+    try:
+        s = json.loads(r.stdout)["streams"][0]
+        return int(s["width"]), int(s["height"])
+    except (ValueError, KeyError, IndexError):
+        raise RuntimeError(f"could not read the credit background image {path.name}") from None
+
+
 def blur_chain(regions, src: str, out: str) -> str:
     """Blur rectangles given as fractions of the SOURCE frame. Empty when
     there are none, so callers can skip the stage entirely."""
@@ -121,6 +136,8 @@ def render_part(
     volume: float = 1.0,
     blur_regions=(),
     ass: Path | None = None,
+    plate: credits_mod.Plate | None = None,
+    plate_window: tuple[float, float] = (0.0, 0.0),
 ) -> Path:
     canvas = recipe.size
     graph = []
@@ -131,13 +148,31 @@ def render_part(
         cur = "vblur"
     graph.append(fit_chain(recipe.fit, canvas, cur, "vfit"))
     tail = f"fps={FPS},format=yuv420p,setsar=1"
+    inputs = ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source.resolve())]
+    if plate is not None:
+        # The credit's background image, looped for the segment, faded in and
+        # out with the text, and shown only in the credit's window. Under the
+        # subtitles, so the text lands on top of it.
+        idx = 2 if not has_audio else 1
+        s, e = plate_window
+        fade = credits_mod.FADE_MS / 1000
+        graph.append(f"[vfit]{tail}[vbase]")
+        graph.append(
+            f"[{idx}:v]scale={plate.w}:{plate.h},format=rgba,"
+            f"fade=t=in:st={s:.3f}:d={fade:.3f}:alpha=1,"
+            f"fade=t=out:st={max(s, e - fade):.3f}:d={fade:.3f}:alpha=1[plate]"
+        )
+        graph.append(
+            f"[vbase][plate]overlay=x={plate.x}:y={plate.y}:eof_action=pass:"
+            f"enable='between(t,{s:.3f},{e:.3f})'[vfit]"
+        )
+        tail = "format=yuv420p"
     if ass is not None:
         # Referenced by name with cwd set to its folder: FFmpeg's filter
         # parser mangles Windows drive paths ("C:") inside a filtergraph.
         tail += f",subtitles={ass.name}"
     graph.append(f"[vfit]{tail}[vout]")
 
-    inputs = ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source.resolve())]
     if has_audio:
         level = f",{LOUDNORM}" if recipe.normalize_audio else ""
         graph.append(
@@ -150,6 +185,10 @@ def render_part(
         # which the lossless concat join depends on.
         inputs += ["-f", "lavfi", "-t", f"{duration:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
         audio_map = "1:a"
+    if plate is not None:
+        # Last, so it is input 1 after a real audio track or 2 after the
+        # silent one — the index the graph above used.
+        inputs += ["-loop", "1", "-framerate", str(FPS), "-t", f"{duration:.3f}", "-i", str(plate.image.resolve())]
 
     cmd = [
         ffmpeg(), "-y", *inputs,
@@ -226,23 +265,48 @@ def join_xfade(parts: list[Path], output: Path, transition: str, t: float) -> Pa
 
 
 def _segment_ass(
-    seg: SegmentSpec, src: SourceInfo, recipe: Recipe, banner_text: dict | None, work: Path, index: int
-) -> Path | None:
-    """The ASS file for one segment: its credit and/or the text banner.
-    None when there is nothing to burn, so the pass skips libass."""
+    seg: SegmentSpec,
+    src: SourceInfo,
+    recipe: Recipe,
+    banner_text: dict | None,
+    work: Path,
+    index: int,
+    plate: credits_mod.Plate | None = None,
+) -> tuple[Path | None, credits_mod.Plate | None]:
+    """The ASS file for one segment (its credit and/or the text banner), and
+    the credit's plate when this segment shows one. The ASS is None when
+    there is nothing to burn, so the pass skips libass."""
     from video_editor import watermark
 
     ass = work / f"seg_{index:04d}.ass"
     wrote = False
+    shown = None
     if recipe.credits.enabled and seg.credit:
         text = credits_mod.credit_text(recipe.credits, channel=src.channel, title=src.title, url=src.url)
         if text:
-            ass.write_text(credits_mod.build_ass(text, recipe.credits, recipe.size, seg.duration), encoding="utf-8")
+            ass.write_text(
+                credits_mod.build_ass(text, recipe.credits, recipe.size, seg.duration, plate), encoding="utf-8"
+            )
             wrote = True
+            shown = plate
     if banner_text:
         watermark.ensure_text(ass if wrote else None, ass, banner_text, recipe.size, seg.duration)
         wrote = True
-    return ass if wrote else None
+    return (ass if wrote else None), shown
+
+
+def _credit_plate(recipe: Recipe, assets: Path | None) -> credits_mod.Plate | None:
+    """The credit's background image, placed for this canvas, or None."""
+    name = recipe.credits.bg_image
+    if not (recipe.credits.enabled and name):
+        return None
+    # Found by listing the folder, never by joining the stored name onto it.
+    image = None
+    if assets is not None and assets.is_dir():
+        image = next((p for p in assets.iterdir() if p.name == name and p.is_file()), None)
+    if image is None:
+        raise RuntimeError(f"The credit background image is missing from the branding assets: {name}")
+    return credits_mod.plate_for(recipe.credits, recipe.size, image, image_size(image))
 
 
 def render(
@@ -280,6 +344,7 @@ def render(
             on_progress(i, total, label)
 
     try:
+        plate = _credit_plate(recipe, banner_assets)
         parts: list[Path] = []
         seg_no = 0
         for i, (kind, item) in enumerate(plan):
@@ -290,11 +355,13 @@ def render(
                 seg_no += 1
                 step(i, f"Segment {seg_no}/{len(recipe.segments)}: {src.title or seg.video_id}")
                 _, has_audio = probe(src.path)
+                ass, seg_plate = _segment_ass(seg, src, recipe, banner_text, work, i, plate)
                 render_part(
                     src.path, part,
                     start=seg.start, duration=seg.duration, recipe=recipe, has_audio=has_audio,
                     volume=seg.volume, blur_regions=seg.blur_regions,
-                    ass=_segment_ass(seg, src, recipe, banner_text, work, i),
+                    ass=ass, plate=seg_plate,
+                    plate_window=credits_mod.show_window(recipe.credits, seg.duration),
                 )
             else:
                 step(i, kind.capitalize())

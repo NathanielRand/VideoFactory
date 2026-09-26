@@ -1,15 +1,29 @@
-"""Per-segment credit lower-thirds, as ASS subtitles.
+"""Per-segment credit lower-thirds, as ASS subtitles, optionally on an image.
 
 A credit is burned in the same FFmpeg pass that renders its segment, so it
-costs nothing extra. Times are relative to the segment's own start. The style
-is a boxed caption (BorderStyle 3) so it stays readable over any footage.
+costs nothing extra. Times are relative to the segment's own start.
+
+Two looks:
+  * TEXT ONLY: the text with a backing drawn by libass: a boxed caption
+    (BorderStyle 3), an outline, or nothing.
+  * ON A PLATE: an uploaded background image is overlaid (render.py) at the
+    credit's corner, `bg_scale` x the font size tall, aspect kept, and the
+    text is centred on it. A long name is shrunk to fit the plate rather than
+    spilling off it.
 
 The template has three fields: {channel}, {title}, {url}. A segment with no
 channel name falls back to the video's title, then to nothing at all, rather
 than printing "Clip: " with an empty name.
+
+Everything visual about the credit (font, colours, box, padding, plate size,
+fade) is decided in this file; render.py only places what it is handed.
 """
 
 from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
 
 from compilation.recipe import CreditStyle
 
@@ -19,6 +33,45 @@ _ALIGN = {
     "top_left": 7, "top_center": 8, "top_right": 9,
 }
 FADE_MS = 250
+START = 0.15  # seconds into the segment the credit appears
+# How much of the plate's width the text may use; the rest is side padding.
+PLATE_TEXT_WIDTH = 0.84
+
+# Font files for measuring text (regular, bold) — the same stock-Windows set
+# as video/captions.py FONTS. Only used to fit text onto a plate; libass
+# finds the fonts by family name itself.
+_FONT_FILES = {
+    "Arial": ("arial.ttf", "arialbd.ttf"),
+    "Arial Black": ("ariblk.ttf", "ariblk.ttf"),
+    "Impact": ("impact.ttf", "impact.ttf"),
+    "Verdana": ("verdana.ttf", "verdanab.ttf"),
+    "Tahoma": ("tahoma.ttf", "tahomabd.ttf"),
+    "Trebuchet MS": ("trebuc.ttf", "trebucbd.ttf"),
+    "Segoe UI": ("segoeui.ttf", "segoeuib.ttf"),
+    "Georgia": ("georgia.ttf", "georgiab.ttf"),
+    "Comic Sans MS": ("comic.ttf", "comicbd.ttf"),
+    "Courier New": ("cour.ttf", "courbd.ttf"),
+}
+
+
+@dataclass(frozen=True)
+class Plate:
+    """Where the background image goes on the canvas, in pixels."""
+
+    image: Path
+    x: int
+    y: int
+    w: int
+    h: int
+
+    def anchor(self, style: CreditStyle) -> tuple[int, int]:
+        """Where the text's centre goes: `bg_text_x/y` across the plate."""
+        return self.x + round(self.w * style.bg_text_x), self.y + round(self.h * style.bg_text_y)
+
+    def room(self, style: CreditStyle) -> float:
+        """How wide the text may be: the padded plate, narrowed when the text
+        is off-centre so it stays on the image on both sides."""
+        return self.w * PLATE_TEXT_WIDTH * 2 * min(style.bg_text_x, 1 - style.bg_text_x)
 
 
 def _clean(text: str) -> str:
@@ -46,27 +99,111 @@ def _t(seconds: float) -> str:
     return f"{h}:{m:02d}:{seconds % 60:05.2f}"
 
 
-def build_ass(text: str, style: CreditStyle, canvas: tuple[int, int], duration: float) -> str:
-    """A standalone ASS file showing `text` for the first `style.seconds`
-    of a segment that lasts `duration`."""
+def _ass_colour(hex_rgb: str, alpha: int = 0) -> str:
+    """#RRGGBB -> &HAABBGGRR."""
+    r, g, b = hex_rgb[1:3], hex_rgb[3:5], hex_rgb[5:7]
+    return f"&H{alpha:02X}{b}{g}{r}".upper()
+
+
+def font_px(style: CreditStyle, canvas: tuple[int, int]) -> int:
+    """The font size on this canvas: `font_size` is at 1080 on the short edge."""
+    return max(14, round(style.font_size * min(canvas) / 1080))
+
+
+def _margin(canvas: tuple[int, int]) -> int:
+    return round(0.045 * min(canvas))
+
+
+def show_window(style: CreditStyle, duration: float) -> tuple[float, float]:
+    """(start, end) seconds within the segment."""
+    full = max(0.5, duration - 0.1)
+    return START, full if style.whole_clip else min(style.seconds, full)
+
+
+def plate_for(style: CreditStyle, canvas: tuple[int, int], image: Path, image_size: tuple[int, int]) -> Plate:
+    """Size and place the background image: `bg_scale` x the font size tall,
+    aspect kept, in the credit's corner, never wider than the canvas allows."""
     w, h = canvas
-    scale = min(w, h) / 1080
-    size = max(14, round(style.font_size * scale))
-    margin = round(0.045 * min(w, h))
-    outline = max(4, round(size * 0.35))  # box padding around the text
-    align = _ALIGN.get(style.position, 1)
-    end = min(style.seconds, max(0.5, duration - 0.1))
+    iw, ih = image_size
+    margin = _margin(canvas)
+    ph = round(font_px(style, canvas) * style.bg_scale)
+    pw = round(ph * iw / max(1, ih))
+    if pw > w - 2 * margin:  # a very wide image: cap the width, keep aspect
+        pw = w - 2 * margin
+        ph = round(pw * ih / max(1, iw))
+    pw, ph = max(2, pw // 2 * 2), max(2, ph // 2 * 2)  # even, for yuv420p
+    horiz = style.position.split("_")[1]
+    x = {"left": margin, "center": (w - pw) // 2, "right": w - pw - margin}[horiz]
+    y = margin if style.position.startswith("top") else h - ph - margin
+    return Plate(image=image, x=x, y=y, w=pw, h=ph)
+
+
+def text_width(text: str, style: CreditStyle, px: int) -> float:
+    """Rendered width of `text` in pixels: measured with the real font when
+    Pillow and the font file are there, estimated otherwise."""
+    try:
+        from PIL import ImageFont
+
+        name = _FONT_FILES.get(style.font, _FONT_FILES["Arial"])[1 if style.bold else 0]
+        font = ImageFont.truetype(str(Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / name), px)
+        return float(font.getlength(text))
+    except Exception:
+        return len(text) * px * (0.62 if style.bold else 0.56)
+
+
+def fit_px(text: str, style: CreditStyle, canvas: tuple[int, int], plate: Plate) -> int:
+    """The font size that keeps `text` inside the plate: the chosen size, or
+    smaller for a long name. Never taller than the plate either."""
+    px = min(font_px(style, canvas), round(plate.h * 0.8))
+    room = plate.room(style)
+    width = text_width(text, style, px)
+    if width > room:
+        px = int(px * room / width)
+    return max(10, px)
+
+
+def build_ass(
+    text: str, style: CreditStyle, canvas: tuple[int, int], duration: float, plate: Plate | None = None
+) -> str:
+    """A standalone ASS file showing `text` for the credit's window of a
+    segment that lasts `duration`: in its corner, or centred on `plate`."""
+    w, h = canvas
+    margin = _margin(canvas)
+    start, end = show_window(style, duration)
+    primary = _ass_colour(style.color)
+    if plate is not None:
+        size = fit_px(text, style, canvas, plate)
+        # The plate is the backing; a thin shadow keeps text legible on a
+        # busy image without boxing it in.
+        border, outline, shadow, back = 1, 0, max(1, round(size * 0.04)), "&H80000000"
+        align = 5
+        cx, cy = plate.anchor(style)
+        pos = f"\\pos({cx},{cy})"
+    else:
+        size = font_px(style, canvas)
+        align = _ALIGN.get(style.position, 1)
+        pos = ""
+        if style.backing == "box":
+            # BorderStyle 3 = opaque box filled with OutlineColour, a 35%
+            # transparent navy; Outline is the box padding.
+            border, outline, shadow, back = 3, max(4, round(size * 0.35)), 0, "&H00000000"
+        elif style.backing == "outline":
+            border, outline, shadow, back = 1, max(2, round(size * 0.08)), max(1, round(size * 0.05)), "&H80000000"
+        else:
+            border, outline, shadow, back = 1, 0, 0, "&H00000000"
+    box = "&H59281A0A" if style.backing == "box" and plate is None else "&H00000000"
+    bold = -1 if style.bold else 0
+    italic = -1 if style.italic else 0
     return (
         "[Script Info]\nScriptType: v4.00+\n"
-        f"PlayResX: {w}\nPlayResY: {h}\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n"
+        # On a plate the text is fitted to one line (WrapStyle 2: never wrap).
+        f"PlayResX: {w}\nPlayResY: {h}\nWrapStyle: {2 if plate else 0}\nScaledBorderAndShadow: yes\n\n"
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, "
         "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, "
         "MarginV, Encoding\n"
-        # White text on a 35%-transparent navy box (BorderStyle 3 = opaque box,
-        # filled with OutlineColour). Colours are &HAABBGGRR.
-        f"Style: Credit,Arial,{size},&H00FFFFFF,&H00FFFFFF,&H59281A0A,&H00000000,"
-        f"-1,0,0,0,100,100,0,0,3,{outline},0,{align},{margin},{margin},{margin},1\n\n"
+        f"Style: Credit,{style.font},{size},{primary},{primary},{box},{back},"
+        f"{bold},{italic},0,0,100,100,0,0,{border},{outline},{shadow},{align},{margin},{margin},{margin},1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-        f"Dialogue: 3,{_t(0.15)},{_t(end)},Credit,,0,0,0,,{{\\fad({FADE_MS},{FADE_MS})}}{text}\n"
+        f"Dialogue: 3,{_t(start)},{_t(end)},Credit,,0,0,0,,{{\\fad({FADE_MS},{FADE_MS}){pos}}}{text}\n"
     )

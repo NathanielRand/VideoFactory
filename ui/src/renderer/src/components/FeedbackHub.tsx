@@ -34,7 +34,8 @@ const KINDS: { id: Kind; icon: JSX.Element; title: string; blurb: string }[] = [
   { id: 'improvement', icon: <TrendUp size={20} />, title: 'Suggest an improvement', blurb: 'Make an existing part better' }
 ]
 
-export default function FeedbackHub(): JSX.Element {
+/** `compact`: icon only, for the collapsed sidebar. */
+export default function FeedbackHub({ compact = false }: { compact?: boolean }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [kind, setKind] = useState<Kind | null>(null)
   const [answers, setAnswers] = useState<Record<string, string>>({})
@@ -182,7 +183,9 @@ export default function FeedbackHub(): JSX.Element {
   return (
     <>
       <button
-        className="w-full text-left px-3 py-2.5 rounded-lg flex items-center gap-3 transition-colors text-muted hover:bg-raised hover:text-ink"
+        className={`w-full text-left py-2.5 rounded-lg flex items-center gap-3 transition-colors text-muted hover:bg-raised hover:text-ink ${
+          compact ? 'justify-center px-0' : 'px-3'
+        }`}
         onClick={() => {
           reset()
           setOpen(true)
@@ -192,7 +195,7 @@ export default function FeedbackHub(): JSX.Element {
         <span aria-hidden>
           <Chat />
         </span>
-        {t('Feedback')}
+        {!compact && t('Feedback')}
       </button>
 
       {open && (

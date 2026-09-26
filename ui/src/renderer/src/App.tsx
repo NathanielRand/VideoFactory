@@ -38,6 +38,41 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: 'settings', label: 'Settings', icon: '⚙' }
 ]
 
+// Sidebar collapse. Until the user picks, it follows the window: collapsed
+// below NARROW_PX (a portrait monitor, a half-screen snap), open above.
+// Once they toggle it, their choice sticks across launches.
+const SIDEBAR_KEY = 'sidebar-collapsed'
+const NARROW_PX = 1280
+
+function readSidebarPref(): boolean | null {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_KEY)
+    return raw === null ? null : raw === '1'
+  } catch {
+    return null
+  }
+}
+
+function useSidebarCollapsed(): [boolean, () => void] {
+  const [pref, setPref] = useState<boolean | null>(readSidebarPref)
+  const [narrow, setNarrow] = useState(() => window.innerWidth < NARROW_PX)
+  useEffect(() => {
+    const onResize = (): void => setNarrow(window.innerWidth < NARROW_PX)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  const collapsed = pref ?? narrow
+  const toggle = (): void => {
+    setPref(!collapsed)
+    try {
+      localStorage.setItem(SIDEBAR_KEY, collapsed ? '0' : '1')
+    } catch {
+      // Private storage off: the toggle still works for this session.
+    }
+  }
+  return [collapsed, toggle]
+}
+
 export interface StudioTarget {
   videoId: string
   clipId?: number
@@ -45,6 +80,7 @@ export interface StudioTarget {
 
 export default function App(): JSX.Element {
   const [page, setPage] = useState<Page>('dashboard')
+  const [collapsed, toggleSidebar] = useSidebarCollapsed()
   const [studioTarget, setStudioTarget] = useState<StudioTarget | null>(null)
   const [creatorTarget, setCreatorTarget] = useState<number | null>(null)
   // First run: walk the creator through what the installer can't bundle
@@ -146,41 +182,52 @@ export default function App(): JSX.Element {
 
   return (
     <div className="flex h-screen" key={locale}>
-      <aside className="w-52 shrink-0 bg-surface border-r border-raised/60 flex flex-col">
+      <aside
+        className={`${
+          collapsed ? 'w-14' : 'w-52'
+        } shrink-0 bg-surface border-r border-raised/60 flex flex-col overflow-y-auto overflow-x-hidden`}
+      >
         {/* Logo, then the name and tagline stacked beside it. `min-w-0` on
             the text column so a longer translated tagline wraps instead of
-            pushing the logo out of the sidebar. */}
-        <div className="px-5 py-5 flex items-center gap-2.5">
+            pushing the logo out of the sidebar. Collapsed: the logo alone. */}
+        <div className={`py-5 flex items-center gap-2.5 ${collapsed ? 'justify-center px-0' : 'px-5'}`}>
           <img
             src={logo}
-            alt=""
+            alt={collapsed ? 'Video Factory' : ''}
             width={34}
             height={34}
             className="shrink-0 w-[34px] h-[34px]"
           />
-          <div className="min-w-0">
-            <h1 className="text-lg font-bold leading-tight">
-              Video <span className="text-accent">Factory</span>
-            </h1>
-            <p className="text-xs text-muted mt-px">{t('source to post, one flow')}</p>
-          </div>
+          {!collapsed && (
+            <div className="min-w-0">
+              <h1 className="text-lg font-bold leading-tight">
+                Video <span className="text-accent">Factory</span>
+              </h1>
+              <p className="text-xs text-muted mt-px">{t('source to post, one flow')}</p>
+            </div>
+          )}
         </div>
-        <nav className="flex-1 px-3 space-y-1">
+        <nav className={`flex-1 space-y-1 ${collapsed ? 'px-2' : 'px-3'}`}>
           {NAV.map((item) => (
             <button
               key={item.id}
               onClick={() => setPage(item.id)}
-              className={`w-full text-left px-3 py-2.5 rounded-lg flex items-center gap-3 transition-colors ${
+              title={collapsed ? t(item.label) : undefined}
+              aria-label={collapsed ? t(item.label) : undefined}
+              aria-current={page === item.id ? 'page' : undefined}
+              className={`w-full text-left py-2.5 rounded-lg flex items-center gap-3 transition-colors ${
+                collapsed ? 'justify-center px-0 relative' : 'px-3'
+              } ${
                 page === item.id
                   ? 'bg-accent/15 text-accent font-medium'
                   : 'text-muted hover:bg-raised hover:text-ink'
               }`}
             >
               <span aria-hidden>{item.icon}</span>
-              {t(item.label)}
+              {!collapsed && t(item.label)}
               {item.id === 'watch' && watching > 0 && (
                 <span
-                  className="ml-auto relative flex size-2.5"
+                  className={`${collapsed ? 'absolute top-1.5 right-1.5' : 'ml-auto relative'} flex size-2.5`}
                   title={`${t('Watching')} ${watching}`}
                   aria-label={t('Watching')}
                 >
@@ -191,32 +238,62 @@ export default function App(): JSX.Element {
             </button>
           ))}
         </nav>
+        <div className={collapsed ? 'px-2 pb-1' : 'px-3 pb-1'}>
+          <button
+            onClick={toggleSidebar}
+            title={collapsed ? t('Expand sidebar') : t('Collapse sidebar')}
+            aria-label={collapsed ? t('Expand sidebar') : t('Collapse sidebar')}
+            aria-expanded={!collapsed}
+            className={`w-full text-left py-2.5 rounded-lg flex items-center gap-3 transition-colors text-muted hover:bg-raised hover:text-ink ${
+              collapsed ? 'justify-center px-0' : 'px-3'
+            }`}
+          >
+            <span aria-hidden>{collapsed ? '»' : '«'}</span>
+            {!collapsed && t('Collapse')}
+          </button>
+        </div>
         {/* Pinned below the nav: reachable from every page — bugs don't
             only happen on the Dashboard. */}
-        <div className="px-3 pb-1">
-          <FeedbackHub />
+        <div className={collapsed ? 'px-2 pb-1' : 'px-3 pb-1'}>
+          <FeedbackHub compact={collapsed} />
         </div>
-        <ModelSwitcher />
-        <div className="px-5 py-4 border-t border-raised/60">
+        {/* The model picker needs the width; collapsed, it is still on the
+            Models page. */}
+        {!collapsed && <ModelSwitcher />}
+        {collapsed ? (
+          // The AGPL source offer stays reachable when collapsed, as a link.
           <a
             href={UPSTREAM_URL}
             target="_blank"
             rel="noreferrer"
-            className="text-xs text-muted hover:text-accent transition-colors"
+            title={`${t('Open source')} — ${t('based on Clips Kitty')} · AGPL-3.0`}
+            aria-label={t('Open source')}
+            className="py-4 border-t border-raised/60 text-center text-xs text-muted hover:text-accent transition-colors"
           >
-            <span className="font-semibold">{t('Open source')}</span> — {t('based on Clips Kitty')} ↗
+            ↗
           </a>
-          {/* The AGPL expects anyone running the program to be able to find
-              its source. The link above is that offer, so it names the
-              licence rather than leaving "open source" to mean anything. */}
-          <p className="text-[10px] text-muted/60 mt-1.5">
-            {cloudAI
-              ? `AGPL-3.0 · ${t('cloud AI on your key')} (${cloudAI})`
-              : t('AGPL-3.0 · 100% local · no cloud AI')}
-          </p>
-        </div>
+        ) : (
+          <div className="px-5 py-4 border-t border-raised/60">
+            <a
+              href={UPSTREAM_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-muted hover:text-accent transition-colors"
+            >
+              <span className="font-semibold">{t('Open source')}</span> — {t('based on Clips Kitty')} ↗
+            </a>
+            {/* The AGPL expects anyone running the program to be able to find
+                its source. The link above is that offer, so it names the
+                licence rather than leaving "open source" to mean anything. */}
+            <p className="text-[10px] text-muted/60 mt-1.5">
+              {cloudAI
+                ? `AGPL-3.0 · ${t('cloud AI on your key')} (${cloudAI})`
+                : t('AGPL-3.0 · 100% local · no cloud AI')}
+            </p>
+          </div>
+        )}
       </aside>
-      <main className="flex-1 overflow-y-auto flex flex-col">
+      <main className="flex-1 min-w-0 overflow-y-auto flex flex-col">
         <UpdateBanner />
         {page === 'dashboard' && <Dashboard onOpenInStudio={openInStudio} />}
         {page === 'queue' && <Queue onOpenInStudio={(videoId) => openInStudio(videoId)} />}

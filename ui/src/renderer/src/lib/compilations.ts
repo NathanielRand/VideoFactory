@@ -22,8 +22,24 @@ export interface CreditStyle {
   enabled?: boolean
   template?: string
   seconds?: number
+  /** Keep the credit up for the whole segment; `seconds` is ignored. */
+  whole_clip?: boolean
   position?: string
   font_size?: number
+  font?: string
+  bold?: boolean
+  italic?: boolean
+  /** #RRGGBB */
+  color?: string
+  /** What is drawn behind the text when there is no background image. */
+  backing?: 'box' | 'outline' | 'none'
+  /** A branding asset filename: an image the text sits centred on. */
+  bg_image?: string | null
+  /** The image's height as a multiple of the font size. */
+  bg_scale?: number
+  /** Where the text's centre sits on the image, as fractions of it. */
+  bg_text_x?: number
+  bg_text_y?: number
 }
 
 export interface Recipe {
@@ -54,6 +70,26 @@ export interface Compilation {
   problem?: string
   /** Per format: the platforms this is too long for. */
   warnings?: Record<string, string[]>
+}
+
+/** One render of a compilation, kept on disk as a version. */
+export interface CompilationRender {
+  id: number
+  compilation_id: number
+  version: number
+  /** The recipe it was rendered from; null for a render from before versions. */
+  recipe: Recipe | null
+  /** {canvas: path} */
+  outputs: Record<string, string>
+  created_at: string
+  bytes: number
+  /** Formats whose file is no longer on disk. */
+  missing: string[]
+}
+
+export interface CompilationSettings {
+  /** How many versions each compilation keeps; 0 keeps all. */
+  keep_versions: number
 }
 
 export interface CompilationTemplate {
@@ -118,10 +154,27 @@ export const compilationsApi = {
     request<{ job_id: number; started: boolean }>(`/compilations/${id}/render`, { method: 'POST' }),
   mediaUrl: (id: number, updatedAt: string, canvas = '') =>
     `${API_BASE}/compilations/${id}/media?canvas=${encodeURIComponent(canvas.replace(':', 'x'))}&v=${encodeURIComponent(updatedAt)}`,
+  renders: (id: number) => request<CompilationRender[]>(`/compilations/${id}/renders`),
+  renderMediaUrl: (id: number, renderId: number, canvas = '') =>
+    `${API_BASE}/compilations/${id}/renders/${renderId}/media?canvas=${encodeURIComponent(canvas.replace(':', 'x'))}`,
+  restoreRender: (id: number, renderId: number) =>
+    request<Compilation>(`/compilations/${id}/renders/${renderId}/restore`, { method: 'POST' }),
+  deleteRender: (id: number, renderId: number) =>
+    request<{ deleted: boolean; compilation: Compilation }>(`/compilations/${id}/renders/${renderId}`, {
+      method: 'DELETE'
+    }),
+  settings: () => request<CompilationSettings>('/compilation-settings'),
+  saveSettings: (s: CompilationSettings) =>
+    request<CompilationSettings & { removed: number }>('/compilation-settings', json('PUT', s)),
+  unusedFiles: () => request<{ name: string; bytes: number }[]>('/compilation-files/unused'),
+  cleanUnused: () =>
+    request<{ deleted: string[]; kept: string[] }>('/compilation-files/unused', { method: 'DELETE' }),
   sourceUrl: (videoId: string) => `${API_BASE}/compilations/source/${encodeURIComponent(videoId)}`,
   templates: () => request<CompilationTemplate[]>('/compilation-templates'),
   saveTemplate: (name: string, config: Recipe) =>
     request<CompilationTemplate>('/compilation-templates', json('POST', { name, config })),
+  updateTemplate: (id: number, name: string, config: Recipe) =>
+    request<CompilationTemplate>(`/compilation-templates/${id}`, json('PUT', { name, config })),
   deleteTemplate: (id: number) =>
     request<{ ok: boolean }>(`/compilation-templates/${id}`, { method: 'DELETE' }),
   setCredit: (videoId: string, patch: { channel_name?: string; channel_url?: string; rights?: Rights }) =>

@@ -15,7 +15,13 @@ this one place, so render.py can trust what it is handed.
       ],
       "transition": {"type": "fade", "duration": 0.5},
       "credits": {"enabled": true, "template": "Clip: {channel}",
-                  "seconds": 4.0, "position": "bottom_left", "font_size": 44},
+                  "seconds": 4.0, "whole_clip": false,   # whole_clip ignores seconds
+                  "position": "bottom_left", "font_size": 44,
+                  "font": "Arial", "bold": true, "italic": false, "color": "#FFFFFF",
+                  "backing": "box",                      # box | outline | none
+                  "bg_image": "<hash>.png" | null,       # a branding asset: a plate
+                  "bg_scale": 2.4,                       # plate height / font size
+                  "bg_text_x": 0.5, "bg_text_y": 0.5},   # text centre on the plate
       "banner": {...watermark config...} | {"profile_id": 3} | null,
       "intro": {"path": "D:/brand/intro.mp4"} | null,
       "outro": {"path": "D:/brand/outro.mp4"} | null,
@@ -27,10 +33,13 @@ A TEMPLATE is the same object without "segments": the reusable look.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.paths import safe_name
 from formats.profiles import CANVASES
+from video.captions import FONTS
 
 FITS = ("blur", "pad", "crop")
 
@@ -41,6 +50,7 @@ TRANSITIONS = (
     "wipeleft", "wiperight", "slideleft", "slideright",
     "smoothleft", "smoothright", "circleopen", "zoomin",
 )
+BACKINGS = ("box", "outline", "none")
 POSITIONS = ("bottom_left", "bottom_right", "top_left", "top_right", "bottom_center", "top_center")
 
 MIN_SEGMENT = 0.5          # seconds; shorter is a flash, not a clip
@@ -73,8 +83,22 @@ class CreditStyle:
     enabled: bool = True
     template: str = "Clip: {channel}"
     seconds: float = 4.0
+    whole_clip: bool = False  # show for the whole segment; `seconds` is ignored
     position: str = "bottom_left"
     font_size: int = 44
+    font: str = "Arial"
+    bold: bool = True
+    italic: bool = False
+    color: str = "#FFFFFF"
+    backing: str = "box"  # behind the text when there is no bg_image
+    # A background image (a branding asset filename) the text sits centred
+    # on, scaled to `bg_scale` x the font size tall, aspect kept.
+    bg_image: str | None = None
+    bg_scale: float = 2.4
+    # Where the text's centre sits on the plate, as fractions of it — for an
+    # image with artwork on one side.
+    bg_text_x: float = 0.5
+    bg_text_y: float = 0.5
 
 
 @dataclass
@@ -113,6 +137,36 @@ def _bumper(raw, name: str, check_files: bool) -> Path | None:
     if check_files and not path.is_file():
         raise RecipeError(f"The {name} file does not exist: {path}")
     return path
+
+
+def _credit_look(cr: dict) -> dict:
+    font = str(cr.get("font") or "Arial")
+    if font not in FONTS:
+        raise RecipeError(f"credit font must be one of {', '.join(FONTS)}")
+    color = str(cr.get("color") or "#FFFFFF")
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise RecipeError("credit colour must be #RRGGBB")
+    backing = str(cr.get("backing") or "box")
+    if backing not in BACKINGS:
+        raise RecipeError(f"credit backing must be one of {', '.join(BACKINGS)}")
+    bg_image = None
+    if cr.get("bg_image"):
+        # A filename in the branding assets folder, never a path: it is
+        # handed to FFmpeg as an input.
+        bg_image = safe_name(str(cr["bg_image"]))
+        if bg_image is None:
+            raise RecipeError("credit background image must be an uploaded asset name")
+    return {
+        "font": font,
+        "bold": bool(cr.get("bold", True)),
+        "italic": bool(cr.get("italic", False)),
+        "color": color.upper(),
+        "backing": backing,
+        "bg_image": bg_image,
+        "bg_scale": max(1.2, min(6.0, _num(cr.get("bg_scale", 2.4), "credit background size"))),
+        "bg_text_x": max(0.1, min(0.9, _num(cr.get("bg_text_x", 0.5), "credit text position"))),
+        "bg_text_y": max(0.1, min(0.9, _num(cr.get("bg_text_y", 0.5), "credit text position"))),
+    }
 
 
 def _regions(raw, where: str) -> list[tuple[float, float, float, float]]:
@@ -213,8 +267,10 @@ def parse(
         enabled=bool(cr.get("enabled", True)),
         template=template[:120],
         seconds=max(1.0, min(15.0, _num(cr.get("seconds", 4.0), "credit seconds"))),
+        whole_clip=bool(cr.get("whole_clip", False)),
         position=position,
         font_size=int(max(16, min(120, _num(cr.get("font_size", 44), "credit font size")))),
+        **_credit_look(cr),
     )
 
     banner = data.get("banner")

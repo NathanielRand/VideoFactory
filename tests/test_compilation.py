@@ -114,6 +114,50 @@ def test_credit_ass_scales_to_the_canvas_and_ends_inside_the_segment():
     assert "0:00:02.90" in ass  # clamped to the 3s segment
 
 
+def test_credit_can_stay_up_for_the_whole_segment():
+    ass = credits.build_ass("Clip: Ann", CreditStyle(seconds=2, whole_clip=True), (1920, 1080), 12.0)
+    assert "0:00:11.90" in ass  # the segment's end, not the 2s
+    r = recipe.parse({"segments": [_seg()], "credits": {"whole_clip": True}}, check_files=False)
+    assert r.credits.whole_clip and not recipe.parse({"segments": [_seg()]}, check_files=False).credits.whole_clip
+
+
+def test_credit_look_is_validated():
+    r = recipe.parse({"segments": [_seg()], "credits": {
+        "font": "Impact", "bold": False, "italic": True, "color": "#ff8800",
+        "backing": "outline", "bg_image": "abc.png", "bg_scale": 99,
+    }}, check_files=False)
+    c = r.credits
+    assert (c.font, c.bold, c.italic, c.color, c.backing, c.bg_image) == (
+        "Impact", False, True, "#FF8800", "outline", "abc.png")
+    assert c.bg_scale == 6.0  # clamped
+    for bad in ({"font": "Wingdings"}, {"color": "red"}, {"backing": "glow"}, {"bg_image": "../x.png"}):
+        with pytest.raises(RecipeError):
+            recipe.parse({"segments": [_seg()], "credits": bad}, check_files=False)
+
+
+def test_credit_style_reaches_the_ass():
+    ass = credits.build_ass("Ann", CreditStyle(font="Georgia", italic=True, bold=False, color="#FF8800",
+                                               backing="none"), (1920, 1080), 5.0)
+    assert "Style: Credit,Georgia,44,&H000088FF," in ass
+    assert ",0,-1,0,0,100,100,0,0,1,0,0,1," in ass  # not bold, italic, no border
+
+
+def test_plate_sits_in_the_corner_and_the_text_is_centred_and_fitted_on_it():
+    style = CreditStyle(position="bottom_right", font_size=44, bg_scale=2.5)
+    plate = credits.plate_for(style, (1920, 1080), Path("p.png"), (400, 100))
+    assert (plate.h, plate.w) == (110, 440)  # 44px * 2.5 tall, 4:1 kept
+    assert plate.x + plate.w == 1920 - 49 and plate.y + plate.h == 1080 - 49
+    ass = credits.build_ass("Clip: Ann", style, (1920, 1080), 5.0, plate)
+    assert f"\\pos({plate.x + 220},{plate.y + 55})" in ass and ",5," in ass
+    long = "Clip: " + "An extremely long creator name indeed" * 2
+    assert credits.fit_px(long, style, (1920, 1080), plate) < 44
+
+
+def test_wide_plate_is_capped_to_the_canvas():
+    plate = credits.plate_for(CreditStyle(bg_scale=6), (1080, 1920), Path("p.png"), (2000, 100))
+    assert plate.w <= 1080 - 2 * 49 and plate.w % 2 == 0 and plate.h % 2 == 0
+
+
 # ---- graph building --------------------------------------------------------------------
 
 
@@ -203,6 +247,17 @@ def client(tmp_path: Path):
     return c
 
 
+def test_template_names_are_unique_and_replacing_is_a_put(client):
+    a = client.post("/compilation-templates", json={"name": "Look", "config": {"canvas": "9:16"}}).json()
+    dup = client.post("/compilation-templates", json={"name": " look ", "config": {"canvas": "1:1"}})
+    assert dup.status_code == 409
+    b = client.post("/compilation-templates", json={"name": "Look (2)", "config": {"canvas": "1:1"}}).json()
+    assert client.put(f"/compilation-templates/{b['id']}", json={"name": "LOOK", "config": {}}).status_code == 409
+    replaced = client.put(f"/compilation-templates/{a['id']}", json={"name": "Look", "config": {"canvas": "4:5"}})
+    assert replaced.status_code == 200 and replaced.json()["config"]["canvas"] == "4:5"
+    assert [t["name"] for t in client.get("/compilation-templates").json()] == ["Look", "Look (2)"]
+
+
 def test_api_create_edit_and_queue_a_render(client):
     d = StateDB(client.db_path)
     d.upsert_video("v1", title="Source", channel_name="Ann", duration=30)
@@ -289,3 +344,142 @@ def test_renders_a_multi_source_compilation(tmp_path, transition):
     assert abs(duration - expected) < 0.25
     assert steps[-1] == "Done" and any("Segment 2/2" in s for s in steps)
     assert not (tmp_path / "out" / "comp.parts").exists()  # scratch cleaned up
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("audio", [True, False])
+def test_renders_a_credit_on_a_background_image(tmp_path, audio):
+    src = _make_source(tmp_path / "src.mp4", "640x360", 4, audio=audio)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=red@0.8:s=300x80,format=rgba",
+                    "-frames:v", "1", str(assets / "plate.png")], capture_output=True, check=True)
+    r = recipe.parse({
+        "canvas": "16:9",
+        "segments": [_seg("s", 0, 3)],
+        "credits": {"bg_image": "plate.png", "whole_clip": True, "font": "Impact"},
+    })
+    out = render.render(r, {"s": render.SourceInfo(path=src, channel="Ann")},
+                        tmp_path / "out" / "c.mp4", banner_assets=assets)
+    w, h, duration = _probe(out)
+    assert (w, h) == (1920, 1080) and abs(duration - 3.0) < 0.25
+    # Mid-segment, the plate's red shows at the bottom-left corner.
+    px = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", "1.5", "-i", str(out), "-frames:v", "1",
+         "-vf", "crop=4:4:60:1000,scale=1:1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, check=True,
+    ).stdout
+    assert px[0] > 150 and px[1] < 100 and px[2] < 100
+
+
+def test_missing_credit_image_fails_clearly(tmp_path):
+    r = recipe.parse({"segments": [_seg("s", 0, 3)], "credits": {"bg_image": "gone.png"}}, check_files=False)
+    with pytest.raises(RuntimeError, match="gone.png"):
+        render.render(r, {"s": render.SourceInfo(path=tmp_path / "x.mp4")}, tmp_path / "o" / "c.mp4",
+                      banner_assets=tmp_path)
+
+
+def test_text_can_sit_off_centre_on_the_plate_and_fits_the_narrower_room():
+    centred = CreditStyle(font_size=44, bg_scale=2.5)
+    moved = CreditStyle(font_size=44, bg_scale=2.5, bg_text_x=0.7, bg_text_y=0.4)
+    plate = credits.plate_for(moved, (1920, 1080), Path("p.png"), (400, 100))
+    assert f"\\pos({plate.x + 308},{plate.y + 44})" in credits.build_ass("Ann", moved, (1920, 1080), 5.0, plate)
+    name = "Clip: A fairly long channel name"
+    assert credits.fit_px(name, moved, (1920, 1080), plate) < credits.fit_px(name, centred, (1920, 1080), plate)
+    assert recipe.parse({"segments": [_seg()], "credits": {"bg_text_x": 5}}, check_files=False).credits.bg_text_x == 0.9
+
+
+# ---- versions --------------------------------------------------------------------------
+
+
+def _fake_render(monkeypatch):
+    """store.run with render_all writing tiny files instead of video."""
+    def fake(recipe_, sources, out_dir, base_name, **kw):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        canvases = recipe_.outputs or [recipe_.canvas]
+        outs = {}
+        for c in canvases:
+            p = out_dir / (f"{base_name}.mp4" if len(canvases) == 1 else f"{base_name} {c.replace(':', 'x')}.mp4")
+            p.write_bytes(b"x" * 10)
+            outs[c] = p
+        return outs
+    monkeypatch.setattr(store, "render_all", fake)
+
+
+def _versioned_comp(client, monkeypatch, renders=1, title="Best of"):
+    _fake_render(monkeypatch)
+    d = StateDB(client.db_path)
+    d.upsert_video("v1", title="Source", channel_name="Ann", duration=30)
+    (client.data_dir / "downloads" / "v1.mp4").write_bytes(b"x")
+    cid = store.create(d, title, {"segments": [_seg("v1", 0, 5)]})
+    config = {"paths": {"data_dir": str(client.data_dir)}}
+    for i in range(renders):
+        store.update(d, cid, recipe={"segments": [_seg("v1", 0, 5 + i)]})
+        store.run(d, cid, config)
+    return d, cid, config
+
+
+def test_each_render_is_a_version_with_its_recipe_and_old_ones_are_pruned(client, monkeypatch):
+    d, cid, _ = _versioned_comp(client, monkeypatch, renders=7)
+    rows = store.renders(d, cid)
+    assert [r["version"] for r in rows] == [7, 6, 5, 4, 3]  # keep_versions defaults to 5
+    assert rows[0]["recipe"]["segments"][0]["end"] == 11 and rows[-1]["recipe"]["segments"][0]["end"] == 7
+    files = sorted(p.name for p in (client.data_dir / "compilations").iterdir())
+    assert files == [f"Best of [{cid}] v{n}.mp4" for n in (3, 4, 5, 6, 7)]
+    assert store.get(d, cid)["output_path"].endswith("v7.mp4")
+
+
+def test_lowering_keep_versions_prunes_now_and_zero_keeps_all(client, monkeypatch):
+    d, cid, _ = _versioned_comp(client, monkeypatch, renders=4)
+    assert client.put("/compilation-settings", json={"keep_versions": 0}).json()["removed"] == 0
+    assert client.put("/compilation-settings", json={"keep_versions": 2}).json()["removed"] == 2
+    assert [r["version"] for r in client.get(f"/compilations/{cid}/renders").json()] == [4, 3]
+    assert client.get("/compilation-settings").json() == {"keep_versions": 2}
+
+
+def test_restore_puts_a_versions_recipe_back_and_delete_falls_back_to_the_previous(client, monkeypatch):
+    d, cid, _ = _versioned_comp(client, monkeypatch, renders=2)
+    v1, v2 = sorted(client.get(f"/compilations/{cid}/renders").json(), key=lambda r: r["version"])
+    restored = client.post(f"/compilations/{cid}/renders/{v1['id']}/restore").json()
+    assert restored["recipe"]["segments"][0]["end"] == 5
+    assert client.get(f"/compilations/{cid}/renders/{v1['id']}/media").status_code == 200
+    out = client.delete(f"/compilations/{cid}/renders/{v2['id']}").json()
+    assert out["deleted"] and out["compilation"]["output_path"].endswith("v1.mp4")
+    client.delete(f"/compilations/{cid}/renders/{v1['id']}")
+    assert store.get(d, cid)["output_path"] == "" and store.get(d, cid)["status"] == "draft"
+
+
+def test_renaming_moves_every_versions_files(client, monkeypatch):
+    d, cid, _ = _versioned_comp(client, monkeypatch, renders=2)
+    client.patch(f"/compilations/{cid}", json={"title": "Top 10"})
+    files = sorted(p.name for p in (client.data_dir / "compilations").iterdir())
+    assert files == [f"Top 10 [{cid}] v1.mp4", f"Top 10 [{cid}] v2.mp4"]
+    assert store.get(d, cid)["output_path"].endswith(f"Top 10 [{cid}] v2.mp4")
+    assert client.get(f"/compilations/{cid}/media").status_code == 200
+
+
+def test_a_render_from_before_versions_becomes_version_1(client, monkeypatch):
+    _fake_render(monkeypatch)
+    d = StateDB(client.db_path)
+    out = client.data_dir / "compilations"
+    out.mkdir(parents=True)
+    old = out / "Old [1].mp4"
+    old.write_bytes(b"x")
+    cid = store.create(d, "Old", {"segments": []})
+    store.set_status(d, cid, "done", output_path=str(old), outputs={"16:9": str(old)})
+    assert store.next_version(d, cid) == 2
+    (v1,) = store.renders(d, cid)
+    assert v1["version"] == 1 and v1["recipe"] is None
+    assert client.post(f"/compilations/{cid}/renders/{v1['id']}/restore").status_code == 400
+    assert client.get("/compilation-files/unused").json() == []  # adopted, not a leftover
+
+
+def test_unused_files_are_listed_and_cleaned_but_tracked_ones_never(client, monkeypatch):
+    d, cid, _ = _versioned_comp(client, monkeypatch, renders=1)
+    out = client.data_dir / "compilations"
+    (out / "Untitled compilation [9].mp4").write_bytes(b"x" * 100)
+    (out / "notes.txt").write_text("not a video")
+    (out / "Best of [1] v2.parts").mkdir()  # a render in progress
+    assert client.get("/compilation-files/unused").json() == [{"name": "Untitled compilation [9].mp4", "bytes": 100}]
+    assert client.delete("/compilation-files/unused").json()["deleted"] == ["Untitled compilation [9].mp4"]
+    assert (out / f"Best of [{cid}] v1.mp4").exists() and (out / "notes.txt").exists()
