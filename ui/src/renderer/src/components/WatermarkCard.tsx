@@ -24,7 +24,12 @@ export function setWatermarkEnabled(on: boolean): void {
  *  profiles. Shown in the Generate bar (below the Watermark toggle), so it
  *  matches the Caption-style and Longform expandable rows. The enable toggle
  *  itself lives in the Generate bar. */
-export default function BrandingEditor(): JSX.Element {
+export default function BrandingEditor({
+  onProfileChange
+}: {
+  /** Called after the active profile is picked, created or deleted. */
+  onProfileChange?: () => void
+} = {}): JSX.Element {
   const [profiles, setProfiles] = useState<BrandingProfile[]>([])
   const [activeId, setActiveId] = useState<number | null>(watermarkSelection().profileId)
   const [name, setName] = useState('')
@@ -41,6 +46,7 @@ export default function BrandingEditor(): JSX.Element {
       setName(pick.name)
       setConfig(pick.config)
     }
+    onProfileChange?.()
   }
 
   useEffect(() => {
@@ -59,6 +65,7 @@ export default function BrandingEditor(): JSX.Element {
     localStorage.setItem(PROFILE_KEY, String(id))
     setName(p.name)
     setConfig(p.config)
+    onProfileChange?.()
   }
 
   const save = async (): Promise<void> => {

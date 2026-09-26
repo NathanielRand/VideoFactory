@@ -164,6 +164,11 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
   const [slots, setSlots] = useState<Slot[]>(loadDraft)
   const [channel, setChannel] = useState(localStorage.getItem('upload-channel') ?? '')
   const [openStyle, setOpenStyle] = useState<string | null>(null)
+  // Video Factory: the branding editor can be opened before any profile
+  // exists. Upstream only showed it once Watermark was ticked, and the box
+  // cannot be ticked without a profile, so the first one was uncreatable here.
+  const [showBranding, setShowBranding] = useState(false)
+  const [, setBrandingVersion] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [added, setAdded] = useState<number | null>(null)
@@ -416,7 +421,7 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
                     }`}
                     title={
                       needsProfile
-                        ? 'Create a branding profile below first — there is no logo to burn in yet.'
+                        ? 'Create a branding profile first: press "Set up" — there is no logo to burn in yet.'
                         : tg.title
                     }
                   >
@@ -430,6 +435,18 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
                       }
                     />
                     {t(tg.label)} <span className="text-muted">{t(tg.hint)}</span>
+                    {needsProfile && (
+                      <button
+                        type="button"
+                        className="text-accent hover:underline cursor-pointer"
+                        onClick={(e) => {
+                          e.preventDefault()
+                          setShowBranding(true)
+                        }}
+                      >
+                        {t('Set up')}
+                      </button>
+                    )}
                   </label>
                 )
               })}
@@ -552,7 +569,9 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
           </button>
         </div>
 
-        {wantsWatermark && <BrandingEditor />}
+        {(wantsWatermark || showBranding) && (
+          <BrandingEditor onProfileChange={() => setBrandingVersion((n) => n + 1)} />
+        )}
       </div>
 
       {full && (
