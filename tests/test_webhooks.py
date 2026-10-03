@@ -36,6 +36,8 @@ def test_the_signature_covers_the_exact_bytes_sent(monkeypatch):
 
     expected = hmac.new(b"sekrit", sent["data"], hashlib.sha256).hexdigest()
     assert sent["headers"][webhooks.HEADER] == f"sha256={expected}"
+    # Transition: the pre-rename header carries the identical value.
+    assert sent["headers"][webhooks.LEGACY_HEADER] == f"sha256={expected}"
     # Verifying against a re-serialised body is what breaks in the field, so
     # the bytes on the wire must be the ones that were signed.
     assert json.loads(sent["data"])["event"] == "job.done"
@@ -47,6 +49,7 @@ def test_no_secret_means_no_signature_header(monkeypatch):
                         lambda url, **kw: (sent.update(kw), _Response(204))[1])
     assert webhooks.deliver("https://example.com/hook", {"event": "job.failed"})
     assert webhooks.HEADER not in sent["headers"]
+    assert webhooks.LEGACY_HEADER not in sent["headers"]
 
 
 def test_a_refused_connection_is_reported_not_raised(monkeypatch):

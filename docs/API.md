@@ -288,6 +288,10 @@ Add `webhook_secret` and the body is signed:
 X-Video-Factory-Signature: sha256=<hmac-sha256 of the exact body bytes>
 ```
 
+For now the same value is also sent as `X-Clips-Kitty-Signature`, so a receiver
+written against the old name keeps working. It will be removed; check
+`X-Video-Factory-Signature`.
+
 Verify against the **raw bytes you received**, not a re-serialised copy of them:
 key order and spacing would differ and every signature would fail.
 

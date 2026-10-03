@@ -36,6 +36,9 @@ import requests
 
 TIMEOUT = 10.0
 HEADER = "X-Video-Factory-Signature"
+# Sent alongside HEADER, with the same value, so a receiver written against the
+# old name keeps verifying. TRANSITION ONLY: remove once nothing depends on it.
+LEGACY_HEADER = "X-Clips-Kitty-Signature"
 
 
 def is_deliverable(url: str) -> bool:
@@ -92,7 +95,7 @@ def deliver(url: str, body: dict, secret: str = "") -> bool:
     raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json", "User-Agent": "video-factory"}
     if secret:
-        headers[HEADER] = signature(secret, raw)
+        headers[HEADER] = headers[LEGACY_HEADER] = signature(secret, raw)
     try:
         response = requests.post(url, data=raw, headers=headers, timeout=TIMEOUT)
     except Exception as e:  # connection refused, DNS, timeout, anything
