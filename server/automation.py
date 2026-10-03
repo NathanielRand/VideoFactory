@@ -1,4 +1,5 @@
-"""Watched channels: a creator posts, Video Factory clips it, nobody pastes a link.
+"""Watched channels and playlists: a creator posts, Video Factory clips it,
+adds it to a compilation, or both, and nobody pastes a link.
 
 This is orchestration only. Detection is sources/channel_feed.py, processing is
 the ordinary queue and worker, and publishing is woopsocial_service. What lives
@@ -117,6 +118,55 @@ class PublishSettings(BaseModel):
     overrides: dict = {}
 
 
+class CompilationTarget(BaseModel):
+    """Where a watch's videos go when it adds them to a compilation."""
+
+    compilation_id: int | None = None
+    # Instead of an id: make a compilation with this title when the watch is
+    # saved. Never stored; the id it gets is.
+    new_title: str = Field(default="", max_length=200)
+    # "whole": each video, start to end. "clips": its best clips, which needs
+    # the watch to make clips too.
+    what: Literal["whole", "clips"] = "whole"
+    # How many of each video's best clips; 0 is all of them.
+    max_clips: int = Field(default=3, ge=0, le=20)
+
+
+class WatchActions(BaseModel):
+    """What a watch does with each new video. Both off: it only lands in the
+    Library, to be picked up from there."""
+
+    clips: bool = True
+    compile: bool = False
+    compilation: CompilationTarget = CompilationTarget()
+
+
+class BackfillSettings(BaseModel):
+    """Catching up on what a channel or playlist already has, when it is first
+    watched. Nothing set: earlier videos are listed, not taken, as always."""
+
+    # The latest this many. With `since`, the most to look through.
+    count: int = Field(default=0, ge=0, le=1000)
+    # "YYYY-MM-DD": only videos posted on or after this day.
+    since: str = Field(default="", pattern=r"^$|^\d{4}-\d{2}-\d{2}$")
+    # A playlist's listing has no dates, so which end is newest is asked:
+    # YouTube adds to the bottom unless the owner changed it.
+    newest_at: Literal["bottom", "top"] = "bottom"
+
+    def wanted(self) -> bool:
+        return bool(self.count or self.since)
+
+    def cutoff(self) -> float:
+        """The since day as unix seconds (local midnight), or 0."""
+        if not self.since:
+            return 0.0
+        return datetime.strptime(self.since, "%Y-%m-%d").timestamp()
+
+
+# The most a "back to a date" catch-up looks through when no count is given.
+BACKFILL_SINCE_CAP = 200
+
+
 class AutomationPatch(BaseModel):
     enabled: bool | None = None
     # Delete a watched video's download once its clips are published, so an
@@ -135,6 +185,8 @@ class WatchIn(BaseModel):
     # defaults, captions and all, whatever the person had chosen.
     options: dict | None = None
     preset: str | None = None
+    actions: WatchActions | None = None
+    backfill: BackfillSettings | None = None
 
 
 class WatchPatch(BaseModel):
@@ -143,6 +195,7 @@ class WatchPatch(BaseModel):
     preset: str | None = None
     options: dict | None = None
     publish: PublishSettings | None = None
+    actions: WatchActions | None = None
     backlog: Literal["all", "newest", "day", "none"] | None = None
     min_minutes: float | None = Field(default=None, ge=0, le=600)
 
@@ -161,6 +214,28 @@ def publish_settings(watch) -> PublishSettings:
         return PublishSettings()
 
 
+def watch_backfill(watch) -> BackfillSettings:
+    try:
+        return BackfillSettings(**json.loads(watch["backfill"] or "{}"))
+    except Exception:
+        return BackfillSettings()
+
+
+def watch_actions(watch) -> WatchActions:
+    try:
+        return WatchActions(**json.loads(watch["actions"] or "{}"))
+    except Exception:
+        return WatchActions()
+
+
+def clip_only(watch) -> bool:
+    """Only making clips: then a Short, or anything under the minimum length,
+    has nothing worth taking. A watch that feeds a compilation or the Library
+    takes them, since a short video is often exactly what a compilation wants."""
+    actions = watch_actions(watch)
+    return actions.clips and not actions.compile
+
+
 def watch_options(watch) -> dict:
     try:
         options = json.loads(watch["options"] or "{}")
@@ -176,7 +251,14 @@ def job_payload(watch, url: str) -> dict:
 
     options = watch_options(watch)
     preset = PRESETS.get(options.pop("preset", "standard")) or PRESETS["standard"]
-    return {"url": url, **preset["options"], **options}
+    payload = {"url": url, **preset["options"], **options}
+    # The watcher adds the video to the compilation itself, once, so the
+    # worker's own "add when done" must not do it a second time.
+    payload.pop("add_to_compilation", None)
+    payload.pop("import_only", None)
+    if not watch_actions(watch).clips:
+        payload["import_only"] = True  # into the Library, no clips
+    return payload
 
 
 def render_footer(template: str, item, watch) -> str:
@@ -197,11 +279,13 @@ def _job_status(d: StateDB, item) -> str | None:
     """The item's job status, or None when it has no job. A job row cleared
     from the queue's history still counts as done if its video finished."""
     if not item["job_id"]:
-        return None
+        # Already in the Library when the watch found it: nothing to run.
+        return "done" if item["state"] == "library" else None
     job = d.get_job(item["job_id"])
     if job is not None:
         return job["status"]
-    return "done" if d.video_status(item["video_id"]) == "done" else "cancelled"
+    # 'imported': a watch set to bring videos into the Library, not clip them.
+    return "done" if d.video_status(item["video_id"]) in ("done", "imported") else "cancelled"
 
 
 def _deliveries(d: StateDB, video_id: str) -> list[dict]:
@@ -220,7 +304,7 @@ def view_item(d: StateDB, item, worker) -> dict:
             "id", "watch_id", "platform", "video_id", "url", "title", "published_at",
             "detected_at", "state", "reason", "job_id", "publish_state", "publish_error",
             "retries", "retry_at", "publish_attempts", "publish_retry_at", "delivery_retries",
-            "source_freed",
+            "source_freed", "compiled", "compile_note",
         )
     }
     status = {
@@ -230,6 +314,7 @@ def view_item(d: StateDB, item, worker) -> dict:
         "waiting": "waiting_for_queue",
         "skipped": "skipped",
         "error": "error",
+        "library": "complete",
     }.get(item["state"], "queued")
     job_status = _job_status(d, item) if item["state"] == "queued" else None
     if job_status is not None:
@@ -243,12 +328,40 @@ def view_item(d: StateDB, item, worker) -> dict:
             job = d.get_job(item["job_id"])
             out["details"] = ((job["error"] if job is not None else "") or "")[:500]
     out["status"] = status
+    out["imported"] = item["state"] == "library" or (_imported_only(d, item) if item["job_id"] else False)
     if status == "complete":
         out["clips"] = d.conn.execute(
             "SELECT COUNT(*) FROM clips WHERE video_id = ?", (item["video_id"],)
         ).fetchone()[0]
         out["deliveries"] = _deliveries(d, item["video_id"])
     return out
+
+
+def _imported_only(d: StateDB, item) -> bool:
+    """Whether the item's job brought the video into the Library without
+    making clips. Read from the job, not the watch, whose settings may have
+    changed since."""
+    job = d.get_job(item["job_id"]) if item["job_id"] else None
+    if job is not None:
+        try:
+            return bool(json.loads(job["payload"] or "{}").get("import_only"))
+        except ValueError:
+            return False
+    return d.video_status(item["video_id"]) == "imported"
+
+
+def view_actions(d: StateDB, watch) -> dict:
+    actions = watch_actions(watch).model_dump()
+    actions["compilation"].pop("new_title", None)
+    comp_id = actions["compilation"]["compilation_id"]
+    comp = None
+    if comp_id:
+        from compilation import store as compilations
+
+        comp = compilations.get(d, int(comp_id))
+    # The title, so the card can name it; None when it has been deleted.
+    actions["compilation"]["title"] = comp["title"] if comp else None
+    return actions
 
 
 def view_watch(d: StateDB, watch) -> dict:
@@ -264,11 +377,14 @@ def view_watch(d: StateDB, watch) -> dict:
         "id": watch["id"],
         "platform": watch["platform"],
         "channel_key": watch["channel_key"],
+        "kind": "playlist" if _is_playlist(watch) else "channel",
         "name": watch["name"],
         "enabled": bool(watch["enabled"]),
         "preset": options.pop("preset", "standard"),
         "options": options,
         "publish": publish_settings(watch).model_dump(),
+        "actions": view_actions(d, watch),
+        "backfill": watch_backfill(watch).model_dump(),
         "backlog": watch["backlog"],
         "min_minutes": watch["min_minutes"],
         "last_ok_poll_at": watch["last_ok_poll_at"],
@@ -282,10 +398,20 @@ def view_watch(d: StateDB, watch) -> dict:
 # ---- the creator it learns about --------------------------------------------
 
 
+def _is_playlist(watch) -> bool:
+    from sources.channel_feed import is_playlist
+
+    return is_playlist(watch["platform"], watch["channel_key"])
+
+
 def creator_name(watch) -> str:
     """The channel name a watch's creator profile goes by, or "" when there
     is no real one. A YouTube channel whose name could not be read is known
-    only by its UC id, and a profile called that would help nobody."""
+    only by its UC id, and a profile called that would help nobody. A
+    playlist is named for itself, not a creator, and may hold many, so each
+    of its videos is tagged by its own channel as it is processed."""
+    if _is_playlist(watch):
+        return ""
     name = (watch["name"] or "").strip()
     if watch["platform"] == "youtube" and name == watch["channel_key"]:
         return ""
@@ -469,6 +595,7 @@ class ChannelWatcher(threading.Thread):
             self._retry_failed_runs(d, now)
             self._retry_rejected_posts(d, now)
             self._decide_publishing(d)
+            self._add_to_compilations(d)
             self._free_disk(d)
             self._notice_posts(d)
         finally:
@@ -485,8 +612,10 @@ class ChannelWatcher(threading.Thread):
             self._say(f"Couldn't check {name}: {_short(e)}", "error")
             d.set_watch(watch["id"], last_error=_short(e), next_poll_at=now + self._interval)
             return
-        # Shorts are not watched at all: nothing to clip, so not worth a row.
-        videos = [v for v in videos if not getattr(v, "short", False)]
+        # A watch that only makes clips passes over Shorts: nothing to clip,
+        # so not worth a row. One feeding a compilation keeps them.
+        if clip_only(watch):
+            videos = [v for v in videos if not getattr(v, "short", False)]
         known = d.watch_item_ids()
         fresh, seen = [], set()
         for video in videos:
@@ -496,12 +625,16 @@ class ChannelWatcher(threading.Thread):
 
         if not watch["last_ok_poll_at"]:
             # The first look records what is already there, so adding a channel
-            # never queues its back catalogue. Listed, so any of it can still be
-            # clipped with one click.
-            for video in fresh:
-                self._insert(d, watch, video, now, "baseline", _BASELINE)
-            self._say(f"Now watching {name}. {len(fresh)} earlier videos noted, none clipped.",
-                      "info")
+            # never queues its back catalogue unless asked to catch up. Listed,
+            # so any of it can still be taken with one click.
+            backfill = watch_backfill(watch)
+            if backfill.wanted():
+                self._catch_up_first_look(d, watch, backfill, fresh, now)
+            else:
+                for video in fresh:
+                    self._insert(d, watch, video, now, "baseline", _BASELINE)
+                self._say(f"Now watching {name}. {len(fresh)} earlier videos noted, none taken.",
+                          "info")
         else:
             take, hold = fresh, []
             missed = now - watch["last_ok_poll_at"] > 2 * self._interval
@@ -524,12 +657,82 @@ class ChannelWatcher(threading.Thread):
         if fresh:
             self._broadcaster.publish({"type": "automation"})
 
-    def _insert(self, d: StateDB, watch, video, now: float, state: str, reason: str) -> None:
-        d.insert_watch_item(
+    def _insert(self, d: StateDB, watch, video, now: float, state: str, reason: str,
+                not_before: float = 0.0) -> bool:
+        return d.insert_watch_item(
             video.video_id, watch_id=watch["id"], platform=watch["platform"], url=video.url,
             title=video.title, published_at=video.published_at, detected_at=now, state=state,
-            reason=reason, next_check_at=now,
+            reason=reason, next_check_at=now, not_before=not_before,
         )
+
+    def _catch_up_first_look(self, d: StateDB, watch, backfill: BackfillSettings,
+                             fresh: list, now: float) -> None:
+        """Take some of what is already there, as the watch was asked to.
+
+        Looks deeper than the newest fifteen, puts the list newest first, and
+        takes the latest `count`, or everything back to `since` (looking
+        through at most `count`, or BACKFILL_SINCE_CAP). What is taken goes
+        through the same steps a new video does, so each is checked against
+        the Library and the queue before anything downloads. The rest is
+        listed as earlier, as without a catch-up."""
+        name = watch["name"] or watch["channel_key"]
+        limit = backfill.count or BACKFILL_SINCE_CAP
+        try:
+            with self._busy(f"Looking through what {name} already has"):
+                history = self._feed.history(watch["platform"], watch["channel_key"], limit)
+        except Exception as e:
+            # The newest fifteen are already in hand: catch up on those.
+            self._say(f"Couldn't read further back on {name} ({_short(e)}); "
+                      "catching up on the newest only.", "error")
+            history = []
+        from sources.channel_feed import is_playlist
+
+        if is_playlist(watch["platform"], watch["channel_key"]):
+            dated = history and all(v.published_at for v in history)
+            if not dated and backfill.newest_at == "bottom":
+                history = list(reversed(history))
+        if clip_only(watch):
+            history = [v for v in history if not getattr(v, "short", False)]
+        # A channel's deep listing is undated, but its feed dates the newest
+        # fifteen: carry those across so they are cut off by date right away.
+        dates = {v.video_id: v.published_at for v in fresh if v.published_at}
+        for video in history:
+            if not video.published_at and video.video_id in dates:
+                video.published_at = dates[video.video_id]
+        known = d.watch_item_ids()
+        ordered, seen = [], set()
+        for video in [*history, *fresh]:
+            vid = video.video_id
+            if vid and vid not in seen:
+                seen.add(vid)
+                ordered.append(video)
+        # Dated listings are put newest first by date; undated keep their order.
+        if ordered and all(v.published_at for v in ordered):
+            ordered.sort(key=lambda v: v.published_at, reverse=True)
+
+        cutoff = backfill.cutoff()
+        take, rest = [], []
+        for video in ordered:
+            if len(take) >= limit:
+                rest.append(video)
+            elif cutoff and video.published_at and video.published_at < cutoff:
+                rest.append(video)
+            else:
+                take.append(video)
+        already = 0
+        for video in take:
+            if video.video_id in known:
+                already += 1  # another watch has it: one row, one job
+                continue
+            # Undated with a cutoff: its date is read with the readiness check.
+            not_before = cutoff if cutoff and not video.published_at else 0.0
+            self._insert(d, watch, video, now, "new", "Catching up on an earlier video.", not_before)
+        for video in rest:
+            self._insert(d, watch, video, now, "baseline", _BASELINE)
+        took = len(take) - already
+        extra = f", {already} already watched elsewhere" if already else ""
+        self._say(f"Now watching {name}. Catching up on {took} earlier video"
+                  f"{'' if took == 1 else 's'}{extra}; {len(rest)} older noted, not taken.", "found")
 
     def _catch_up(self, policy: str, fresh: list, now: float) -> tuple[list, list]:
         """Several videos appeared while nobody was watching. Which to clip.
@@ -567,12 +770,19 @@ class ChannelWatcher(threading.Thread):
                                  reason="It never became available to download.")
                 continue
             with self._busy(f"Checking whether {_quoted(item['title'])} is ready"):
-                found = self._feed.readiness(item["url"], float(watch["min_minutes"] or 0) * 60)
+                shortest = float(watch["min_minutes"] or 0) * 60 if clip_only(watch) else 0
+                found = self._feed.readiness(item["url"], shortest)
             facts = {}
             if found.title and not item["title"]:
                 facts["title"] = found.title
             if found.published_at and not item["published_at"]:
                 facts["published_at"] = found.published_at
+            posted = found.published_at or item["published_at"]
+            if item["not_before"] and posted and posted < item["not_before"] and found.state != "skip":
+                # Caught up only back to a date, and this one is from before it.
+                d.set_watch_item(item["id"], state="baseline", reason=_BASELINE,
+                                 not_before=0, **facts)
+                continue
             if found.state == "ready":
                 d.set_watch_item(item["id"], state="waiting", reason="", **facts)
             elif found.state == "not_yet":
@@ -595,12 +805,23 @@ class ChannelWatcher(threading.Thread):
             if watch is None or not watch["enabled"]:
                 continue
             title = item["title"] or f"{watch['name'] or watch['channel_key']} video"
-            outcome, job_id = queue.enqueue_once(
-                d, item["video_id"], job_payload(watch, item["url"]), title=title
-            )
+            payload = job_payload(watch, item["url"])
+            if self._in_library(d, item["video_id"], payload):
+                # Nothing to download or make. Taken from the Library as it is,
+                # so a watch feeding a compilation still adds it.
+                d.set_watch_item(item["id"], state="library", publish_state="off",
+                                 reason="Already in your Library.")
+                self._say(f"{_quoted(title)} is already in your Library", "info")
+                continue
+            outcome, job_id = queue.enqueue_once(d, item["video_id"], payload, title=title)
             if outcome == "done":
-                d.set_watch_item(item["id"], state="skipped",
-                                 reason="Already clipped in Video Factory.")
+                if watch_actions(watch).compile:
+                    # Clipped before: the clips are there for the compilation.
+                    d.set_watch_item(item["id"], state="library", publish_state="off",
+                                     reason="Already clipped in Video Factory.")
+                else:
+                    d.set_watch_item(item["id"], state="skipped",
+                                     reason="Already clipped in Video Factory.")
                 continue
             if outcome == "full":
                 full = f"Waiting for room in the queue ({queue.MAX_ACTIVE} videos at most)."
@@ -613,12 +834,27 @@ class ChannelWatcher(threading.Thread):
             # anything else they staged and have not started.
             queue.start_if_alone(d, job_id)
             d.set_watch_item(item["id"], state="queued", job_id=job_id, reason="")
-            self._say(f"Queued {_quoted(title)} for clipping", "queued", item["url"])
+            into = "your Library" if job_payload(watch, item["url"]).get("import_only") else "clipping"
+            self._say(f"Queued {_quoted(title)} for {into}", "queued", item["url"])
             queued_any = True
         if queued_any:
             self._worker.notify()
             self._broadcaster.publish({"type": "queue"})
             self._broadcaster.publish({"type": "automation"})
+
+    def _in_library(self, d: StateDB, video_id: str, payload: dict) -> bool:
+        """For a watch that imports rather than clips: the video is in the
+        Library already, with its file still on disk. A clip watch is not
+        stopped by an import: the video has not been clipped yet."""
+        if not payload.get("import_only"):
+            return False
+        if d.video_status(video_id) not in ("done", "imported"):
+            return False
+        if self._downloads is None:
+            return True
+        from core.paths import cached_source
+
+        return cached_source(self._downloads, video_id) is not None
 
     def _tag_creator(self, d: StateDB, watch, video_id: str, title: str) -> None:
         """Put the video on the watch's creator before it runs, the way the
@@ -657,6 +893,12 @@ class ChannelWatcher(threading.Thread):
                 continue
             watch = d.get_watch(item["watch_id"])
             if watch is None:
+                continue
+            if item["publish_state"] == "" and _imported_only(d, item):
+                # Brought into the Library, no clips: nothing to publish.
+                d.set_watch_item(item["id"], publish_state="off")
+                self._say(f"{_quoted(item['title'])} is in your Library", "done")
+                self._broadcaster.publish({"type": "automation"})
                 continue
             if item["publish_state"] == "":
                 learned = learned_from(d, item["video_id"])
@@ -763,7 +1005,82 @@ class ChannelWatcher(threading.Thread):
         self._say(f"Couldn't publish the clips of {_quoted(item['title'])}: {_short(e)}", "error")
         return {}
 
-    # -- 5. keep a hands-off channel going -------------------------------------
+    # -- 5. add it to the compilation --------------------------------------------
+
+    def _add_to_compilations(self, d: StateDB) -> None:
+        """Once a video is done, put it in its watch's compilation: whole, or
+        its best clips in the order they happen. Once per video, marked on the
+        item, so a restart or a second look never adds it twice. A video that
+        finished while the watch had no compilation is marked as not asked, so
+        switching one on later only takes what comes after."""
+        from compilation import store as compilations
+
+        changed = False
+        for item in d.watch_items(states=("queued", "library"), limit=500):
+            if item["compiled"] or _job_status(d, item) != "done":
+                continue
+            watch = d.get_watch(item["watch_id"])
+            actions = watch_actions(watch) if watch is not None else None
+            if actions is None or not actions.compile or not actions.compilation.compilation_id:
+                d.set_watch_item(item["id"], compiled=3)
+                continue
+            target = actions.compilation
+            comp = compilations.get(d, int(target.compilation_id))
+            if comp is None:
+                d.set_watch_item(item["id"], compiled=2,
+                                 compile_note="Its compilation has been deleted.")
+                changed = True
+                continue
+            if comp["status"] in ("queued", "rendering"):
+                continue  # frozen while it renders; next tick
+            segments = self._segments_for(d, item, target)
+            if not segments:
+                note = ("The run made no clips to add." if target.what == "clips"
+                        else "Its length isn't known yet, so it couldn't be added.")
+                d.set_watch_item(item["id"], compiled=2, compile_note=note)
+                changed = True
+                continue
+            # Footage already in the compilation (added by hand, by another
+            # watch, or an earlier find of the same video) is not added again.
+            have = list((comp["recipe"] or {}).get("segments") or [])
+            fresh = []
+            for seg in segments:
+                if compilations.duplicate_of(have, seg) is None:
+                    fresh.append(seg)
+                    have.append(seg)
+            if not fresh:
+                d.set_watch_item(item["id"], compiled=1,
+                                 compile_note="Already in the compilation, so not added again.")
+                changed = True
+                continue
+            added = sum(1 for seg in fresh if compilations.append_segment(d, comp["id"], seg))
+            d.set_watch_item(item["id"], compiled=1 if added else 2,
+                             compile_note="" if added else "The compilation couldn't take it.")
+            if added:
+                what = "" if target.what == "whole" else f"{added} clip{'s' if added != 1 else ''} of "
+                self._say(f"Added {what}{_quoted(item['title'])} to {_quoted(comp['title'])}",
+                          "done")
+                self._broadcaster.publish({"type": "compilation", "compilation_id": comp["id"]})
+            changed = True
+        if changed:
+            self._broadcaster.publish({"type": "automation"})
+
+    @staticmethod
+    def _segments_for(d: StateDB, item, target: CompilationTarget) -> list[dict]:
+        from compilation import store as compilations
+
+        vid = item["video_id"]
+        if target.what == "clips":
+            best = list(d.clips_for_video(vid))  # best first
+            if target.max_clips:
+                best = best[: target.max_clips]
+            best.sort(key=lambda c: float(c["start_s"]))
+            return [{"video_id": vid, "start": round(float(c["start_s"]), 2),
+                     "end": round(float(c["end_s"]), 2)} for c in best]
+        duration = compilations.library_durations(d, [vid]).get(vid, 0.0)
+        return [{"video_id": vid, "start": 0.0, "end": round(duration, 2)}] if duration > 0 else []
+
+    # -- 6. keep a hands-off channel going -------------------------------------
 
     def _hands_off(self, d: StateDB, item):
         """The item's watch if it is enabled and publishes automatically, else
@@ -954,6 +1271,26 @@ def install(
         downloads=Path(data_dir) / "downloads" if data_dir is not None else None,
     )
 
+    def settle_actions(d: StateDB, actions: WatchActions, name: str) -> WatchActions:
+        """Check a watch's actions before they are stored, and make the
+        compilation it asked for. Raises 400 with a reason worth showing."""
+        target = actions.compilation
+        if actions.compile:
+            from compilation import store as compilations
+
+            if target.what == "clips" and not actions.clips:
+                raise HTTPException(400, "Adding the best clips needs Generate clips on too.")
+            if target.new_title.strip():
+                target.compilation_id = compilations.create(d, target.new_title.strip())
+                broadcaster.publish({"type": "compilation",
+                                     "compilation_id": target.compilation_id})
+            elif not target.compilation_id:
+                target.compilation_id = compilations.create(d, f"{name} compilation")
+            elif compilations.get(d, int(target.compilation_id)) is None:
+                raise HTTPException(400, "That compilation no longer exists. Choose another.")
+        target.new_title = ""
+        return actions
+
     def load_watch(d: StateDB, watch_id: int):
         row = d.get_watch(watch_id)
         if row is None:
@@ -1091,10 +1428,12 @@ def install(
             if preset not in PRESETS:
                 raise HTTPException(400, f"unknown preset '{preset}'")
             options["preset"] = preset
+            actions = settle_actions(d, body.actions or WatchActions(), channel.name)
             watch_id = d.insert_watch(
                 channel.platform, channel.channel_key, name=channel.name,
                 publish=(body.publish or PublishSettings()).model_dump_json(),
-                options=json.dumps(options),
+                options=json.dumps(options), actions=actions.model_dump_json(),
+                backfill=(body.backfill or BackfillSettings()).model_dump_json(),
             )
             watch = load_watch(d, watch_id)
             # In Creators straight away, before the first video, so what it
@@ -1131,6 +1470,10 @@ def install(
                 fields["options"] = json.dumps(options)
             if body.publish is not None:
                 fields["publish"] = body.publish.model_dump_json()
+            if body.actions is not None:
+                fields["actions"] = settle_actions(
+                    d, body.actions, watch["name"] or watch["channel_key"]
+                ).model_dump_json()
             if body.backlog is not None:
                 fields["backlog"] = body.backlog
             if body.min_minutes is not None:
@@ -1186,7 +1529,7 @@ def install(
                 return view_item(d, item, worker)
             found = feed.readiness(item["url"], 0)
             if found.state == "ready":
-                d.set_watch_item(item_id, state="waiting", reason="")
+                d.set_watch_item(item_id, state="waiting", reason="", not_before=0)
             elif found.state == "not_yet":
                 d.set_watch_item(item_id, state="not_ready", reason=found.reason,
                                  detected_at=clock(), next_check_at=clock() + RECHECK_SECONDS)

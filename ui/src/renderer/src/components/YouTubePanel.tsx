@@ -15,6 +15,7 @@ import {
 import YouTubeMetadataForm, { type Metadata } from './YouTubeMetadataForm'
 import YouTubeSchedule from './YouTubeSchedule'
 import YouTubeThumbnail from './YouTubeThumbnail'
+import { rememberedAnswers } from './YouTubeQuestions'
 
 /** Publishing, inside the editor.
  *
@@ -31,6 +32,7 @@ interface Props {
   pendingRender: { start?: number; end?: number; render_opts: Record<string, unknown> } | null
   duration: number
   currentTime: number
+  getCurrentTime?: () => number
   onOpenSettings: () => void
 }
 
@@ -46,24 +48,30 @@ export default function YouTubePanel({
   pendingRender,
   duration,
   currentTime,
+  getCurrentTime,
   onOpenSettings
 }: Props): JSX.Element {
   const settings = status.settings
   const [metadata, setMetadata] = useState<Metadata>(() => ({
     title: (clip.title || clip.hook || '').slice(0, 100),
     description: clip.description || '',
-    tags: (clip.hashtags || []).map((h) => h.replace(/^#/, '')),
+    // Search keywords, not hashtags: hashtags go in the description, and
+    // tags are what search matches. Older clips have no keywords yet.
+    tags: (clip.keywords?.length ? clip.keywords : (clip.hashtags || []).map((h) => h.replace(/^#/, ''))),
     category_id: settings?.category_id ?? '22',
     default_language: null,
     // No default: YouTube requires an explicit answer, and choosing on the
     // user's behalf is exactly the kind of guess that gets channels in trouble.
     made_for_kids: null,
-    contains_synthetic_media: false,
+    // Offered again as last answered; nothing chosen on a first publish.
+    contains_synthetic_media: rememberedAnswers().ai,
+    paid_promotion: rememberedAnswers().paid,
     license: 'youtube',
     embeddable: true,
     public_stats_viewable: true,
     notify_subscribers: settings?.notify_subscribers ?? true,
-    playlist_id: null
+    // The clip's own choice (its page, or Select all), changeable here.
+    playlist_id: clip.playlist_id || null
   }))
   const [privacy, setPrivacy] = useState(settings?.privacy ?? 'public')
   const [scheduledAt, setScheduledAt] = useState('')
@@ -118,6 +126,8 @@ export default function YouTubePanel({
   const ready =
     metadata.title.trim().length > 0 &&
     metadata.made_for_kids !== null &&
+    metadata.contains_synthetic_media !== null &&
+    metadata.paid_promotion !== null &&
     (!scheduling || publishAt !== null)
 
   const buttonLabel = useMemo(() => {
@@ -140,7 +150,8 @@ export default function YouTubePanel({
         privacy: scheduling ? 'private' : privacy,
         publish_at: publishAt,
         made_for_kids: metadata.made_for_kids === true,
-        contains_synthetic_media: metadata.contains_synthetic_media,
+        contains_synthetic_media: metadata.contains_synthetic_media === true,
+        paid_promotion: metadata.paid_promotion === true,
         embeddable: metadata.embeddable,
         public_stats_viewable: metadata.public_stats_viewable,
         license: metadata.license,
@@ -269,12 +280,16 @@ export default function YouTubePanel({
         region={settings?.region ?? 'US'}
         playlistsAvailable={Boolean(status.playlists_available)}
         disabled={busy}
+        altTitles={clip.alt_titles ?? []}
+        hashtags={clip.hashtags ?? []}
+        hasThumbnail={Boolean(thumbnail)}
       />
 
       <YouTubeThumbnail
         clipId={clip.id}
         duration={duration}
         currentTime={currentTime}
+        getCurrentTime={getCurrentTime}
         value={thumbnail}
         onChange={setThumbnail}
         disabled={busy}

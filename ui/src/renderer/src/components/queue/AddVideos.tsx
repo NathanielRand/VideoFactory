@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { api } from '../../lib/api'
 import type { CaptionStyle, JobOptions } from '../../lib/types'
 import CaptionStyleControls, { DEFAULT_CAPTION_STYLE } from '../CaptionStyleControls'
-import BrandingEditor, { setWatermarkEnabled, watermarkSelection } from '../WatermarkCard'
+import BrandingPicker from '../BrandingPicker'
+import { brandingChoice, defaultBrandingId, withBranding } from '../../lib/branding'
 import { Folder, Trash } from '../icons'
 import { t } from '../../lib/i18n'
+import { compilationsApi, type Compilation } from '../../lib/compilations'
 
 const DRAFT_KEY = 'queue-draft'
 
@@ -14,6 +16,63 @@ const REASONS: Record<string, string> = {
   unrecognized: 'not a link Video Factory recognises',
   bad_option: 'a setting on this video was rejected',
   queue_full: 'the queue is full — let one finish first'
+}
+
+/** What a row is FOR. Every upload lands in the Library whatever it is for:
+ *  'library' stops there (decide later, from its Library row), 'clips' runs
+ *  the AI pipeline as always, 'compilation' imports it and appends it whole
+ *  to a compilation. A library or compilation upload can still be clipped
+ *  later from the Library. */
+type Intent = 'library' | 'clips' | 'compilation'
+
+const PREF_INTENT = 'generate-intent'
+/** Sentinel in the compilation picker for "make a new one on Start". */
+const NEW_COMP = -1
+
+const intentOf = (o: JobOptions): Intent =>
+  !o.import_only ? 'clips' : o.add_to_compilation !== undefined ? 'compilation' : 'library'
+
+const INTENTS: [Intent, string, string][] = [
+  [
+    'library',
+    '▤ Library only',
+    'Add it to your Library and decide later - make clips, put it in a compilation, or both, from its Library row'
+  ],
+  ['clips', '✂ Make clips', 'Find the best moments with AI and cut them into clips'],
+  [
+    'compilation',
+    '▦ Compilation',
+    'Add it to your Library and straight into a compilation, whole. You can still make clips from it later.'
+  ]
+]
+
+/** Switch a row's intent. The clip settings are kept on the row either way,
+ *  so flipping back to Clips does not lose a caption style set a moment ago;
+ *  the server ignores them for an import. `compilation` is where a row
+ *  switched to Compilation goes until another is picked. */
+function withIntent(
+  o: JobOptions,
+  intent: Intent,
+  compilation?: number,
+  remember = true
+): JobOptions {
+  const next = { ...o }
+  if (intent === 'clips') {
+    delete next.import_only
+    delete next.add_to_compilation
+  } else {
+    next.import_only = true
+    if (intent === 'library') delete next.add_to_compilation
+    else next.add_to_compilation = next.add_to_compilation ?? compilation ?? NEW_COMP
+  }
+  if (remember) {
+    try {
+      localStorage.setItem(PREF_INTENT, intent)
+    } catch {
+      // Remembering is a convenience only.
+    }
+  }
+  return next
 }
 
 /** One video being set up. Owns its own options object, so editing this
@@ -29,9 +88,11 @@ interface Slot {
   options: JobOptions
   /** Why the server refused this one, kept so it can be fixed in place. */
   error?: string
+  /** Name for a compilation to create on Start, when the picker says "New". */
+  newCompilation?: string
 }
 
-type ToggleKey = 'captions' | 'long_clips' | 'podcast' | 'longform' | 'watermark'
+type ToggleKey = 'captions' | 'long_clips' | 'podcast' | 'longform'
 
 /** The switches after Captions. Captions is rendered on its own so the
  *  "Caption style" button can sit immediately beside it, where it belongs —
@@ -57,24 +118,30 @@ const TOGGLES: { key: ToggleKey; label: string; hint: string; title: string }[] 
     hint: '(multi-cam)',
     title:
       'For multi-camera podcasts (cuts between angles, several people). Frames shot by shot: each camera shot gets one steady crop centered on whoever is talking, and cuts land directly on the speaker’s face — no panning, no split screens. Leave OFF for normal one-camera streams.'
-  },
-  {
-    key: 'watermark',
-    label: 'Watermark',
-    hint: '(branding)',
-    title:
-      'Burn your logo / channel handle into every clip of this video. Configure the branding profile below.'
   }
 ]
+
+const PREF_STYLE = 'generate-caption-style'
 
 function savedStyle(): Required<CaptionStyle> {
   try {
     return {
       ...DEFAULT_CAPTION_STYLE,
-      ...JSON.parse(localStorage.getItem('generate-caption-style') ?? '{}')
+      ...JSON.parse(localStorage.getItem(PREF_STYLE) ?? '{}')
     }
   } catch {
     return { ...DEFAULT_CAPTION_STYLE } // a corrupt saved style must not block the list
+  }
+}
+
+/** The last caption style set on any row becomes the next row's starting
+ *  style. It was read but never written, so it reset to the default every
+ *  time. */
+function rememberStyle(style: CaptionStyle): void {
+  try {
+    localStorage.setItem(PREF_STYLE, JSON.stringify(style))
+  } catch {
+    // Remembering is a convenience only.
   }
 }
 
@@ -101,8 +168,8 @@ function remember(key: ToggleKey, on: boolean, mode?: string): void {
       localStorage.setItem(PREF.longform, String(on))
       if (mode) localStorage.setItem(PREF.longform_mode, mode)
     }
-    // 'watermark' is deliberately absent: WatermarkCard owns its own two keys
-    // and writes them itself.
+    // Branding is absent: its default is set on the Branding page, not by
+    // whatever the last video happened to use.
   } catch {
     // A full or blocked localStorage must not stop someone queueing a video.
   }
@@ -114,7 +181,6 @@ function remember(key: ToggleKey, on: boolean, mode?: string): void {
  *  chat box used to ignore every one of these, so captions came back burned
  *  in however often the box was unticked. One reader, not two. */
 export function seedOptions(): JobOptions {
-  const wm = watermarkSelection()
   const o: JobOptions = {
     captions: localStorage.getItem(PREF.captions) !== 'false',
     caption_style: savedStyle()
@@ -124,7 +190,21 @@ export function seedOptions(): JobOptions {
   if (localStorage.getItem(PREF.longform) === 'true') {
     o.longform = { mode: localStorage.getItem(PREF.longform_mode) ?? 'short_clips' }
   }
-  if (wm.enabled && wm.profileId) o.watermark_profile_id = wm.profileId
+  const branding = defaultBrandingId()
+  if (branding) o.watermark_profile_id = branding
+  return o
+}
+
+/** A fresh row: the Generate bar's settings plus the last intent picked.
+ *  Kept out of seedOptions, which the assistant also reads — a chat request
+ *  to "clip this" must never come back as an import because the last row
+ *  here was for a compilation. */
+function seedRow(): JobOptions {
+  const o = seedOptions()
+  // A remembered 'compilation' starts as Library only: which compilation is
+  // a per-batch choice, and guessing it would file videos in the wrong one.
+  const pref = localStorage.getItem(PREF_INTENT)
+  if (pref === 'library' || pref === 'compilation') o.import_only = true
   return o
 }
 
@@ -134,7 +214,7 @@ const newKey = (): string => `s${Date.now()}-${counter++}`
 function emptySlot(from?: JobOptions): Slot {
   // A new row copies the one above it: a batch usually shares most settings,
   // and every switch is still overridable per video. Copied, not shared.
-  return { key: newKey(), url: '', path: null, title: '', options: { ...(from ?? seedOptions()) } }
+  return { key: newKey(), url: '', path: null, title: '', options: { ...(from ?? seedRow()) } }
 }
 
 function loadDraft(): Slot[] {
@@ -160,15 +240,19 @@ function loadDraft(): Slot[] {
  *
  *  Every row owns its own options object, so toggling video 2 writes video 2
  *  and nothing else. */
-export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.Element {
+export default function AddVideos({
+  onAdded,
+  libraryOnly = false
+}: {
+  onAdded?: () => void
+  /** The Library's own Add videos: every row just goes into the Library, and
+   *  what it is for is chosen afterwards on its row there. No choice to make
+   *  here, so none is shown. */
+  libraryOnly?: boolean
+}): JSX.Element {
   const [slots, setSlots] = useState<Slot[]>(loadDraft)
   const [channel, setChannel] = useState(localStorage.getItem('upload-channel') ?? '')
   const [openStyle, setOpenStyle] = useState<string | null>(null)
-  // Video Factory: the branding editor can be opened before any profile
-  // exists. Upstream only showed it once Watermark was ticked, and the box
-  // cannot be ticked without a profile, so the first one was uncreatable here.
-  const [showBranding, setShowBranding] = useState(false)
-  const [, setBrandingVersion] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [added, setAdded] = useState<number | null>(null)
@@ -185,6 +269,22 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
   // is visible while building rather than a refusal after pressing Generate.
   const [capacity, setCapacity] = useState<number | null>(null)
   const [maxActive, setMaxActive] = useState(5)
+  // Compilations a row can go straight into. Any not rendering right now:
+  // a rendering one's recipe is frozen until it finishes.
+  const [compilations, setCompilations] = useState<Compilation[]>([])
+  // What the last Start did, for the links under the bar.
+  const [imported, setImported] = useState<{ count: number; compilation: number | null } | null>(
+    null
+  )
+
+  useEffect(() => {
+    compilationsApi
+      .list()
+      .then((all) =>
+        setCompilations(all.filter((c) => c.status !== 'queued' && c.status !== 'rendering'))
+      )
+      .catch(() => undefined) // only costs the picker its list
+  }, [added])
 
   useEffect(() => {
     void api
@@ -206,7 +306,11 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
 
   const ready = slots.filter((s) => s.url.trim() || s.path)
   const hasFiles = ready.some((s) => s.path)
-  const wantsWatermark = slots.some((s) => s.options.watermark_profile_id)
+  const intentFor = (o: JobOptions): Intent => (libraryOnly ? 'library' : intentOf(o))
+  const tally = (i: Intent): number => ready.filter((s) => intentFor(s.options) === i).length
+  const forClips = tally('clips')
+  const forComp = tally('compilation')
+  const forLibrary = tally('library')
   const room = capacity ?? maxActive
   const full = slots.length >= room
 
@@ -243,13 +347,6 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
     } else if (key === 'longform') {
       if (on) next.longform = { mode: next.longform?.mode ?? 'short_clips' }
       else delete next.longform
-    } else if (key === 'watermark') {
-      const { profileId } = watermarkSelection()
-      if (on && profileId) next.watermark_profile_id = profileId
-      else delete next.watermark_profile_id
-      // Ticking with no profile saved cannot do anything — the checkbox is
-      // disabled in that case rather than silently refusing to stay ticked.
-      setWatermarkEnabled(on && Boolean(profileId))
     }
     remember(key, on, next.longform?.mode)
     return next
@@ -259,8 +356,7 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
     if (key === 'captions') return o.captions !== false
     if (key === 'long_clips') return Boolean(o.long_clips)
     if (key === 'podcast') return Boolean(o.podcast)
-    if (key === 'longform') return Boolean(o.longform)
-    return Boolean(o.watermark_profile_id)
+    return Boolean(o.longform)
   }
 
   const addSlot = (): void =>
@@ -279,7 +375,7 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
           url: '',
           path: p,
           title: (p.split(/[\\/]/).pop() ?? p).replace(/\.[^.]+$/, ''),
-          options: { ...(base ?? seedOptions()) }
+          options: { ...(base ?? seedRow()) }
         }))
       const kept = prev.filter((s) => s.url.trim() || s.path)
       return [...kept, ...fresh]
@@ -289,16 +385,45 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
   /** Queue everything, then — and only then — start processing.
    *  `force` re-runs videos that were refused for having been clipped before. */
   const generate = async (force = false, only?: Slot[]): Promise<void> => {
-    const list = only ?? ready
-    if (list.length === 0) return
+    const picked = only ?? ready
+    if (picked.length === 0) return
     setBusy(true)
     setError(null)
     setAdded(null)
+    setImported(null)
     if (!force) setAlreadyDone([])
     try {
       const failures = new Map<string, string>()
       const done: Slot[] = []
       let ok = 0
+      // Jobs that need the queue to run. A local file imported for a
+      // compilation is finished the moment the call returns, and starting
+      // the queue for it would also start whatever else was left waiting.
+      let queued = 0
+      let importedCount = 0
+      let lastComp: number | null = null
+
+      // Rows that asked for a NEW compilation: make each distinct name once,
+      // then point those rows at it. Done first, so a failure here leaves
+      // nothing half-imported.
+      const made = new Map<string, number>()
+      for (const s of picked) {
+        if (libraryOnly || s.options.add_to_compilation !== NEW_COMP) continue
+        const name = (s.newCompilation ?? '').trim() || t('Untitled compilation')
+        if (!made.has(name)) made.set(name, (await compilationsApi.create(name)).id)
+      }
+      const list = picked.map((s) => {
+        if (libraryOnly)
+          return { ...s, options: withIntent(s.options, 'library', undefined, false) }
+        if (s.options.add_to_compilation !== NEW_COMP) return s
+        const name = (s.newCompilation ?? '').trim() || t('Untitled compilation')
+        return { ...s, options: { ...s.options, add_to_compilation: made.get(name) } }
+      })
+      const note = (s: Slot): void => {
+        if (!s.options.import_only) return
+        importedCount += 1
+        if (s.options.add_to_compilation) lastComp = s.options.add_to_compilation
+      }
 
       const links = list.filter((s) => !s.path)
       if (links.length > 0) {
@@ -306,6 +431,11 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
           links.map((s) => ({ url: s.url.trim(), ...s.options, ...(force ? { force: true } : {}) }))
         )
         ok += res.created.length
+        for (const c of res.created) {
+          if (c.job_id) queued += 1
+          const slot = links.find((l) => l.url.trim() === c.url)
+          if (slot) note(slot)
+        }
         for (const s of res.skipped) {
           if (s.reason === 'already_processed') {
             const slot = links.find((l) => l.url.trim() === s.url)
@@ -320,7 +450,7 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
       // pipeline's layout on the way in, which is real work per file.
       for (const slot of list.filter((s) => s.path)) {
         try {
-          await api.addLocalVideo({
+          const res = await api.addLocalVideo({
             path: slot.path as string,
             title: slot.title,
             channel: channel.trim(),
@@ -328,15 +458,19 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
             ...(force ? { force: true } : {})
           })
           ok += 1
+          if (res.job_id) queued += 1
+          note(slot)
         } catch (e) {
           failures.set(slot.path as string, e instanceof Error ? e.message : String(e))
         }
       }
 
       // Only now does anything begin.
-      if (ok > 0 && !queueRunning) await api.resumeQueue()
+      if (queued > 0 && !queueRunning) await api.resumeQueue()
+      if (made.size > 0) setCompilations(await compilationsApi.list().catch(() => compilations))
 
-      setAdded(ok)
+      setAdded(queued)
+      if (importedCount > 0) setImported({ count: importedCount, compilation: lastComp })
       setAlreadyDone(done)
       // Rejected videos stay in the list, with their reason, so they can be
       // fixed rather than re-typed. Everything that went through is cleared.
@@ -382,74 +516,133 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
                 />
               )}
 
-              <label
-                className="flex items-center gap-2 cursor-pointer text-sm shrink-0 whitespace-nowrap"
-                title="Burn captions into this video’s clips"
-              >
-                <input
-                  type="checkbox"
-                  className="size-4 accent-[#38BDF8]"
-                  checked={slot.options.captions !== false}
-                  onChange={(e) =>
-                    replaceOptions(slot.key, toggle(slot.options, 'captions', e.target.checked))
-                  }
-                />
-                {t('Captions')}
-              </label>
+              {/* What this video is for. First after the link, because it
+                  decides which settings follow it. Not asked in the Library:
+                  there, every upload is Library only by definition. */}
+              {!libraryOnly && (
+                <div
+                  className="flex rounded-lg bg-raised p-0.5 shrink-0"
+                  role="radiogroup"
+                  aria-label={`What to do with video ${n + 1}`}
+                >
+                  {INTENTS.map(([value, label, hint]) => (
+                    <button
+                      key={value}
+                      role="radio"
+                      aria-checked={intentOf(slot.options) === value}
+                      title={t(hint)}
+                      onClick={() =>
+                        replaceOptions(
+                          slot.key,
+                          withIntent(slot.options, value, compilations[0]?.id)
+                        )
+                      }
+                      className={`px-2.5 py-1 rounded-md text-xs whitespace-nowrap transition-colors ${
+                        intentOf(slot.options) === value
+                          ? 'bg-accent/20 text-accent font-medium'
+                          : 'text-muted hover:text-ink'
+                      }`}
+                    >
+                      {t(label)}
+                    </button>
+                  ))}
+                </div>
+              )}
 
-              {/* Immediately beside Captions: it configures that switch. */}
-              <button
-                className="btn-ghost shrink-0"
-                onClick={() => setOpenStyle(openStyle === slot.key ? null : slot.key)}
-                aria-expanded={openStyle === slot.key}
-                disabled={slot.options.captions === false}
-              >
-                {t('Caption style')} {openStyle === slot.key ? '▾' : '▸'}
-              </button>
-
-              {TOGGLES.map((tg) => {
-                // Watermark needs a saved branding profile to point at. Without
-                // one there is nothing to burn in, so the box could be ticked
-                // and would simply un-tick itself — which reads as a broken
-                // checkbox. Disable it and say what is missing instead.
-                const needsProfile = tg.key === 'watermark' && !watermarkSelection().profileId
-                return (
+              {intentFor(slot.options) === 'library' ? (
+                <span className="text-xs text-muted">
+                  {libraryOnly
+                    ? t(
+                        'Goes into your Library - choose Make clips or Add to compilation on its row.'
+                      )
+                    : t('Goes into your Library - decide what it is for from there.')}
+                </span>
+              ) : intentFor(slot.options) === 'compilation' ? (
+                <>
+                  <select
+                    className="input !w-60 shrink-0"
+                    aria-label={`Compilation for video ${n + 1}`}
+                    value={slot.options.add_to_compilation ?? ''}
+                    onChange={(e) => {
+                      const next = { ...slot.options }
+                      if (e.target.value === '') delete next.add_to_compilation
+                      else next.add_to_compilation = Number(e.target.value)
+                      replaceOptions(slot.key, next)
+                    }}
+                  >
+                    {compilations.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {t('Add to')}: {c.title}
+                      </option>
+                    ))}
+                    <option value={NEW_COMP}>+ {t('New compilation…')}</option>
+                  </select>
+                  {slot.options.add_to_compilation === NEW_COMP && (
+                    <input
+                      className="input !w-48 shrink-0"
+                      placeholder={t('New compilation title')}
+                      aria-label={`New compilation title for video ${n + 1}`}
+                      value={slot.newCompilation ?? ''}
+                      onChange={(e) => patch(slot.key, { newCompilation: e.target.value })}
+                    />
+                  )}
+                  <span className="text-xs text-muted">
+                    {t('Added whole - trim it in the compilation editor.')}
+                  </span>
+                </>
+              ) : (
+                <>
                   <label
-                    key={tg.key}
-                    className={`flex items-center gap-2 text-sm shrink-0 whitespace-nowrap ${
-                      needsProfile ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
-                    }`}
-                    title={
-                      needsProfile
-                        ? 'Create a branding profile first: press "Set up" — there is no logo to burn in yet.'
-                        : tg.title
-                    }
+                    className="flex items-center gap-2 cursor-pointer text-sm shrink-0 whitespace-nowrap"
+                    title="Burn captions into this video’s clips"
                   >
                     <input
                       type="checkbox"
                       className="size-4 accent-[#38BDF8]"
-                      checked={isOn(slot.options, tg.key)}
-                      disabled={needsProfile}
+                      checked={slot.options.captions !== false}
                       onChange={(e) =>
-                        replaceOptions(slot.key, toggle(slot.options, tg.key, e.target.checked))
+                        replaceOptions(slot.key, toggle(slot.options, 'captions', e.target.checked))
                       }
                     />
-                    {t(tg.label)} <span className="text-muted">{t(tg.hint)}</span>
-                    {needsProfile && (
-                      <button
-                        type="button"
-                        className="text-accent hover:underline cursor-pointer"
-                        onClick={(e) => {
-                          e.preventDefault()
-                          setShowBranding(true)
-                        }}
-                      >
-                        {t('Set up')}
-                      </button>
-                    )}
+                    {t('Captions')}
                   </label>
-                )
-              })}
+
+                  {/* Immediately beside Captions: it configures that switch. */}
+                  <button
+                    className="btn-ghost shrink-0"
+                    onClick={() => setOpenStyle(openStyle === slot.key ? null : slot.key)}
+                    aria-expanded={openStyle === slot.key}
+                    disabled={slot.options.captions === false}
+                  >
+                    {t('Caption style')} {openStyle === slot.key ? '▾' : '▸'}
+                  </button>
+
+                  {TOGGLES.map((tg) => (
+                    <label
+                      key={tg.key}
+                      className="flex items-center gap-2 text-sm shrink-0 whitespace-nowrap cursor-pointer"
+                      title={tg.title}
+                    >
+                      <input
+                        type="checkbox"
+                        className="size-4 accent-[#38BDF8]"
+                        checked={isOn(slot.options, tg.key)}
+                        onChange={(e) =>
+                          replaceOptions(slot.key, toggle(slot.options, tg.key, e.target.checked))
+                        }
+                      />
+                      {t(tg.label)} <span className="text-muted">{t(tg.hint)}</span>
+                    </label>
+                  ))}
+
+                  <BrandingPicker
+                    value={brandingChoice(slot.options)}
+                    onChange={(choice) =>
+                      replaceOptions(slot.key, withBranding(slot.options, choice))
+                    }
+                  />
+                </>
+              )}
 
               {/* Always removable once it holds something. Hiding this on the
                   last row trapped a single uploaded file: its name is not an
@@ -473,7 +666,7 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
               )}
             </div>
 
-            {slot.options.longform && (
+            {slot.options.longform && intentFor(slot.options) === 'clips' && (
               <div className="flex items-center gap-3 flex-wrap mt-2">
                 <span className="label shrink-0">{t('Longform output')}</span>
                 <select
@@ -490,26 +683,29 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
               </div>
             )}
 
-            {openStyle === slot.key && slot.options.captions !== false && (
-              <div className="w-full space-y-3 border-t border-raised/60 pt-3 mt-2">
-                <p className="label">
-                  {t('Caption style for')} {slot.path ? slot.title || t('this file') : t('this video')}
-                </p>
-                <CaptionStyleControls
-                  idPrefix={`slot-${slot.key}`}
-                  style={{ ...DEFAULT_CAPTION_STYLE, ...(slot.options.caption_style ?? {}) }}
-                  onChange={(k, v) =>
-                    patchOptions(slot.key, {
-                      caption_style: {
+            {openStyle === slot.key &&
+              slot.options.captions !== false &&
+              intentFor(slot.options) === 'clips' && (
+                <div className="w-full space-y-3 border-t border-raised/60 pt-3 mt-2">
+                  <p className="label">
+                    {t('Caption style for')}{' '}
+                    {slot.path ? slot.title || t('this file') : t('this video')}
+                  </p>
+                  <CaptionStyleControls
+                    idPrefix={`slot-${slot.key}`}
+                    style={{ ...DEFAULT_CAPTION_STYLE, ...(slot.options.caption_style ?? {}) }}
+                    onChange={(k, v) => {
+                      const caption_style = {
                         ...DEFAULT_CAPTION_STYLE,
                         ...(slot.options.caption_style ?? {}),
                         [k]: v
                       }
-                    })
-                  }
-                />
-              </div>
-            )}
+                      rememberStyle(caption_style)
+                      patchOptions(slot.key, { caption_style })
+                    }}
+                  />
+                </div>
+              )}
 
             {slot.error && <p className="text-sm text-error mt-1">{slot.error}</p>}
           </div>
@@ -556,6 +752,45 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
               localStorage.setItem('upload-channel', e.target.value)
             }}
           />
+          {/* A batch of twenty short clips for one compilation should not
+              take twenty clicks. */}
+          {slots.length > 1 && !libraryOnly && (
+            <span className="text-xs text-muted flex items-center gap-1.5 shrink-0">
+              {t('Set all to')}:
+              {(['library', 'clips'] as const).map((intent) => (
+                <button
+                  key={intent}
+                  className="hover:text-accent hover:underline"
+                  onClick={() =>
+                    setSlots((prev) =>
+                      prev.map((s) => ({ ...s, options: withIntent(s.options, intent) }))
+                    )
+                  }
+                >
+                  {intent === 'library' ? t('library only') : t('clips')}
+                </button>
+              ))}
+              <button
+                className="hover:text-accent hover:underline"
+                title={t('Every row goes into the compilation the first row goes into')}
+                onClick={() =>
+                  setSlots((prev) => {
+                    const first = withIntent(prev[0].options, 'compilation', compilations[0]?.id)
+                    return prev.map((s, i) => ({
+                      ...s,
+                      options: {
+                        ...withIntent(s.options, 'compilation', undefined, false),
+                        add_to_compilation: first.add_to_compilation
+                      },
+                      newCompilation: i > 0 ? prev[0].newCompilation : s.newCompilation
+                    }))
+                  })
+                }
+              >
+                {t('compilation')}
+              </button>
+            </span>
+          )}
           <button
             className="btn-accent shrink-0 ml-auto"
             onClick={() => generate()}
@@ -563,20 +798,21 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
           >
             {busy
               ? t('Starting…')
-              : queueRunning
-                ? `${t('Add to queue')}${ready.length > 1 ? ` (${ready.length})` : ''}`
-                : `${t('Generate clips')}${ready.length > 1 ? ` (${ready.length})` : ''}`}
+              : (() => {
+                  const n = ready.length > 1 ? ` (${ready.length})` : ''
+                  if (forLibrary === ready.length) return `${t('Add to Library')}${n}`
+                  if (forComp === ready.length) return `${t('Add to compilation')}${n}`
+                  if (forClips < ready.length) return `${t('Start')}${n}`
+                  return queueRunning ? `${t('Add to queue')}${n}` : `${t('Generate clips')}${n}`
+                })()}
           </button>
         </div>
-
-        {(wantsWatermark || showBranding) && (
-          <BrandingEditor onProfileChange={() => setBrandingVersion((n) => n + 1)} />
-        )}
       </div>
 
       {full && (
         <p className="text-xs text-muted px-1">
-          {t('The queue holds')} {maxActive} {t('videos at a time - start these, then add more when one finishes.')}
+          {t('The queue holds')} {maxActive}{' '}
+          {t('videos at a time - start these, then add more when one finishes.')}
         </p>
       )}
 
@@ -593,6 +829,37 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
           </button>
         </p>
       )}
+      {imported && (
+        <p className="text-sm text-accent px-1">
+          {imported.count === 1
+            ? t('Going into your Library.')
+            : `${imported.count} ${t('videos going into your Library.')}`}{' '}
+          {t('Links download in the queue; files are there already.')}{' '}
+          {!libraryOnly && (
+            <button
+              className="underline hover:text-ink"
+              onClick={() => window.dispatchEvent(new CustomEvent('open-library'))}
+            >
+              {t('Open Library')}
+            </button>
+          )}
+          {imported.compilation !== null && (
+            <>
+              {' · '}
+              <button
+                className="underline hover:text-ink"
+                onClick={() =>
+                  window.dispatchEvent(
+                    new CustomEvent('open-compilation', { detail: imported.compilation })
+                  )
+                }
+              >
+                {t('Open compilation')}
+              </button>
+            </>
+          )}
+        </p>
+      )}
       {/* Only shown when it actually happened — the common case never sees it. */}
       {alreadyDone.length > 0 && (
         <div className="card flex items-center gap-3 flex-wrap">
@@ -600,7 +867,9 @@ export default function AddVideos({ onAdded }: { onAdded?: () => void }): JSX.El
             {alreadyDone.length === 1
               ? t('That video was already processed.')
               : `${alreadyDone.length} ${t('of those were already processed.')}`}{' '}
-            {t('Make clips again with the settings you chose? Existing clips are kept - new ones are added alongside them.')}
+            {t(
+              'Make clips again with the settings you chose? Existing clips are kept - new ones are added alongside them.'
+            )}
           </p>
           <button
             className="btn-accent shrink-0"

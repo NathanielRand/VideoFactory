@@ -31,6 +31,7 @@ from compilation.recipe import CreditStyle
 _ALIGN = {
     "bottom_left": 1, "bottom_center": 2, "bottom_right": 3,
     "top_left": 7, "top_center": 8, "top_right": 9,
+    "middle_left": 4, "middle_center": 5, "middle_right": 6,
 }
 FADE_MS = 250
 START = 0.15  # seconds into the segment the credit appears
@@ -110,8 +111,17 @@ def font_px(style: CreditStyle, canvas: tuple[int, int]) -> int:
     return max(14, round(style.font_size * min(canvas) / 1080))
 
 
-def _margin(canvas: tuple[int, int]) -> int:
-    return round(0.045 * min(canvas))
+def _margins(style: CreditStyle, canvas: tuple[int, int]) -> tuple[int, int]:
+    """(left/right, top/bottom) distance from the frame edges in pixels.
+    Unset insets keep the original 4.5% of the short edge on both axes."""
+    legacy = round(0.045 * min(canvas))
+    mx = legacy if style.inset_x is None else round(style.inset_x * canvas[0])
+    my = legacy if style.inset_y is None else round(style.inset_y * canvas[1])
+    return mx, my
+
+
+def _clamp(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
 
 
 def show_window(style: CreditStyle, duration: float) -> tuple[float, float]:
@@ -125,16 +135,21 @@ def plate_for(style: CreditStyle, canvas: tuple[int, int], image: Path, image_si
     aspect kept, in the credit's corner, never wider than the canvas allows."""
     w, h = canvas
     iw, ih = image_size
-    margin = _margin(canvas)
+    mx, my = _margins(style, canvas)
     ph = round(font_px(style, canvas) * style.bg_scale)
     pw = round(ph * iw / max(1, ih))
-    if pw > w - 2 * margin:  # a very wide image: cap the width, keep aspect
-        pw = w - 2 * margin
+    if pw > w - 2 * mx:  # a very wide image: cap the width, keep aspect
+        pw = w - 2 * mx
         ph = round(pw * ih / max(1, iw))
     pw, ph = max(2, pw // 2 * 2), max(2, ph // 2 * 2)  # even, for yuv420p
-    horiz = style.position.split("_")[1]
-    x = {"left": margin, "center": (w - pw) // 2, "right": w - pw - margin}[horiz]
-    y = margin if style.position.startswith("top") else h - ph - margin
+    if style.position == "custom":
+        # x / y is the plate's centre; keep the whole plate inside the frame.
+        x = _clamp(round(style.x * w - pw / 2), 0, max(0, w - pw))
+        y = _clamp(round(style.y * h - ph / 2), 0, max(0, h - ph))
+        return Plate(image=image, x=x, y=y, w=pw, h=ph)
+    vert, horiz = style.position.split("_")
+    x = {"left": mx, "center": (w - pw) // 2, "right": w - pw - mx}[horiz]
+    y = {"top": my, "middle": (h - ph) // 2, "bottom": h - ph - my}[vert]
     return Plate(image=image, x=x, y=y, w=pw, h=ph)
 
 
@@ -168,7 +183,7 @@ def build_ass(
     """A standalone ASS file showing `text` for the credit's window of a
     segment that lasts `duration`: in its corner, or centred on `plate`."""
     w, h = canvas
-    margin = _margin(canvas)
+    mx, my = _margins(style, canvas)
     start, end = show_window(style, duration)
     primary = _ass_colour(style.color)
     if plate is not None:
@@ -191,6 +206,15 @@ def build_ass(
             border, outline, shadow, back = 1, max(2, round(size * 0.08)), max(1, round(size * 0.05)), "&H80000000"
         else:
             border, outline, shadow, back = 1, 0, 0, "&H00000000"
+        if style.position == "custom":
+            # Centred on the chosen point, nudged in so the text and its box
+            # stay inside the frame.
+            align = 5
+            half_w = text_width(text, style, size) / 2 + outline
+            half_h = size * 0.6 + outline
+            cx = _clamp(round(style.x * w), round(half_w), max(round(half_w), w - round(half_w)))
+            cy = _clamp(round(style.y * h), round(half_h), max(round(half_h), h - round(half_h)))
+            pos = f"\\pos({cx},{cy})"
     box = "&H59281A0A" if style.backing == "box" and plate is None else "&H00000000"
     bold = -1 if style.bold else 0
     italic = -1 if style.italic else 0
@@ -203,7 +227,7 @@ def build_ass(
         "Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, "
         "MarginV, Encoding\n"
         f"Style: Credit,{style.font},{size},{primary},{primary},{box},{back},"
-        f"{bold},{italic},0,0,100,100,0,0,{border},{outline},{shadow},{align},{margin},{margin},{margin},1\n\n"
+        f"{bold},{italic},0,0,100,100,0,0,{border},{outline},{shadow},{align},{mx},{mx},{my},1\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         f"Dialogue: 3,{_t(start)},{_t(end)},Credit,,0,0,0,,{{\\fad({FADE_MS},{FADE_MS}){pos}}}{text}\n"
     )

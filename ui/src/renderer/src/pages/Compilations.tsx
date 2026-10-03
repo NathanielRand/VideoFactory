@@ -8,17 +8,36 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import CompilationVersions from '../components/CompilationVersions'
 import CreditControls from '../components/CreditControls'
+import RenderProgress from '../components/RenderProgress'
+import VideoPlayer from '../components/VideoPlayer'
 import { t } from '../lib/i18n'
 import { CANVAS_ORDER, formatsApi, platformsFor, type FormatsInfo } from '../lib/formats'
-import type { BrandingProfile, Clip } from '../lib/types'
+import BrandingSection from '../components/BrandingSection'
+import ProcessingBar from '../components/ProcessingBar'
+import { ItemBadge } from '../components/PublishBadge'
+import { usePublishStates, type ItemState } from '../lib/publishState'
+import { DEFAULT_WATERMARK } from '../components/WatermarkControls'
+import type { BrandingProfile, Clip, StudioEvent, WatermarkConfig } from '../lib/types'
+import { useEvents } from '../lib/useEvents'
+import ThumbnailCard from '../components/ThumbnailCard'
 import {
+  applyTemplate,
   compilationsApi,
+  dbToVolume,
+  LOUDNESS_TARGETS,
+  volumeToDb,
+  type LoudnessPart,
+  type LoudnessReport,
+  duplicateOf,
+  duplicates,
+  usesTemplate,
   type BlurRegion,
   type Compilation,
   type CompilationOptions,
   type CompilationTemplate,
   type LibraryVideo,
   type Recipe,
+  type RenderProgress as RenderProgressInfo,
   type Rights,
   type SegmentSpec
 } from '../lib/compilations'
@@ -67,7 +86,14 @@ function runtime(recipe: Recipe): number {
   return Math.max(0, total - overlap)
 }
 
-export default function Compilations(): JSX.Element {
+export default function Compilations({
+  target = null,
+  onTargetConsumed
+}: {
+  /** Open this compilation — sent from the Library, an upload, or a clip. */
+  target?: number | null
+  onTargetConsumed?: () => void
+} = {}): JSX.Element {
   const [list, setList] = useState<Compilation[]>([])
   const [templates, setTemplates] = useState<CompilationTemplate[]>([])
   const [library, setLibrary] = useState<LibraryVideo[]>([])
@@ -79,6 +105,12 @@ export default function Compilations(): JSX.Element {
   const [newTitle, setNewTitle] = useState('')
   const [newTemplate, setNewTemplate] = useState<number | ''>('')
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The last template swap, kept for a while so it can be undone: a swap
+  // replaces the whole look, and one click back beats a confirm box.
+  const [swapped, setSwapped] = useState<{ compId: number; name: string; before: Recipe } | null>(null)
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Inline rename in the Templates list.
+  const [renaming, setRenaming] = useState<{ id: number; name: string; error: string } | null>(null)
 
   const refreshList = useCallback(async () => {
     try {
@@ -87,6 +119,40 @@ export default function Compilations(): JSX.Element {
       setError(String((e as Error).message))
     }
   }, [])
+
+  // Every render waiting or running, keyed by compilation id. Read once a
+  // second while any is, which is how often the engine has something new.
+  const [renders, setRenders] = useState<Record<string, RenderProgressInfo>>({})
+  const lastRenders = useRef<Record<string, RenderProgressInfo>>({})
+  const [cancelling, setCancelling] = useState<number | null>(null)
+  const anyRendering = list.some((c) => c.status === 'queued' || c.status === 'rendering')
+  useEffect(() => {
+    if (!anyRendering) {
+      lastRenders.current = {}
+      setRenders({})
+      return
+    }
+    let alive = true
+    const read = async (): Promise<void> => {
+      try {
+        const next = await compilationsApi.progress()
+        if (!alive) return
+        // One that dropped out has finished, failed or been cancelled: the
+        // list's status chips need reading again.
+        if (Object.keys(lastRenders.current).some((id) => !(id in next))) void refreshList()
+        lastRenders.current = next
+        setRenders(next)
+      } catch {
+        /* next tick */
+      }
+    }
+    void read()
+    const id = setInterval(() => void read(), 1000)
+    return () => {
+      alive = false
+      clearInterval(id)
+    }
+  }, [anyRendering, refreshList])
 
   // Videos in the compilations folder that nothing points at any more.
   const [unused, setUnused] = useState<{ name: string; bytes: number }[]>([])
@@ -120,8 +186,40 @@ export default function Compilations(): JSX.Element {
     void refreshUnused()
     compilationsApi.templates().then(setTemplates).catch(() => undefined)
     compilationsApi.options().then(setOptions).catch(() => undefined)
-    api.branding().then(setBranding).catch(() => undefined)
+    const loadBranding = (): void => {
+      api
+        .branding()
+        .then((all) => setBranding(all.filter((p) => p.kind === 'compilation')))
+        .catch(() => undefined)
+    }
+    loadBranding()
+    window.addEventListener('branding-changed', loadBranding)
+    return () => window.removeEventListener('branding-changed', loadBranding)
   }, [refreshList, refreshLibrary, refreshUnused])
+
+  // Bumped to re-read the selected compilation from the server.
+  const [reload, setReload] = useState(0)
+
+  // Asked to open a particular one from elsewhere in the app.
+  useEffect(() => {
+    if (target === null) return
+    setSelectedId(target)
+    setReload((n) => n + 1)
+    void refreshList()
+    onTargetConsumed?.()
+  }, [target])
+
+  // Segments can now arrive from outside this editor (an upload's "add to
+  // compilation", the Clips tab, the Library), and a new upload is a new
+  // source for the library pane. Re-read rather than patch. A reload is
+  // skipped while an edit is waiting to save, so it cannot undo the edit.
+  useEvents((e: StudioEvent) => {
+    if (e.type === 'compilation') {
+      void refreshList()
+      if (e.compilation_id === selectedId && !saveTimer.current) setReload((n) => n + 1)
+    }
+    if (e.type === 'library' || (e.type === 'progress' && e.stage === 'done')) void refreshLibrary()
+  })
 
   // Load the selected compilation, and keep polling while it renders.
   useEffect(() => {
@@ -142,7 +240,7 @@ export default function Compilations(): JSX.Element {
     return () => {
       stop = true
     }
-  }, [selectedId])
+  }, [selectedId, reload])
 
   const busy = comp?.status === 'queued' || comp?.status === 'rendering'
   useEffect(() => {
@@ -170,6 +268,7 @@ export default function Compilations(): JSX.Element {
     if (saveTimer.current) clearTimeout(saveTimer.current)
     const id = comp.id
     saveTimer.current = setTimeout(async () => {
+      saveTimer.current = null
       try {
         const saved = await compilationsApi.update(id, { recipe })
         setComp((c) => (c && c.id === id ? { ...c, problem: saved.problem, status: saved.status } : c))
@@ -183,7 +282,15 @@ export default function Compilations(): JSX.Element {
   const setSegments = (fn: (s: SegmentSpec[]) => SegmentSpec[]): void =>
     editRecipe((r) => ({ ...r, segments: fn(r.segments ?? []) }))
 
-  const addSegment = (seg: SegmentSpec): void => setSegments((s) => [...s, { credit: true, ...seg }])
+  const addSegment = (seg: SegmentSpec): void => {
+    const dup = duplicateOf(comp?.recipe.segments ?? [], seg)
+    if (dup >= 0) {
+      setError(`${t('Already in this compilation')} (${t('segment')} ${dup + 1}).`)
+      return
+    }
+    setError('')
+    setSegments((s) => [...s, { credit: true, ...seg }])
+  }
 
   const create = async (): Promise<void> => {
     try {
@@ -212,27 +319,71 @@ export default function Compilations(): JSX.Element {
     }
   }
 
-  /** Save the look as a new template, or over `replaceId`. */
-  const saveTemplate = async (name: string, replaceId?: number): Promise<void> => {
-    if (!comp || !name.trim()) return
+  /** Swap the open compilation's look for a template's, keeping its segments. */
+  const swapTemplate = (tp: CompilationTemplate): void => {
+    if (!comp || busy) return
+    const before = comp.recipe
+    editRecipe((r) => applyTemplate(tp.config, r))
+    setSwapped({ compId: comp.id, name: tp.name, before })
+    if (undoTimer.current) clearTimeout(undoTimer.current)
+    undoTimer.current = setTimeout(() => setSwapped(null), 20_000)
+  }
+
+  /** Put the look back exactly as it was, keeping any segment changes since. */
+  const undoSwap = (): void => {
+    if (!swapped || !comp || comp.id !== swapped.compId) return
+    const before = swapped.before
+    editRecipe((r) => ({ ...before, segments: r.segments }))
+    setSwapped(null)
+  }
+
+  const renameTemplate = async (): Promise<void> => {
+    if (!renaming) return
+    const name = renaming.name.trim()
+    const current = templates.find((tp) => tp.id === renaming.id)
+    if (!name || name === current?.name) {
+      setRenaming(null)
+      return
+    }
+    try {
+      await compilationsApi.renameTemplate(renaming.id, name)
+      setTemplates(await compilationsApi.templates())
+      setRenaming(null)
+    } catch (e) {
+      setRenaming({ ...renaming, error: String((e as Error).message) })
+    }
+  }
+
+  /** Save the look as a new template, or over `replaceId`. Resolves to why
+   *  it failed, or '' once saved, so the form can stay open on a failure. */
+  const saveTemplate = async (name: string, replaceId?: number): Promise<string> => {
+    if (!comp || !name.trim()) return t('Name the template first.')
     try {
       if (replaceId != null) await compilationsApi.updateTemplate(replaceId, name.trim(), comp.recipe)
       else await compilationsApi.saveTemplate(name.trim(), comp.recipe)
       setTemplates(await compilationsApi.templates())
+      return ''
     } catch (e) {
-      setError(String((e as Error).message))
+      return String((e as Error).message)
     }
   }
 
+  // Where each compilation stands on the way out, keyed by its negative id.
+  const compStates = usePublishStates(useMemo(() => list.map((c) => -c.id), [list]))
   const libById = useMemo(() => Object.fromEntries(library.map((v) => [v.video_id, v])), [library])
 
   return (
-    // Three columns on a wide screen. Narrower (a portrait monitor), they
-    // stack: the list, the editor, then the library, and the page scrolls as
-    // one. Stacked, the list and library are each capped to a share of the
-    // screen and scroll on their own, and the list lays out in a grid, so
-    // neither crowds out the other.
-    <div className="flex flex-col xl:flex-row xl:h-full xl:min-h-0">
+    <div className="flex flex-col xl:h-full xl:min-h-0">
+      {/* The same live queue snapshot the Clips page shows, in the same place. */}
+      <div className="px-4 pt-4 empty:hidden">
+        <ProcessingBar />
+      </div>
+      {/* Three columns on a wide screen. Narrower (a portrait monitor), they
+          stack: the list, the editor, then the library, and the page scrolls as
+          one. Stacked, the list and library are each capped to a share of the
+          screen and scroll on their own, and the list lays out in a grid, so
+          neither crowds out the other. */}
+    <div className="flex flex-col xl:flex-row xl:min-h-0 xl:flex-1">
       {/* ---- compilations + templates ---- */}
       <section className="xl:w-64 xl:shrink-0 border-b xl:border-b-0 xl:border-r border-raised/60 p-4 space-y-4 max-h-[40vh] xl:max-h-none overflow-y-auto">
         <div className="space-y-2">
@@ -272,13 +423,28 @@ export default function Compilations(): JSX.Element {
                   c.id === selectedId ? 'bg-accent/15 text-accent' : 'hover:bg-raised'
                 }`}
               >
-                <div className="truncate text-sm font-medium">{c.title}</div>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="truncate text-sm font-medium">{c.title}</span>
+                  {c.status === 'done' && <ItemBadge state={compStates[-c.id]} />}
+                </div>
                 <div className="text-xs text-muted flex gap-2">
-                  <span className={`px-1.5 rounded ${STATUS_CHIP[c.status]}`}>{t(c.status)}</span>
+                  <span className={`px-1.5 rounded ${STATUS_CHIP[c.status]}`}>
+                    {c.status === 'rendering' && renders[String(c.id)]?.percent != null
+                      ? `${t('rendering')} ${renders[String(c.id)]?.percent}%`
+                      : t(c.status)}
+                  </span>
                   <span>
                     {(c.recipe.segments ?? []).length} {t('segments')}
                   </span>
+                  {duplicates(c.recipe.segments ?? []).size > 0 && (
+                    <span className="px-1.5 rounded bg-amber-500/15 text-amber-400">
+                      {duplicates(c.recipe.segments ?? []).size} {t('repeated')}
+                    </span>
+                  )}
                 </div>
+                {(c.status === 'queued' || c.status === 'rendering') && (
+                  <RenderProgress compact progress={renders[String(c.id)]} />
+                )}
               </button>
             </li>
           ))}
@@ -287,20 +453,69 @@ export default function Compilations(): JSX.Element {
         {templates.length > 0 && (
           <div className="space-y-1">
             <h3 className="label">{t('Templates')}</h3>
-            {templates.map((tp) => (
-              <div key={tp.id} className="flex items-center justify-between text-sm">
-                <span className="truncate">{tp.name}</span>
-                <button
-                  className="text-xs text-muted hover:text-red-400"
-                  onClick={async () => {
-                    await compilationsApi.deleteTemplate(tp.id).catch(() => undefined)
-                    setTemplates(await compilationsApi.templates())
-                  }}
-                >
-                  {t('Delete')}
-                </button>
-              </div>
-            ))}
+            {templates.map((tp) => {
+              const inUse = comp ? usesTemplate(comp.recipe, tp) : false
+              if (renaming?.id === tp.id) {
+                return (
+                  <div key={tp.id} className="space-y-1">
+                    <input
+                      className="input !py-1 text-sm w-full"
+                      autoFocus
+                      value={renaming.name}
+                      aria-label={t('Template name')}
+                      onChange={(e) => setRenaming({ ...renaming, name: e.target.value, error: '' })}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void renameTemplate()
+                        if (e.key === 'Escape') setRenaming(null)
+                      }}
+                      onBlur={() => void renameTemplate()}
+                    />
+                    {renaming.error && <p className="text-xs text-red-300">{renaming.error}</p>}
+                  </div>
+                )
+              }
+              return (
+                <div key={tp.id} className="flex items-center gap-1.5 text-sm">
+                  <button
+                    className="truncate flex-1 text-left hover:text-accent"
+                    title={t('Rename')}
+                    onDoubleClick={() => setRenaming({ id: tp.id, name: tp.name, error: '' })}
+                  >
+                    {tp.name}
+                    {inUse && <span className="ml-1.5 text-[10px] text-accent">● {t('in use')}</span>}
+                  </button>
+                  {comp && !inUse && (
+                    <button
+                      className="text-xs text-accent hover:underline shrink-0 disabled:opacity-40"
+                      disabled={busy}
+                      title={t('Give the open compilation this look; its segments stay')}
+                      onClick={() => swapTemplate(tp)}
+                    >
+                      {t('Use')}
+                    </button>
+                  )}
+                  <button
+                    className="text-xs text-muted hover:text-ink shrink-0"
+                    title={t('Rename')}
+                    aria-label={`${t('Rename')} ${tp.name}`}
+                    onClick={() => setRenaming({ id: tp.id, name: tp.name, error: '' })}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    className="text-xs text-muted hover:text-red-400 shrink-0"
+                    aria-label={`${t('Delete')} ${tp.name}`}
+                    onClick={async () => {
+                      if (!window.confirm(`${t('Delete the template')} “${tp.name}”? ${t('Compilations made with it keep their look.')}`)) return
+                      await compilationsApi.deleteTemplate(tp.id).catch(() => undefined)
+                      setTemplates(await compilationsApi.templates())
+                    }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              )
+            })}
           </div>
         )}
         {unused.length > 0 && (
@@ -342,13 +557,30 @@ export default function Compilations(): JSX.Element {
             editRecipe={editRecipe}
             setSegments={setSegments}
             onRender={() => void render()}
+            renderProgress={renders[String(comp.id)]}
+            cancelling={cancelling === comp.id}
+            onCancelRender={async () => {
+              setCancelling(comp.id)
+              try {
+                await compilationsApi.cancelRender(comp.id)
+                setComp(await compilationsApi.get(comp.id))
+                void refreshList()
+              } catch (e) {
+                setError(String((e as Error).message))
+              } finally {
+                setCancelling(null)
+              }
+            }}
             onReplaced={(c) => {
               setComp(c)
               void refreshList()
               void refreshUnused()
             }}
             templates={templates}
-            onSaveTemplate={(name, replaceId) => void saveTemplate(name, replaceId)}
+            onSaveTemplate={saveTemplate}
+            onSwapTemplate={swapTemplate}
+            swappedTo={swapped && swapped.compId === comp.id ? swapped.name : null}
+            onUndoSwap={undoSwap}
             onDelete={async () => {
               if (!window.confirm(t('Delete this compilation? Its rendered videos stay on disk; remove them any time with Storage → Clean up.'))) return
               try {
@@ -373,8 +605,11 @@ export default function Compilations(): JSX.Element {
           hasCompilation={!!comp}
           onAdd={addSegment}
           onCreditSaved={refreshLibrary}
+          compilations={list}
+          states={compStates}
         />
       </section>
+    </div>
     </div>
   )
 }
@@ -397,11 +632,12 @@ function nextFreeName(name: string, templates: CompilationTemplate[]): string {
 function SaveTemplateForm(props: {
   name: string
   setName: (name: string) => void
+  error: string
   templates: CompilationTemplate[]
   onSave: (name: string, replaceId?: number) => void
   onCancel: () => void
 }): JSX.Element {
-  const { name, setName, templates, onSave, onCancel } = props
+  const { name, setName, error, templates, onSave, onCancel } = props
   const clash = templates.find((tp) => sameName(tp.name, name))
   const alt = clash ? nextFreeName(name, templates) : ''
   return (
@@ -435,6 +671,11 @@ function SaveTemplateForm(props: {
       <button type="button" className="btn-ghost" onClick={onCancel}>
         {t('Cancel')}
       </button>
+      {error && (
+        <span role="alert" className="basis-full text-right text-xs text-red-300">
+          {error}
+        </span>
+      )}
     </div>
   )
 }
@@ -449,18 +690,55 @@ function Editor(props: {
   editRecipe: (fn: (r: Recipe) => Recipe) => void
   setSegments: (fn: (s: SegmentSpec[]) => SegmentSpec[]) => void
   onRender: () => void
+  /** Where its render is, while it is queued or rendering. */
+  renderProgress?: RenderProgressInfo
+  onCancelRender: () => void
+  cancelling: boolean
   /** The server changed the compilation (a version restored or deleted). */
   onReplaced: (c: Compilation) => void
   templates: CompilationTemplate[]
-  onSaveTemplate: (name: string, replaceId?: number) => void
+  onSaveTemplate: (name: string, replaceId?: number) => Promise<string>
+  /** Swap this compilation's look for a template's. */
+  onSwapTemplate: (tp: CompilationTemplate) => void
+  /** The template just swapped in, while it can still be undone. */
+  swappedTo: string | null
+  onUndoSwap: () => void
   onDelete: () => void
 }): JSX.Element {
   const { comp, busy, options, branding, libById, editRecipe, setSegments } = props
   const r = comp.recipe
   const segs = r.segments ?? []
+  const repeated = duplicates(segs)
   const [title, setTitle] = useState(comp.title)
   const [templateName, setTemplateName] = useState<string | null>(null)
+  const [templateError, setTemplateError] = useState('')
   useEffect(() => setTitle(comp.title), [comp.id, comp.title])
+
+  // Measured loudness, per part. Tied to the segments it was measured for:
+  // moving, trimming or swapping one makes it stale, so it is dropped.
+  const [levels, setLevels] = useState<{ key: string; report: LoudnessReport } | null>(null)
+  const [measuring, setMeasuring] = useState(false)
+  const [levelsError, setLevelsError] = useState('')
+  const segKey = JSON.stringify([
+    (r.segments ?? []).map((s) => [s.video_id, s.start, s.end, s.volume ?? 1]),
+    r.intro?.path ?? '',
+    r.outro?.path ?? '',
+    r.loudness_target ?? -14
+  ])
+  const report = levels?.key === segKey ? levels.report : null
+  const measure = async (): Promise<void> => {
+    setMeasuring(true)
+    setLevelsError('')
+    try {
+      setLevels({ key: segKey, report: await compilationsApi.measureLoudness(comp.id) })
+    } catch (e) {
+      setLevelsError(String((e as Error).message))
+    } finally {
+      setMeasuring(false)
+    }
+  }
+  const segLevel = (i: number): LoudnessPart | undefined =>
+    report?.parts.find((p) => p.kind === 'segment' && p.index === i)
 
   const move = (i: number, delta: number): void =>
     setSegments((s) => {
@@ -485,7 +763,14 @@ function Editor(props: {
     formatsApi.info().then(setFormats).catch(() => undefined)
   }, [])
   const transition = r.transition ?? { type: 'none', duration: 0.5 }
-  const credits = r.credits ?? {}
+  const chosenProfile = branding.find((b) => b.id === r.banner?.profile_id)
+  // With a profile, credits follow it unless this compilation set its own; a
+  // recipe from before that switch existed counts as its own if it has credits.
+  const creditCustom = chosenProfile ? (r.credits_custom ?? r.credits !== undefined) : true
+  const credits = r.credits ?? (chosenProfile ? (chosenProfile.config.credit ?? { enabled: false }) : {})
+  const ownWatermark: WatermarkConfig = chosenProfile
+    ? (({ credit: _c, captions: _k, ...w }) => w)(chosenProfile.config)
+    : { ...DEFAULT_WATERMARK, type: 'none' }
 
   return (
     <>
@@ -504,9 +789,20 @@ function Editor(props: {
           onClick={props.onRender}
           title={comp.problem || ''}
         >
-          {busy ? t('Rendering…') : t('Render')}
+          {!busy
+            ? t('Render')
+            : props.renderProgress?.state === 'running'
+              ? `${t('Rendering…')} ${props.renderProgress.percent ?? 0}%`
+              : t('Queued…')}
         </button>
       </div>
+      {busy && (
+        <RenderProgress
+          progress={props.renderProgress}
+          onCancel={props.onCancelRender}
+          cancelling={props.cancelling}
+        />
+      )}
       {comp.problem && segs.length > 0 && (
         <div className="text-sm text-yellow-300">{comp.problem}</div>
       )}
@@ -520,6 +816,12 @@ function Editor(props: {
       )}
 
       <CompilationVersions comp={comp} onChanged={props.onReplaced} />
+
+      {Object.keys(comp.outputs ?? {}).length > 0 && (
+        <div className="card">
+          <ThumbnailCard publishId={-comp.id} />
+        </div>
+      )}
 
       {/* look */}
       <fieldset className="card grid grid-cols-2 lg:grid-cols-4 gap-3" disabled={busy}>
@@ -601,8 +903,53 @@ function Editor(props: {
           />
         </label>
 
-        <CreditControls
-          credits={credits}
+        <BrandingSection
+          kind="compilation"
+          profiles={branding}
+          profile={r.banner?.profile_id ?? null}
+          disabled={busy}
+          onProfile={(v) =>
+            editRecipe((rr) => {
+              const id = typeof v === 'number' ? v : undefined
+              const custom = rr.banner?.custom
+              return {
+                ...rr,
+                banner: id || custom ? { ...(id ? { profile_id: id } : {}), ...(custom ? { custom } : {}) } : null
+              }
+            })
+          }
+          customWatermark={!!r.banner?.custom}
+          onCustomWatermark={(on) =>
+            editRecipe((rr) => {
+              const id = rr.banner?.profile_id
+              if (!on) return { ...rr, banner: id ? { profile_id: id } : null }
+              return { ...rr, banner: { ...(id ? { profile_id: id } : {}), custom: ownWatermark } }
+            })
+          }
+          watermark={r.banner?.custom ?? ownWatermark}
+          onWatermark={(patch) =>
+            editRecipe((rr) => ({
+              ...rr,
+              banner: {
+                ...(rr.banner?.profile_id ? { profile_id: rr.banner.profile_id } : {}),
+                custom: { ...(rr.banner?.custom ?? ownWatermark), ...patch }
+              }
+            }))
+          }
+          customCredit={creditCustom}
+          onCustomCredit={(on) =>
+            editRecipe((rr) => {
+              if (!on) {
+                const { credits: _drop, ...rest } = rr
+                return { ...rest, credits_custom: false }
+              }
+              return { ...rr, credits_custom: true, credits: { ...(chosenProfile?.config.credit ?? { enabled: false }) } }
+            })
+          }
+          credit={credits}
+          onCredit={(patch) =>
+            editRecipe((rr) => ({ ...rr, credits_custom: true, credits: { ...(rr.credits ?? credits), ...patch } }))
+          }
           positions={options?.credit_positions ?? ['bottom_left']}
           formats={outputs}
           sizes={options?.canvases ?? {}}
@@ -610,26 +957,7 @@ function Editor(props: {
             const v = libById[s.video_id]
             return { channel: v?.channel_name ?? '', title: v?.title ?? '', url: v?.source_url ?? '' }
           })}
-          onChange={(patch) => editRecipe((rr) => ({ ...rr, credits: { ...(rr.credits ?? {}), ...patch } }))}
         />
-
-        <label className="space-y-1 col-span-2">
-          <span className="label">{t('Banner (branding profile)')}</span>
-          <select
-            className="input w-full"
-            value={r.banner?.profile_id ?? ''}
-            onChange={(e) =>
-              editRecipe((rr) => ({ ...rr, banner: e.target.value ? { profile_id: Number(e.target.value) } : null }))
-            }
-          >
-            <option value="">{t('None')}</option>
-            {branding.map((b) => (
-              <option key={b.id} value={b.id}>
-                {b.name}
-              </option>
-            ))}
-          </select>
-        </label>
         {(['intro', 'outro'] as const).map((which) => (
           <div key={which} className="space-y-1">
             <span className="label">{which === 'intro' ? t('Intro clip') : t('Outro clip')}</span>
@@ -649,15 +977,90 @@ function Editor(props: {
             </div>
           </div>
         ))}
-        <label className="flex items-center gap-2 col-span-2">
-          <input
-            type="checkbox"
-            checked={r.normalize_audio ?? true}
-            onChange={(e) => editRecipe((rr) => ({ ...rr, normalize_audio: e.target.checked }))}
-          />
-          <span className="text-sm">{t('Even out loudness between creators')}</span>
-        </label>
-        <div className="col-span-2 lg:col-span-4 flex gap-2 justify-end">
+        <div className="col-span-2 lg:col-span-4 space-y-1.5">
+          <div className="flex items-center gap-3 flex-wrap">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={r.normalize_audio ?? true}
+                onChange={(e) => editRecipe((rr) => ({ ...rr, normalize_audio: e.target.checked }))}
+              />
+              <span className="text-sm">{t('Even out loudness between creators')}</span>
+            </label>
+            {(r.normalize_audio ?? true) && (
+              <select
+                className="input !w-auto !py-1 text-xs"
+                value={r.loudness_target ?? -14}
+                onChange={(e) => editRecipe((rr) => ({ ...rr, loudness_target: Number(e.target.value) }))}
+                aria-label={t('Loudness target')}
+              >
+                {LOUDNESS_TARGETS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {t(o.label)}
+                  </option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              className="btn-ghost !py-1 text-xs"
+              disabled={measuring || segs.length === 0}
+              onClick={() => void measure()}
+              title={t('Measure how loud each creator is. Also makes the next render quicker.')}
+            >
+              {measuring ? t('Measuring…') : report ? `↻ ${t('Measure again')}` : t('Measure loudness')}
+            </button>
+          </div>
+          <p className="text-[11px] text-muted">
+            {(r.normalize_audio ?? true)
+              ? t(
+                  'Each part is measured, then raised or lowered as a whole to the target, so nobody is too quiet or too loud and nothing pumps. Each segment’s volume below is a trim on top: 0 dB is matched to the rest.'
+                )
+              : t('Off: each part keeps its own level. Each segment’s volume below is applied as it is.')}
+          </p>
+          {report && (
+            <p className="text-xs" role="status">
+              {report.spread > 0
+                ? (r.normalize_audio ?? true)
+                  ? `${t('The creators were')} ${report.spread} LU ${t('apart; they will all come out at')} ${report.target} LUFS.`
+                  : `${t('The creators are')} ${report.spread} LU ${t('apart. Turn on evening out to match them.')}`
+                : t('Measured. Loudness is shown on each segment below.')}
+            </p>
+          )}
+          {levelsError && <p className="text-xs text-red-300">{levelsError}</p>}
+        </div>
+        {props.swappedTo && (
+          <div className="col-span-2 lg:col-span-4 flex items-center justify-end gap-2 text-xs" role="status">
+            <span className="text-accent">
+              {t('Switched to')} “{props.swappedTo}”. {t('Segments are unchanged.')}
+            </span>
+            <button type="button" className="underline hover:text-ink" onClick={props.onUndoSwap}>
+              {t('Undo')}
+            </button>
+          </div>
+        )}
+        <div className="col-span-2 lg:col-span-4 flex flex-wrap gap-2 justify-end">
+          {templateName === null && props.templates.length > 0 && (
+            <select
+              className="input !w-auto"
+              value={props.templates.find((tp) => usesTemplate(r, tp))?.id ?? ''}
+              onChange={(e) => {
+                const tp = props.templates.find((x) => x.id === Number(e.target.value))
+                if (tp) props.onSwapTemplate(tp)
+              }}
+              aria-label={t('Change template')}
+              title={t('Give this compilation a saved look. Its segments stay as they are.')}
+            >
+              <option value="" disabled>
+                {t('Change template…')}
+              </option>
+              {props.templates.map((tp) => (
+                <option key={tp.id} value={tp.id}>
+                  {tp.name}
+                </option>
+              ))}
+            </select>
+          )}
           {templateName === null ? (
             <button type="button" className="btn-ghost" onClick={() => setTemplateName(comp.title)}>
               {t('Save look as template')}
@@ -666,11 +1069,16 @@ function Editor(props: {
             <SaveTemplateForm
               name={templateName}
               setName={setTemplateName}
-              onCancel={() => setTemplateName(null)}
-              templates={props.templates}
-              onSave={(name, replaceId) => {
-                props.onSaveTemplate(name, replaceId)
+              error={templateError}
+              onCancel={() => {
                 setTemplateName(null)
+                setTemplateError('')
+              }}
+              templates={props.templates}
+              onSave={async (name, replaceId) => {
+                const problem = await props.onSaveTemplate(name, replaceId)
+                setTemplateError(problem)
+                if (!problem) setTemplateName(null)
               }}
             />
           )}
@@ -693,14 +1101,42 @@ function Editor(props: {
         {segs.length === 0 && (
           <p className="text-sm text-muted">{t('Add segments from the library on the right.')}</p>
         )}
+        {repeated.size > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+            <span>
+              {repeated.size === 1
+                ? t('1 segment repeats footage already in this compilation.')
+                : `${repeated.size} ${t('segments repeat footage already in this compilation.')}`}
+            </span>
+            <button
+              type="button"
+              className="btn-ghost !py-1 text-amber-200"
+              disabled={busy}
+              onClick={() => setSegments((ss) => ss.filter((_, k) => !duplicates(ss).has(k)))}
+            >
+              {t('Remove repeats')}
+            </button>
+          </div>
+        )}
         {segs.map((s, i) => {
           const v = libById[s.video_id]
+          const first = repeated.get(i)
           return (
-            <div key={i} className="flex flex-wrap items-center gap-2 bg-raised/40 rounded-lg px-3 py-2 text-sm">
+            <div
+              key={i}
+              className={`flex flex-wrap items-center gap-2 rounded-lg px-3 py-2 text-sm ${
+                first !== undefined ? 'bg-amber-500/10 ring-1 ring-amber-500/40' : 'bg-raised/40'
+              }`}
+            >
               <span className="w-6 text-muted">{i + 1}</span>
               <div className="flex-1 min-w-[10rem]">
                 <div className="truncate font-medium">{v?.title || s.video_id}</div>
                 <div className="text-xs text-muted truncate">
+                  {first !== undefined && (
+                    <span className="text-amber-400">
+                      {t('Repeats segment')} {first + 1} ·{' '}
+                    </span>
+                  )}
                   {v?.channel_name || t('no channel name: set one in the library')}
                   {v && !v.has_source && <span className="text-red-400"> · {t('source file missing')}</span>}
                 </div>
@@ -751,16 +1187,12 @@ function Editor(props: {
                 <option value="both">{t('Blur top + bottom')}</option>
                 {presetOf(s.blur_regions) === 'custom' && <option value="custom">{t('Custom')}</option>}
               </select>
-              <input
-                type="range"
-                min={0}
-                max={2}
-                step={0.05}
-                className="w-20"
-                value={s.volume ?? 1}
+              <SegmentVolume
+                volume={s.volume ?? 1}
+                level={segLevel(i)}
+                evened={r.normalize_audio ?? true}
                 disabled={busy}
-                onChange={(e) => patchSeg(i, { volume: Number(e.target.value) })}
-                title={`${t('Volume')} ${Math.round((s.volume ?? 1) * 100)}%`}
+                onChange={(volume) => patchSeg(i, { volume })}
               />
               <div className="flex gap-0.5">
                 <button className="btn-ghost px-2" disabled={busy || i === 0} onClick={() => move(i, -1)}>
@@ -774,8 +1206,9 @@ function Editor(props: {
                   ↓
                 </button>
                 <button
-                  className="btn-ghost px-2 hover:text-red-400"
+                  className={`btn-ghost px-2 hover:text-red-400 ${first !== undefined ? 'text-amber-300' : ''}`}
                   disabled={busy}
+                  title={first !== undefined ? t('Remove this repeat') : t('Remove')}
                   onClick={() => setSegments((ss) => ss.filter((_, k) => k !== i))}
                 >
                   ✕
@@ -789,7 +1222,91 @@ function Editor(props: {
   )
 }
 
+/** One segment's volume, in dB. With evening out on, 0 dB means "matched to
+ *  the others" and the slider is a trim on top; with it off, it is the
+ *  segment's plain volume. Stored as a multiplier (compilation/recipe.py). */
+function SegmentVolume({
+  volume,
+  level,
+  evened,
+  disabled,
+  onChange
+}: {
+  volume: number
+  level?: LoudnessPart
+  evened: boolean
+  disabled: boolean
+  onChange: (volume: number) => void
+}): JSX.Element {
+  const db = volumeToDb(volume)
+  const muted = db === null
+  const shown = muted ? 0 : Math.round(db)
+  const sign = (n: number): string => (n > 0 ? `+${n}` : `${n}`)
+  const measured = level && !level.silent && level.lufs !== null
+  const hint = measured
+    ? evened
+      ? `${t('Measured')} ${level.lufs} LUFS, ${t('matched with')} ${sign(level.match_db ?? 0)} dB`
+      : `${t('Measured')} ${level.lufs} LUFS`
+    : level?.silent
+      ? t('Silent, or nearly: left as it is')
+      : ''
+  return (
+    <div className="flex items-center gap-1" title={hint}>
+      <button
+        type="button"
+        className={`px-1 text-xs rounded ${muted ? 'text-red-400' : 'text-muted hover:text-ink'}`}
+        disabled={disabled}
+        onClick={() => onChange(muted ? 1 : 0)}
+        aria-label={muted ? t('Unmute') : t('Mute')}
+        title={muted ? t('Unmute') : t('Mute')}
+      >
+        {muted ? '🔇' : '🔊'}
+      </button>
+      <input
+        type="range"
+        min={-24}
+        max={12}
+        step={1}
+        className="w-20"
+        value={shown}
+        disabled={disabled || muted}
+        onChange={(e) => onChange(dbToVolume(Number(e.target.value)))}
+        aria-label={evened ? t('Volume trim (dB)') : t('Volume (dB)')}
+      />
+      <button
+        type="button"
+        className="w-11 text-right text-[11px] tabular-nums text-muted hover:text-ink"
+        disabled={disabled || muted}
+        onDoubleClick={() => onChange(1)}
+        title={t('Double-click to reset to 0 dB')}
+      >
+        {muted ? t('muted') : `${sign(shown)} dB`}
+      </button>
+      {measured && (
+        <span className="text-[10px] text-muted tabular-nums w-16" aria-label={hint}>
+          {level.lufs} LUFS
+        </span>
+      )}
+    </div>
+  )
+}
+
 // ---- library ---------------------------------------------------------------------------------
+
+/** How many compilations use a video, and how many of those are scheduled or posted. */
+function usageOf(
+  comps: Compilation[],
+  states: Record<number, ItemState>,
+  videoId: string
+): { used: number; posted: number; scheduled: number } {
+  const using = comps.filter((c) => (c.recipe.segments ?? []).some((sg) => sg.video_id === videoId))
+  const stateOf = (c: Compilation): string | undefined => states[-c.id]?.state
+  return {
+    used: using.length,
+    posted: using.filter((c) => ['published', 'partial'].includes(stateOf(c) ?? '')).length,
+    scheduled: using.filter((c) => ['scheduled', 'publishing', 'partial'].includes(stateOf(c) ?? '')).length
+  }
+}
 
 function Library(props: {
   library: LibraryVideo[]
@@ -798,6 +1315,9 @@ function Library(props: {
   hasCompilation: boolean
   onAdd: (seg: SegmentSpec) => void
   onCreditSaved: () => void
+  /** Every compilation, and where each stands, to show how each video is used. */
+  compilations: Compilation[]
+  states: Record<number, ItemState>
 }): JSX.Element {
   const { library, canAdd, onAdd } = props
   const [query, setQuery] = useState('')
@@ -821,7 +1341,7 @@ function Library(props: {
       />
       {library.length === 0 && (
         <p className="text-sm text-muted">
-          {t('Nothing imported yet. Paste links on the Clip Editor or Queue page first.')}
+          {t('Nothing imported yet. Add videos in the Library, or on Home with Library only or Compilation, to bring them in without clipping.')}
         </p>
       )}
       {shown.map((v) => (
@@ -834,6 +1354,7 @@ function Library(props: {
           onAdd={onAdd}
           rights={props.options?.rights ?? (Object.keys(RIGHTS_LABEL) as Rights[])}
           onCreditSaved={props.onCreditSaved}
+          usage={usageOf(props.compilations, props.states, v.video_id)}
         />
       ))}
     </div>
@@ -848,6 +1369,7 @@ function LibraryItem(props: {
   onAdd: (seg: SegmentSpec) => void
   rights: Rights[]
   onCreditSaved: () => void
+  usage: { used: number; posted: number; scheduled: number }
 }): JSX.Element {
   const { video: v, open, canAdd, onAdd } = props
   const [clips, setClips] = useState<Clip[] | null>(null)
@@ -884,6 +1406,26 @@ function LibraryItem(props: {
           <span>· {fmt(v.duration || 0)}</span>
           {v.rights === 'unknown' && <span className="text-yellow-400">· {t('rights unknown')}</span>}
           {!v.has_source && <span className="text-red-400">· {t('source missing')}</span>}
+        </div>
+        {/* Where this video has ended up: unused, in a draft, scheduled or posted. */}
+        <div className="mt-1 flex flex-wrap gap-1.5 text-[10px] font-semibold">
+          {props.usage.used === 0 ? (
+            <span className="px-1.5 py-0.5 rounded bg-raised text-muted">○ {t('Not used yet')}</span>
+          ) : (
+            <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300">
+              ▦ {t('In')} {props.usage.used} {props.usage.used === 1 ? t('compilation') : t('compilations')}
+            </span>
+          )}
+          {props.usage.scheduled > 0 && (
+            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+              ◷ {props.usage.scheduled} {t('scheduled')}
+            </span>
+          )}
+          {props.usage.posted > 0 && (
+            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
+              ✓ {props.usage.posted} {t('posted')}
+            </span>
+          )}
         </div>
       </button>
       {open && (
@@ -939,7 +1481,7 @@ function LibraryItem(props: {
           {v.has_source && (
             <div className="space-y-1">
               <span className="label">{t('Pick a range')}</span>
-              <video ref={player} className="w-full rounded bg-black" controls preload="metadata" src={compilationsApi.sourceUrl(v.video_id)} />
+              <VideoPlayer ref={player} className="w-full" label="Source video" src={compilationsApi.sourceUrl(v.video_id)} />
               <div className="flex items-center gap-1 text-xs">
                 <button className="btn-ghost px-2 py-0.5" onClick={() => setInPt(player.current?.currentTime ?? 0)}>
                   {t('Set in')} {fmt(inPt)}

@@ -50,7 +50,12 @@ class PublishRequest:
     # publishAt on anything else, and the video must never have been published.
     publish_at: str | None = None
     made_for_kids: bool = False
-    contains_synthetic_media: bool = False
+    # YouTube's "AI use" and "Paid promotion" questions, which it holds
+    # processing for. None: not answered here, so nothing is sent and Studio
+    # asks. True/False: the person's answer, sent as given, "no" included.
+    # Never defaulted to False: that would declare "no" on their behalf.
+    contains_synthetic_media: bool | None = None
+    has_paid_product_placement: bool | None = None
     embeddable: bool = True
     public_stats_viewable: bool = True
     license: str = "youtube"  # youtube | creativeCommon
@@ -60,6 +65,9 @@ class PublishRequest:
     thumbnail: Path | None = None
     playlist_id: str | None = None
     notify_subscribers: bool = True
+    # Posted as the channel's own top-level comment once the video exists.
+    # videos.insert has no field for it.
+    first_comment: str = ""
 
 
 @dataclass
@@ -82,6 +90,7 @@ class PublishResult:
     channel_title: str = ""
     thumbnail_set: bool = False
     playlist_added: bool = False
+    comment_posted: bool = False
     warnings: list[str] = field(default_factory=list)
 
     @property

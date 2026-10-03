@@ -142,3 +142,36 @@ def test_a_missing_clip_file_returns_nothing(tmp_path):
 
 def test_no_targets_means_no_work(tmp_path):
     assert thumbnail.generate(tmp_path / "gone.mp4", "hook", []) == []
+
+
+# ---- picking a sharp, expressive frame ---------------------------------------
+
+
+def test_a_blurry_big_face_loses_to_a_sharp_smaller_one():
+    blurry = thumbnail.score_frame(20, 0.20, 120, face_sharpness=10, relative_sharpness=0.2)
+    sharp = thumbnail.score_frame(220, 0.08, 120, face_sharpness=200, relative_sharpness=1.0)
+    assert sharp > blurry
+
+
+def test_pixelation_and_closed_eyes_cost_points():
+    base = thumbnail.score_frame(200, 0.10, 120, face_sharpness=180)
+    assert thumbnail.score_frame(200, 0.10, 120, face_sharpness=180, blockiness=0.5) < base
+    assert thumbnail.score_frame(200, 0.10, 120, face_sharpness=180, eyes_open=False) < base
+    assert thumbnail.score_frame(200, 0.10, 120, face_sharpness=180, eyes_open=True) > base
+    assert thumbnail.score_frame(200, 0.10, 120, face_sharpness=180, expression=1.0) > base
+
+
+def test_a_face_that_fills_the_frame_is_marked_down():
+    assert thumbnail.score_frame(200, 0.15, 120) > thumbnail.score_frame(200, 0.6, 120)
+
+
+def test_ranking_is_relative_to_the_clip_and_spreads_the_picks():
+    def row(t, sharp, area=0.1):
+        return {"t": t, "sharp": sharp, "brightness": 120, "area": area}
+
+    rows = [row(1.0, 300), row(1.4, 310), row(5.0, 280), row(9.0, 40)]
+    picks = thumbnail.rank_frames(rows, min_gap=1.0)
+    times = [r["t"] for r in picks]
+    assert times[0] == 1.4                       # sharpest
+    assert 1.0 not in times                      # too close to a better one
+    assert times.index(5.0) < times.index(9.0)   # soft frame last

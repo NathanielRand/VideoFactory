@@ -34,11 +34,18 @@ export default function LiveTextOverlay({
   useEffect(() => {
     if (!overlay) return
     let raf = 0
+    let lastAt = 0
     const tick = (): void => {
       raf = requestAnimationFrame(tick)
       const el = videoRef.current
       if (!el) return
       const tOrig = bakedToOrig(el.currentTime, bakedKeep)
+      // A caption changes a few times a second, so playing needs a redraw about
+      // fifteen times a second, not on every frame (that was fifty). A seek
+      // while paused still shows at once.
+      const now = performance.now()
+      if (!el.paused && now - lastAt < 66) return
+      lastAt = now
       setT((prev) => (Math.abs(prev - tOrig) > 0.02 ? tOrig : prev))
     }
     raf = requestAnimationFrame(tick)
@@ -82,8 +89,10 @@ export default function LiveTextOverlay({
           ...band,
           margin: `0 ${30 * s}px`,
           borderRadius: 10 * s,
-          backdropFilter: 'blur(16px)',
-          background: 'rgba(0,0,0,0.35)'
+          // A near-solid panel: its job is to hide the caption already burned
+          // into the video behind it. This used to be a 16px backdrop blur,
+          // which the GPU has to redo over the moving video on every frame.
+          background: 'rgba(0,0,0,0.88)'
         }}
       />
     )

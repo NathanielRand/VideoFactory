@@ -52,8 +52,9 @@ function relaxCspForBrowserDev(): Plugin {
             // The engine, plus Vite's own HMR socket on this origin.
             "connect-src 'self' ws: http://127.0.0.1:8765 ws://127.0.0.1:8765; " +
             'media-src http://127.0.0.1:8765; ' +
-            // Branding logos and credit backgrounds, as index.html allows.
-            "img-src 'self' data: http://127.0.0.1:8765; " +
+            // Branding logos and credit backgrounds, and YouTube's own video
+            // thumbnails on the Publish page, as index.html allows.
+            "img-src 'self' data: http://127.0.0.1:8765 https://i.ytimg.com; " +
             "style-src 'self' 'unsafe-inline'\" />"
         )
     }

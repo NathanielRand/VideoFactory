@@ -1,3 +1,4 @@
+import AnalyticsSnapshot from '../components/AnalyticsSnapshot'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Assistant from '../components/Assistant'
 import NoClipsExplanation from '../components/NoClipsExplanation'
@@ -62,9 +63,11 @@ function describeEvent(e: StudioEvent): string {
 }
 
 export default function Dashboard({
-  onOpenInStudio
+  onOpenInStudio,
+  onOpenAnalytics
 }: {
   onOpenInStudio: (videoId: string, clipId?: number) => void
+  onOpenAnalytics: () => void
 }): JSX.Element {
   const [videos, setVideos] = useState<Video[]>([])
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -113,11 +116,13 @@ export default function Dashboard({
   const [publishUrl, setPublishUrl] = useState('')
   // Only watch while something is actually in flight, so an idle Dashboard
   // never polls.
-  const busy = videos.some((v) => v.status !== 'done' && v.status !== 'failed')
+  const busy = videos.some((v) => v.status !== 'done' && v.status !== 'failed' && v.status !== 'imported')
 
   const refresh = async (): Promise<void> => {
     try {
-      setVideos(await api.videos())
+      // Uploads kept for compilations were never processed; the Library
+      // lists those, so this table stays what its title says.
+      setVideos((await api.videos()).filter((v) => v.status !== 'imported' || v.clip_count > 0))
       setSettings(await api.settings())
       // An expanded row keeps the clips it fetched when it was opened, so
       // after a re-render it would go on showing the previous version. Re-read
@@ -411,7 +416,7 @@ export default function Dashboard({
       {/* Pinned top: title + post bar always visible */}
       <div className="shrink-0 space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-2xl font-bold">{t('Dashboard')}</h2>
+          <h2 className="text-2xl font-bold">{t('Home')}</h2>
           {settings && (
             <span className="bg-raised px-3 py-1.5 rounded-lg text-sm">
               model: <span className="text-accent font-medium">{settings.model}</span>
@@ -420,6 +425,7 @@ export default function Dashboard({
         </div>
         {/* The same list builder as the Queue page, not a second copy: one
             video or ten, each with its own options, started when you say so. */}
+        <AnalyticsSnapshot variant="home" onOpen={onOpenAnalytics} />
         <AddVideos onAdded={refresh} />
         <ProcessingBar />
       </div>
@@ -564,7 +570,7 @@ export default function Dashboard({
                                   <button
                                     className="text-left text-accent hover:underline"
                                     onClick={() => onOpenInStudio(v.video_id, c.id)}
-                                    title="Open this clip in Clip Editor"
+                                    title="Open this clip in the Editor"
                                   >
                                     {c.title || c.hook || 'Untitled'}
                                   </button>{' '}

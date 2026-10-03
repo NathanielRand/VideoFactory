@@ -135,6 +135,34 @@ CREATE TABLE IF NOT EXISTS clip_feedback (
     created_at TEXT NOT NULL
 );
 
+-- A clip the user flagged as wrong (bad moment boundaries, bad framing), with
+-- the reasons they ticked and a snapshot of what the pipeline decided, so it
+-- can be reviewed later. Deliberately NOT a foreign key on clips: a re-render
+-- deletes and re-creates the clip row, and the flag must outlive that.
+CREATE TABLE IF NOT EXISTS clip_flags (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    clip_id    INTEGER,
+    video_id   TEXT NOT NULL DEFAULT '',
+    reasons    TEXT NOT NULL DEFAULT '[]',   -- JSON list of reason ids
+    note       TEXT NOT NULL DEFAULT '',
+    snapshot   TEXT NOT NULL DEFAULT '{}',   -- JSON: span, scores, render opts, transcript
+    status     TEXT NOT NULL DEFAULT 'open', -- open | resolved
+    created_at TEXT NOT NULL
+);
+
+-- Changes proposed from a creator's flags (creator/reviewer.py). Nothing here
+-- affects a run until its status is 'approved'; rejecting one takes it back.
+CREATE TABLE IF NOT EXISTS learning_proposals (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    creator_id INTEGER NOT NULL,
+    kind       TEXT NOT NULL,   -- pad_lead | pad_tail | crop | min_score_delta | guidance
+    value      TEXT NOT NULL,
+    rationale  TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+    created_at TEXT NOT NULL,
+    decided_at TEXT
+);
+
 -- ---- Watermark & branding (video_editor/watermark.py) ----------------------
 -- A saved branding profile (Personal / YouTube / Twitch / …). `config` is a
 -- JSON blob (type, text, font, size, colour, opacity, position, scale,
@@ -145,7 +173,8 @@ CREATE TABLE IF NOT EXISTS branding_profiles (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
     config     TEXT NOT NULL DEFAULT '{}',   -- JSON watermark config
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'clip'  -- 'clip' | 'compilation': what it brands
 );
 
 -- ---- Multilingual publishing (multilingual/ module) ------------------------
@@ -284,11 +313,12 @@ CREATE TABLE IF NOT EXISTS streams (
 CREATE TABLE IF NOT EXISTS watches (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     platform        TEXT NOT NULL,                -- youtube | twitch | kick
-    channel_key     TEXT NOT NULL,                -- UC id | Twitch login | Kick slug
+    channel_key     TEXT NOT NULL,                -- UC id | YouTube playlist id | Twitch login | Kick slug
     name            TEXT NOT NULL DEFAULT '',
     enabled         INTEGER NOT NULL DEFAULT 1,
     options         TEXT NOT NULL DEFAULT '{}',   -- JSON: job options, as the Generate bar sends them
     publish         TEXT NOT NULL DEFAULT '{}',   -- JSON: mode, platforms, per_day, gap_hours, ...
+    actions         TEXT NOT NULL DEFAULT '{}',   -- JSON: clips on/off, and the compilation to add to
     backlog         TEXT NOT NULL DEFAULT 'newest',  -- all | newest | day | none
     min_minutes     REAL NOT NULL DEFAULT 3,      -- shorter videos (Shorts) are not clipped
     last_ok_poll_at REAL NOT NULL DEFAULT 0,      -- unix seconds; 0 = never looked yet
@@ -353,6 +383,20 @@ CREATE TABLE IF NOT EXISTS clip_variants (
     PRIMARY KEY (clip_id, canvas)
 );
 
+-- How posts performed, for learning when this audience watches
+-- (publish/timing.py). One row per post, overwritten on each read: the
+-- latest count is the only one that matters, with its age alongside.
+CREATE TABLE IF NOT EXISTS publish_stats (
+    platform     TEXT NOT NULL,
+    post_id      TEXT NOT NULL,
+    published_at TEXT NOT NULL,           -- when it went live, UTC ISO
+    views        INTEGER NOT NULL DEFAULT 0,
+    likes        INTEGER NOT NULL DEFAULT 0,
+    comments     INTEGER NOT NULL DEFAULT 0,
+    checked_at   TEXT NOT NULL,           -- when these counts were read, UTC ISO
+    PRIMARY KEY (platform, post_id)
+);
+
 CREATE TABLE IF NOT EXISTS compilation_templates (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
@@ -383,14 +427,14 @@ STREAM_COLUMNS = frozenset({
 
 # Same rule for the watch tables.
 WATCH_COLUMNS = frozenset({
-    "name", "enabled", "options", "publish", "backlog", "min_minutes",
+    "name", "enabled", "options", "publish", "actions", "backfill", "backlog", "min_minutes",
     "last_ok_poll_at", "next_poll_at", "last_error",
 })
 WATCH_ITEM_COLUMNS = frozenset({
     "watch_id", "platform", "url", "title", "published_at", "detected_at", "state",
     "reason", "job_id", "next_check_at", "publish_state", "publish_error",
     "retries", "retry_at", "publish_attempts", "publish_retry_at", "delivery_retries",
-    "source_freed",
+    "source_freed", "compiled", "compile_note", "not_before",
 })
 
 # Video lifecycle:  queued -> downloaded -> transcribed -> analyzed -> done | failed
@@ -416,7 +460,8 @@ class StateDB:
         """Add columns introduced after a DB was first created."""
         existing = {r["name"] for r in self.conn.execute("PRAGMA table_info(clips)")}
         for column in ("title", "description", "hashtags", "scores", "render_opts",
-                       "exported_at"):
+                       "exported_at", "keywords", "first_comment", "alt_titles",
+                       "suggested_comment", "playlist_id"):
             if column not in existing:
                 self.conn.execute(f"ALTER TABLE clips ADD COLUMN {column} TEXT DEFAULT ''")
         if "exported_at" not in existing:
@@ -441,6 +486,12 @@ class StateDB:
         comp_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(compilations)")}
         if comp_cols and "outputs" not in comp_cols:
             self.conn.execute("ALTER TABLE compilations ADD COLUMN outputs TEXT NOT NULL DEFAULT '{}'")
+        # What a compilation goes out with: title, description, keywords and
+        # which rendered format to send. See get_publishable().
+        if comp_cols and "publish_meta" not in comp_cols:
+            self.conn.execute(
+                "ALTER TABLE compilations ADD COLUMN publish_meta TEXT NOT NULL DEFAULT '{}'"
+            )
         # Video Factory: who to credit when a video is reused in a compilation.
         # rights: own | licensed | permission | fair_use | unknown.
         for column, ddl in (
@@ -539,6 +590,13 @@ class StateDB:
             self.conn.execute(
                 "ALTER TABLE clip_publishes ADD COLUMN media_id TEXT NOT NULL DEFAULT ''"
             )
+        branding_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(branding_profiles)")}
+        if "kind" not in branding_cols:
+            # Profiles made before the split all branded clips.
+            self.conn.execute(
+                "ALTER TABLE branding_profiles ADD COLUMN kind TEXT NOT NULL DEFAULT 'clip'"
+            )
+            self._split_compilation_branding()
         creator_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(creators)")}
         if "default_branding_id" not in creator_cols:
             self.conn.execute("ALTER TABLE creators ADD COLUMN default_branding_id INTEGER")
@@ -569,9 +627,22 @@ class StateDB:
             # was none to delete. Either way the folder is not scanned for it
             # again on every tick.
             ("source_freed", "INTEGER NOT NULL DEFAULT 0"),
+            # Whether the finished video went into the watch's compilation:
+            # 0 not decided yet, 1 added, 2 could not be, 3 not asked to.
+            ("compiled", "INTEGER NOT NULL DEFAULT 0"),
+            ("compile_note", "TEXT NOT NULL DEFAULT ''"),
+            # An earlier video taken to catch up "back to a date": unix
+            # seconds it must be posted after. Checked once its date is known.
+            ("not_before", "REAL NOT NULL DEFAULT 0"),
         ):
             if column not in item_cols:
                 self.conn.execute(f"ALTER TABLE watch_items ADD COLUMN {column} {decl}")
+        watch_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(watches)")}
+        if "actions" not in watch_cols:
+            self.conn.execute("ALTER TABLE watches ADD COLUMN actions TEXT NOT NULL DEFAULT '{}'")
+        if "backfill" not in watch_cols:
+            # How far back to catch up when first watched, used on the first look.
+            self.conn.execute("ALTER TABLE watches ADD COLUMN backfill TEXT NOT NULL DEFAULT '{}'")
         # Shorts were listed at first, with a Clip this button for something
         # that cannot be clipped, and some were recorded as skipped for being
         # too short. Watching now drops them before anything is recorded, so
@@ -802,7 +873,53 @@ class StateDB:
 
     # ---- branding profiles --------------------------------------------
 
-    def list_branding(self) -> list[sqlite3.Row]:
+    def _split_compilation_branding(self) -> None:
+        """One-time, when profiles gain a kind: a profile a compilation (or a
+        compilation template) used as its banner is copied into a
+        'compilation' profile and that compilation repointed, so it keeps its
+        look. The clip original is left as it was."""
+        copies: dict[int, int] = {}
+
+        def repoint(raw: str | None) -> str | None:
+            try:
+                data = json.loads(raw or "{}")
+            except ValueError:
+                return None
+            banner = data.get("banner") if isinstance(data, dict) else None
+            if not isinstance(banner, dict) or "profile_id" not in banner:
+                return None
+            pid = int(banner["profile_id"])
+            if pid not in copies:
+                row = self.conn.execute(
+                    "SELECT name, config FROM branding_profiles WHERE id = ?", (pid,)
+                ).fetchone()
+                if row is None:
+                    return None
+                cur = self.conn.execute(
+                    "INSERT INTO branding_profiles (name, config, created_at, kind) "
+                    "VALUES (?, ?, ?, 'compilation')",
+                    (f"{row['name']} (compilation)", row["config"], _now()),
+                )
+                copies[pid] = cur.lastrowid
+            banner["profile_id"] = copies[pid]
+            return json.dumps(data)
+
+        for row in self.conn.execute("SELECT id, recipe FROM compilations").fetchall():
+            new = repoint(row["recipe"])
+            if new is not None:
+                self.conn.execute("UPDATE compilations SET recipe = ? WHERE id = ?", (new, row["id"]))
+        for row in self.conn.execute("SELECT id, config FROM compilation_templates").fetchall():
+            new = repoint(row["config"])
+            if new is not None:
+                self.conn.execute(
+                    "UPDATE compilation_templates SET config = ? WHERE id = ?", (new, row["id"])
+                )
+
+    def list_branding(self, kind: str | None = None) -> list[sqlite3.Row]:
+        if kind:
+            return self.conn.execute(
+                "SELECT * FROM branding_profiles WHERE kind = ? ORDER BY id", (kind,)
+            ).fetchall()
         return self.conn.execute(
             "SELECT * FROM branding_profiles ORDER BY id"
         ).fetchall()
@@ -812,10 +929,10 @@ class StateDB:
             "SELECT * FROM branding_profiles WHERE id = ?", (profile_id,)
         ).fetchone()
 
-    def add_branding(self, name: str, config: str) -> int:
+    def add_branding(self, name: str, config: str, kind: str = "clip") -> int:
         cur = self.conn.execute(
-            "INSERT INTO branding_profiles (name, config, created_at) VALUES (?, ?, ?)",
-            (name, config, _now()),
+            "INSERT INTO branding_profiles (name, config, created_at, kind) VALUES (?, ?, ?, ?)",
+            (name, config, _now(), kind),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -927,16 +1044,23 @@ class StateDB:
         hashtags: str = "",
         scores: str = "",
         render_opts: str = "",
+        keywords: str = "",
+        first_comment: str = "",
+        alt_titles: str = "",
+        suggested_comment: str = "",
     ) -> int | None:
         """Insert a clip; returns its id, or None if this exact clip already
         exists (the UNIQUE constraint is the last line of duplicate defense)."""
         try:
             cur = self.conn.execute(
                 """INSERT INTO clips (video_id, start_s, end_s, score, hook, path, status,
-                                      title, description, hashtags, scores, render_opts, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                      title, description, hashtags, scores, render_opts,
+                                      keywords, first_comment, alt_titles, suggested_comment,
+                                      created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (video_id, round(start, 2), round(end, 2), score, hook, path, status,
-                 title, description, hashtags, scores, render_opts, _now()),
+                 title, description, hashtags, scores, render_opts,
+                 keywords, first_comment, alt_titles, suggested_comment, _now()),
             )
             self.conn.commit()
             return cur.lastrowid
@@ -1268,6 +1392,59 @@ class StateDB:
 
     # ---- job queue (used by the API server's worker) --------------------
 
+    # What each job type does to a clip, for the badge on its card.
+    _CLIP_JOB_KINDS = {"render": "render", "variants": "formats", "translate": "translate"}
+    FAILED_SHOWN_FOR = 24 * 3600   # seconds a failed job keeps a card flagged
+
+    def clip_work(self, ids: list[int]) -> dict[int, dict]:
+        """What is happening to each of these clips right now, by clip id.
+
+        {'state': 'queued' | 'running' | 'failed', 'kind': 'render' | 'formats'
+        | 'translate', 'job_id', 'error'}. A clip with nothing in flight is
+        absent. Read from the jobs table, which is the one place that knows: the
+        clip row says nothing about a re-render until it finishes.
+
+        Per clip only its newest job counts, so a failure that was retried, or
+        one that a later success followed, does not linger; and a failure is
+        only shown for a day, since the job row itself never goes away."""
+        wanted = set(ids)
+        if not wanted:
+            return {}
+        rows = self.conn.execute(
+            "SELECT id, type, payload, status, error, updated_at FROM jobs"
+            " WHERE type IN ('render', 'variants', 'translate')"
+            " AND status IN ('queued', 'running', 'failed', 'done') ORDER BY id DESC LIMIT 600"
+        ).fetchall()
+        cutoff = datetime.now().timestamp() - self.FAILED_SHOWN_FOR
+        out: dict[int, dict] = {}
+        seen: set[int] = set()
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            clip_ids = payload.get("clip_ids") if r["type"] == "translate" else [payload.get("clip_id")]
+            for cid in clip_ids or []:
+                try:
+                    cid = int(cid)
+                except (TypeError, ValueError):
+                    continue
+                if cid not in wanted or cid in seen:
+                    continue
+                seen.add(cid)                       # newest job for this clip decides
+                if r["status"] in ("queued", "running"):
+                    out[cid] = {"state": r["status"], "kind": self._CLIP_JOB_KINDS[r["type"]],
+                                "job_id": r["id"], "error": ""}
+                elif r["status"] == "failed":
+                    try:
+                        recent = datetime.fromisoformat(r["updated_at"]).timestamp() >= cutoff
+                    except (TypeError, ValueError):
+                        recent = False
+                    if recent:
+                        out[cid] = {"state": "failed", "kind": self._CLIP_JOB_KINDS[r["type"]],
+                                    "job_id": r["id"], "error": (r["error"] or "")[:300]}
+        return out
+
     def add_job(self, type_: str, payload: str, video_id: str = "", title: str = "") -> int:
         if type_ == "process":
             position = self.conn.execute(
@@ -1561,8 +1738,87 @@ class StateDB:
             f"SELECT * FROM watch_items {clause}ORDER BY id DESC LIMIT ?", (*args, limit)
         ).fetchall()
 
+    # ---- clip flags ------------------------------------------------------
+
+    def add_clip_flag(self, clip_id: int | None, video_id: str, reasons: list[str],
+                      note: str, snapshot: dict) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO clip_flags (clip_id, video_id, reasons, note, snapshot, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (clip_id, video_id, json.dumps(reasons), note, json.dumps(snapshot), _now()),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def list_clip_flags(self, status: str | None = None, clip_id: int | None = None) -> list[sqlite3.Row]:
+        sql, args = "SELECT * FROM clip_flags", []
+        where = []
+        if status:
+            where.append("status = ?")
+            args.append(status)
+        if clip_id is not None:
+            where.append("clip_id = ?")
+            args.append(clip_id)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        return self.conn.execute(sql + " ORDER BY id DESC", args).fetchall()
+
+    def set_clip_flag_status(self, flag_id: int, status: str) -> None:
+        self.conn.execute("UPDATE clip_flags SET status = ? WHERE id = ?", (status, flag_id))
+        self.conn.commit()
+
     def get_clip(self, clip_id: int) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
+
+    def get_publishable(self, publish_id: int):
+        """What a publish path sends: a clip, or a rendered compilation.
+
+        Every publish path (YouTube direct, Upload-Post, WoopSocial) and every
+        record of a post is keyed on a clip id. A compilation is given the
+        NEGATIVE of its own id, which no clip can have, and comes back here
+        shaped like a clip row, so the whole machinery (scheduling, per-
+        platform state, retries, verification) serves compilations without a
+        second copy of any of it. Nothing is written to the clips table.
+
+        None when there is no such clip, or the compilation has no render in
+        the format it is set to publish.
+        """
+        if publish_id >= 0:
+            return self.get_clip(publish_id)
+        comp_id = -publish_id
+        row = self.conn.execute("SELECT * FROM compilations WHERE id = ?", (comp_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            outputs = json.loads(row["outputs"] or "{}")
+            meta = json.loads(row["publish_meta"] or "{}")
+        except (TypeError, ValueError):
+            outputs, meta = {}, {}
+        canvas = meta.get("canvas") or ""
+        path = outputs.get(canvas) or row["output_path"] or next(iter(outputs.values()), "")
+        return {
+            "id": publish_id,
+            "compilation_id": comp_id,
+            # Identity that outlives nothing here, but must not collide with
+            # a real video: publish rows match on it when a clip re-renders.
+            "video_id": f"compilation:{comp_id}",
+            "start_s": 0.0,
+            "end_s": 0.0,
+            "path": path,
+            "status": row["status"],
+            "hook": "",
+            "title": meta.get("title") or row["title"],
+            "description": meta.get("description") or "",
+            "hashtags": json.dumps(meta.get("hashtags") or []),
+            "keywords": json.dumps(meta.get("keywords") or []),
+            "first_comment": meta.get("first_comment") or "",
+            "suggested_comment": meta.get("suggested_comment") or "",
+            "alt_titles": json.dumps(meta.get("alt_titles") or []),
+            # Upload-Post's duplicate guard is keyed on this. A new render is
+            # a new video and must not be dropped as a repeat of the last one,
+            # while a retry of the same render must still be caught.
+            "created_at": f"{row['created_at']}|{Path(path).name if path else ''}",
+        }
 
     # ---- reporting ----------------------------------------------------
 

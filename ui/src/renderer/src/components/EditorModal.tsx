@@ -3,6 +3,8 @@ import { API_BASE, api } from '../lib/api'
 import type { Clip, LiveOverlay, TranslationPreview, WatermarkConfig } from '../lib/types'
 import { Scissors, YouTube } from './icons'
 import LiveTextOverlay from './LiveTextOverlay'
+import VideoPlayer from './VideoPlayer'
+import { logoFrameStyle } from './WatermarkControls'
 import TimelineEditor from './TimelineEditor'
 import { DEFAULT_CAPTION_STYLE } from './CaptionStyleControls'
 import { youtubeEnabledSync } from '../lib/youtube'
@@ -67,7 +69,7 @@ function WatermarkOverlay({
           <img
             src={api.brandingAssetUrl(config.image_asset!)}
             alt=""
-            style={{ width: `${(config.scale ?? 0.18) * box.w}px` }}
+            style={{ width: `${(config.scale ?? 0.18) * box.w}px`, ...logoFrameStyle(config.frame) }}
             className="max-w-none"
             draggable={false}
           />
@@ -242,15 +244,14 @@ export default function EditorView({
               isLandscape ? 'w-full aspect-video' : 'h-[74vh] aspect-[9/16]'
             }`}
           >
-            <video
-              key={previewSrc ?? `clip-${clip.id}`}
+            <VideoPlayer
               ref={videoRef}
-              src={previewSrc ? `${API_BASE}${previewSrc}` : api.mediaUrl(clip.id)}
-              controls
+              fill
               autoPlay
-              className="absolute inset-0 w-full h-full object-contain rounded-xl bg-base"
-              aria-label="Editing preview"
-            />
+              src={previewSrc ? `${API_BASE}${previewSrc}` : api.mediaUrl(clip.id)}
+              label="Editing preview"
+              className="!rounded-xl"
+            >
             {/* Live watermark overlay — hidden while a baked draft is shown. */}
             {watermark && !previewSrc && (
               <WatermarkOverlay
@@ -271,6 +272,7 @@ export default function EditorView({
                 PREVIEW — all edits applied (not saved until Apply)
               </span>
             )}
+            </VideoPlayer>
           </div>
           {isLandscape && (
             <p className="text-center text-xs text-muted">Longform clip — 1920×1080 horizontal</p>

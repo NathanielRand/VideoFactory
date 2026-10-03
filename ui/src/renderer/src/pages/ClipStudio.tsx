@@ -1,21 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import AddToCompilation from '../components/AddToCompilation'
 import NoClipsExplanation from '../components/NoClipsExplanation'
+import ClipBulkBar from '../components/ClipBulkBar'
 import ClipCard from '../components/ClipCard'
 import ClipEditor from '../components/ClipEditor'
 import EditorView from '../components/EditorModal'
 import ProcessingBar from '../components/ProcessingBar'
 import PublishAllDialog from '../components/PublishAllDialog'
-import ScheduleView from '../components/ScheduleView'
+import ScheduleCalendar from '../components/ScheduleCalendar'
 import { api } from '../lib/api'
-import type { Provider } from '../lib/uploadpost'
-import { getExportFolder } from '../lib/exportFolder'
+import type { PublishVia } from '../components/PublishAllDialog'
+import FlagClipDialog from '../components/FlagClipDialog'
 import { useEvents } from '../lib/useEvents'
 import { useJobWatch } from '../lib/useJobWatch'
+import { useClipWork } from '../lib/clipWork'
+import { useAutoThumbnails } from '../lib/autoThumbnails'
+import { usePublishStates, useVideoStates, type ItemStateName } from '../lib/publishState'
+import { ItemBadge, VideoBadge, VideoProgress } from '../components/PublishBadge'
 import type { StudioTarget } from '../App'
 import type { Clip, StudioEvent, Video } from '../lib/types'
 
-/** Browse and edit the clips of processed videos. New videos are started from
- *  the Dashboard; clicking a clip there navigates here with it selected. */
+/** Browse and edit the clips of processed videos — the Clips tab of the
+ *  Editor. New videos are started from Home or the Library; clicking a clip
+ *  there navigates here with it selected. */
 export default function ClipStudio({
   target,
   onTargetConsumed
@@ -31,6 +38,10 @@ export default function ClipStudio({
   // handed a list of one, so the platform picker and the daily budget
   // do not need a second implementation.
   const [publishOne, setPublishOne] = useState<Clip | null>(null)
+  const [publishMany, setPublishMany] = useState<{ clips: Clip[]; when: 'now' | 'schedule' } | null>(null)
+  // Ticked for a bulk action — not the same as the one clip open above.
+  const [checked, setChecked] = useState<Set<number>>(new Set())
+  const [flagging, setFlagging] = useState<Clip | null>(null)
   const [showSchedule, setShowSchedule] = useState(false)
   const [editingClipId, setEditingClipId] = useState<number | null>(null)
   const [videoSearch, setVideoSearch] = useState('')
@@ -38,19 +49,23 @@ export default function ClipStudio({
   // is stored — the same rule the editor tab follows.
   const [publishReady, setPublishReady] = useState(false)
   // Which provider a batch goes through. WoopSocial when it is set up.
-  const [publishProvider, setPublishProvider] = useState<Provider>('woopsocial')
+  const [publishProvider, setPublishProvider] = useState<PublishVia>('woopsocial')
   const [publishing, setPublishing] = useState(false)
   const [clipType, setClipType] = useState<'all' | 'shorts' | 'longform'>('all')
-  const [exportingAll, setExportingAll] = useState(false)
-  const [exportNotice, setExportNotice] = useState<string | null>(null)
+  // Filter by where a clip stands: the quick way to find what still needs posting.
+  const [stateFilter, setStateFilter] = useState<'all' | 'todo' | 'scheduled' | 'published' | 'failed'>('all')
   const pendingClip = useRef<number | null>(null)
+  const editorRef = useRef<HTMLDivElement>(null)
   const lastEventAt = useRef(Date.now())
   // Only while something is in flight, so an idle page never polls.
-  const busy = videos.some((v) => v.status !== 'done' && v.status !== 'failed')
+  // 'imported' is at rest too: in the library, never clipped.
+  const busy = videos.some((v) => v.status !== 'done' && v.status !== 'failed' && v.status !== 'imported')
 
   const refreshVideos = async (): Promise<void> => {
     try {
-      const v = await api.videos()
+      // Uploads kept for compilations have no clips to show; the Library
+      // lists them, with Make clips, until they do.
+      const v = (await api.videos()).filter((x) => x.status !== 'imported' || x.clip_count > 0)
       setVideos(v)
       if (!activeVideo && !target && v.length > 0) setActiveVideo(v[0].video_id)
     } catch {
@@ -61,7 +76,7 @@ export default function ClipStudio({
   const deleteClip = async (clipId: number): Promise<void> => {
     try {
       await api.deleteClip(clipId)
-      if (selectedClip === clipId) setSelectedClip(null)
+      setSelectedClip((cur) => (cur === clipId ? null : cur)) // a card may hold an older render's closure
       setClips((cur) => cur.filter((c) => c.id !== clipId)) // drop it immediately
     } catch (e) {
       window.alert(`Could not delete: ${e instanceof Error ? e.message : String(e)}`)
@@ -78,10 +93,42 @@ export default function ClipStudio({
     }
   }
 
+  const activeRef = useRef(activeVideo)
+  activeRef.current = activeVideo
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const refreshNow = (videoId: string): void => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current)
+    refreshTimer.current = null
+    refreshVideos()
+    // The timer may fire after the user has moved to another video.
+    if (activeRef.current === videoId || !activeRef.current) void refreshClips(videoId)
+  }
+  const refreshSoon = (videoId: string): void => {
+    if (refreshTimer.current) return // one is already waiting; it reads the latest
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null
+      refreshNow(videoId)
+    }, 1000)
+  }
+  useEffect(
+    () => () => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current)
+    },
+    []
+  )
+
   const refreshClips = async (videoId: string): Promise<void> => {
     try {
       const c = await api.clips(videoId)
-      setClips(c)
+      // Keep the objects that did not change: a card redraws only when its own
+      // clip object is a new one, so this is what lets a refresh be cheap.
+      setClips((prev) => {
+        const old = new Map(prev.map((x) => [x.id, x]))
+        return c.map((n) => {
+          const o = old.get(n.id)
+          return o && JSON.stringify(o) === JSON.stringify(n) ? o : n
+        })
+      })
       if (pendingClip.current !== null) {
         if (c.some((x) => x.id === pendingClip.current)) setSelectedClip(pendingClip.current)
         pendingClip.current = null
@@ -93,14 +140,18 @@ export default function ClipStudio({
 
   useEffect(() => {
     // Either provider makes batch publishing available.
-    Promise.allSettled([api.woopSocialStatus(), api.uploadPostStatus()]).then(
-      ([woop, up]) => {
+    // Any connected account can publish: WoopSocial, Upload-Post, or a
+    // YouTube channel posting on its own.
+    Promise.allSettled([api.woopSocialStatus(), api.uploadPostStatus(), api.youtubeStatus()]).then(
+      ([woop, up, yt]) => {
         const wsReady =
           woop.status === 'fulfilled' && Boolean(woop.value.enabled && woop.value.has_key)
         const upReady =
           up.status === 'fulfilled' && Boolean(up.value.enabled && up.value.has_key)
-        setPublishReady(wsReady || upReady)
-        setPublishProvider(wsReady ? 'woopsocial' : 'uploadpost')
+        const ytReady =
+          yt.status === 'fulfilled' && Boolean(yt.value.enabled && yt.value.connected)
+        setPublishReady(wsReady || upReady || ytReady)
+        setPublishProvider(wsReady ? 'woopsocial' : upReady ? 'uploadpost' : 'youtube')
       }
     )
   }, [])
@@ -118,19 +169,20 @@ export default function ClipStudio({
   }, [target])
 
   useEffect(() => {
+    setChecked(new Set())
     if (activeVideo) refreshClips(activeVideo)
     if (pendingClip.current === null) setSelectedClip(null)
-    setExportNotice(null)
   }, [activeVideo])
 
   useEvents((e: StudioEvent) => {
     lastEventAt.current = Date.now()
     if (e.type === 'progress' && (e.stage === 'render' || e.stage === 'done') && e.video_id) {
-      refreshVideos()
-      if (activeVideo === e.video_id || !activeVideo) {
-        if (!activeVideo) setActiveVideo(e.video_id)
-        refreshClips(e.video_id)
-      }
+      // A render reports every clip it finishes; re-reading the list for each
+      // one, while the machine is busy rendering, is what made the page crawl.
+      // The end of the run reads at once, the rest at most about once a second.
+      if (e.stage === 'done') refreshNow(e.video_id)
+      else refreshSoon(e.video_id)
+      if (!activeVideo) setActiveVideo(e.video_id)
     }
     if (e.type === 'job' && e.status === 'done' && activeVideo) refreshClips(activeVideo)
   })
@@ -162,46 +214,31 @@ export default function ClipStudio({
     )
   }, [videos, videoSearch])
 
+  const clipIds = useMemo(() => clips.map((c) => c.id), [clips])
+  const states = usePublishStates(clipIds)
+  const work = useClipWork(clipIds)
+  // A new clip gets its first thumbnail on its own; a re-render never does.
+  useAutoThumbnails(clipIds)
+  const videoStates = useVideoStates()
+  const inFilter = (s: ItemStateName | undefined): boolean => {
+    if (stateFilter === 'all' || !s) return true
+    if (stateFilter === 'todo') return s === 'ready' || s === 'exported'
+    if (stateFilter === 'scheduled') return s === 'scheduled' || s === 'publishing' || s === 'partial'
+    return s === stateFilter
+  }
   const shownClips = useMemo(
     () =>
-      clips.filter((c) =>
-        clipType === 'all'
-          ? true
-          : clipType === 'longform'
-            ? !!c.render_opts?.profile
-            : !c.render_opts?.profile
-      ),
-    [clips, clipType]
+      clips
+        .filter((c) =>
+          clipType === 'all'
+            ? true
+            : clipType === 'longform'
+              ? !!c.render_opts?.profile
+              : !c.render_opts?.profile
+        )
+        .filter((c) => inFilter(states[c.id]?.state)),
+    [clips, clipType, stateFilter, states]
   )
-  const toExport = useMemo(() => shownClips.filter((c) => !c.exported_at), [shownClips])
-
-  // Every clip under the current format filter that isn't starred yet, into
-  // the same folder single exports use. Exporting stars them.
-  const exportAll = async (): Promise<void> => {
-    if (toExport.length === 0) return
-    const folder = await getExportFolder()
-    const skipped = shownClips.length - toExport.length
-    setExportingAll(true)
-    setExportNotice(null)
-    try {
-      const res = await api.exportBatch(
-        toExport.map((c) => c.id),
-        folder
-      )
-      const n = res.exported.length
-      const missing = toExport.length - n
-      setExportNotice(
-        `Exported ${n} clip${n === 1 ? '' : 's'} to ${folder}.` +
-          (skipped > 0 ? ` Skipped ${skipped} already starred as exported.` : '') +
-          (missing > 0 ? ` ${missing} had no video file to copy.` : '')
-      )
-      if (activeVideo) await refreshClips(activeVideo)
-    } catch (e) {
-      setExportNotice(`Export failed: ${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setExportingAll(false)
-    }
-  }
 
   if (editingClip) {
     return (
@@ -217,14 +254,12 @@ export default function ClipStudio({
 
   return (
     <div className="p-6 space-y-5">
-      <h2 className="text-2xl font-bold">Clip Editor</h2>
-
       <ProcessingBar />
 
       {videos.length === 0 ? (
         <div className="card text-muted text-sm">
-          No videos yet — head to the <span className="text-accent">Dashboard</span> and paste a
-          link to make clips.
+          No clips yet — add a video on <span className="text-accent">Home</span> or in the{' '}
+          <span className="text-accent">Library</span> and choose Make clips.
         </div>
       ) : (
         <input
@@ -251,14 +286,87 @@ export default function ClipStudio({
             >
               {v.channel_name ? `${v.channel_name} — ` : ''}
               {v.title || v.video_id}
+              {/* Where the whole video has got, on its tab. */}
+              {videoStates[v.video_id] && (
+                <span className="ml-2 align-middle">
+                  <VideoBadge state={videoStates[v.video_id]} />
+                </span>
+              )}
             </button>
           ))}
         </div>
       )}
 
       {videos.length > 0 && (
-        <div className="grid grid-cols-1 xl:grid-cols-5 gap-5 items-start">
-          <div className="xl:col-span-3 space-y-3">
+        <div className="space-y-5">
+          {/* The selected clip sits above the grid, so picking one never
+              moves it out from under the cursor and the grid can use the
+              full width for smaller cards. */}
+          <div ref={editorRef}>
+            {current ? (
+              <div className="space-y-3">
+                <ClipEditor
+                  clip={current}
+                  onChanged={() => activeVideo && refreshClips(activeVideo)}
+                  onOpenEditor={() => setEditingClipId(current.id)}
+                  onPublish={publishReady ? () => setPublishOne(current) : undefined}
+                />
+                {/* This clip's range of the SOURCE, not its rendered file: a
+                    compilation re-frames and re-credits every segment itself. */}
+                <AddToCompilation
+                  videoId={current.video_id}
+                  start={current.start_s}
+                  end={current.end_s}
+                  label="Use in a compilation"
+                />
+              </div>
+            ) : (
+              <div className="card text-muted text-sm">Select a clip to preview and edit it.</div>
+            )}
+          </div>
+          <div className="space-y-3">
+            {activeVideo && videoStates[activeVideo] && (
+              <div className="card !p-3 space-y-2">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                  <VideoBadge state={videoStates[activeVideo]} detail />
+                  {videoStates[activeVideo].scheduled > 0 && (
+                    <span className="text-xs text-muted">
+                      {videoStates[activeVideo].scheduled} scheduled
+                    </span>
+                  )}
+                  {videoStates[activeVideo].ready > 0 && (
+                    <span className="text-xs text-muted">{videoStates[activeVideo].ready} not posted</span>
+                  )}
+                  {videoStates[activeVideo].failed > 0 && (
+                    <span className="text-xs text-red-300">{videoStates[activeVideo].failed} failed</span>
+                  )}
+                  <span className="ml-auto flex gap-1" role="group" aria-label="Filter clips by posting state">
+                    {(
+                      [
+                        ['all', 'All'],
+                        ['todo', 'Not posted'],
+                        ['scheduled', 'Scheduled'],
+                        ['published', 'Posted'],
+                        ['failed', 'Failed']
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={value}
+                        onClick={() => setStateFilter(value)}
+                        className={`px-2 py-0.5 rounded-md text-xs ${
+                          stateFilter === value
+                            ? 'bg-accent/20 text-accent font-medium'
+                            : 'bg-raised text-muted hover:text-ink'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </span>
+                </div>
+                <VideoProgress state={videoStates[activeVideo]} />
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex gap-1.5" role="group" aria-label="Filter clips by format">
                 {(
@@ -281,18 +389,6 @@ export default function ClipStudio({
                   </button>
                 ))}
               </div>
-              <button
-                className="btn-accent !py-1 !px-3 text-xs ml-auto"
-                onClick={exportAll}
-                disabled={exportingAll || toExport.length === 0}
-                title={
-                  toExport.length === 0
-                    ? 'Every clip here is already starred as exported'
-                    : `Export the ${toExport.length} clip${toExport.length === 1 ? '' : 's'} here that are not starred yet`
-                }
-              >
-                {exportingAll ? 'Exporting…' : `Export all (${toExport.length})`}
-              </button>
               {/* Deliberately not styled as a twin of Export beside it.
                   Export writes files you can delete; this posts publicly and
                   cannot be undone, so it is quieter to look at and opens a
@@ -317,17 +413,46 @@ export default function ClipStudio({
                 </>
               )}
             </div>
-            {exportNotice && <p className="text-sm text-accent">{exportNotice}</p>}
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <ClipBulkBar
+              picked={shownClips.filter((c) => checked.has(c.id))}
+              total={shownClips.length}
+              onSelectAll={() => setChecked(new Set(shownClips.map((c) => c.id)))}
+              onClear={() => setChecked(new Set())}
+              onChanged={(deleted) => {
+                if (deleted?.length) {
+                  setClips((cur) => cur.filter((c) => !deleted.includes(c.id)))
+                  if (selectedClip !== null && deleted.includes(selectedClip)) setSelectedClip(null)
+                }
+                if (activeVideo) void refreshClips(activeVideo)
+              }}
+              onPublish={(clips, when) => setPublishMany({ clips, when })}
+              publishReady={publishReady}
+            />
+            <div className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8 gap-3">
               {shownClips.map((clip) => (
                 <ClipCard
                   key={clip.id}
                   clip={clip}
                   selected={clip.id === selectedClip}
-                  onClick={() => setSelectedClip(clip.id)}
+                  onClick={() => {
+                    setSelectedClip(clip.id)
+                    editorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                  }}
                   onDelete={() => deleteClip(clip.id)}
                   onToggleExported={() => toggleExported(clip)}
                   onPublish={() => setPublishOne(clip)}
+                  onFlag={() => setFlagging(clip)}
+                  publishState={states[clip.id]}
+                  work={work[clip.id]}
+                  checked={checked.has(clip.id)}
+                  selecting={checked.size > 0}
+                  onCheck={() =>
+                    setChecked((cur) => {
+                      const next = new Set(cur)
+                      if (!next.delete(clip.id)) next.add(clip.id)
+                      return next
+                    })
+                  }
                 />
               ))}
               {clips.length === 0 && (
@@ -339,26 +464,27 @@ export default function ClipStudio({
               )}
             </div>
           </div>
-          {/* sticky + self-start so the preview/player stays pinned while the
-              clip grid scrolls; its containing block is the tall grid, giving
-              it room to travel (an inner sticky can't — the cell is only as
-              tall as its content). */}
-          <div className="xl:col-span-2 self-start xl:sticky xl:top-6 xl:max-h-[calc(100vh-3rem)] xl:overflow-y-auto">
-            {current ? (
-              <ClipEditor
-                clip={current}
-                onChanged={() => activeVideo && refreshClips(activeVideo)}
-                onOpenEditor={() => setEditingClipId(current.id)}
-                onPublish={publishReady ? () => setPublishOne(current) : undefined}
-              />
-            ) : (
-              <div className="card text-muted text-sm">Select a clip to preview and edit it.</div>
-            )}
+        </div>
+      )}
+
+      {showSchedule && (
+        <div
+          className="fixed inset-0 z-50 bg-base/80 backdrop-blur-sm grid place-items-center p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Posting schedule"
+          onClick={() => setShowSchedule(false)}
+        >
+          <div className="w-full max-w-6xl max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <ScheduleCalendar />
+            <button className="btn-ghost w-full !py-2 mt-2" onClick={() => setShowSchedule(false)}>
+              Close
+            </button>
           </div>
         </div>
       )}
 
-      {showSchedule && <ScheduleView onClose={() => setShowSchedule(false)} />}
+      {flagging && <FlagClipDialog clip={flagging} onClose={() => setFlagging(null)} />}
 
       {publishOne && (
         <PublishAllDialog
@@ -366,6 +492,18 @@ export default function ClipStudio({
           provider={publishProvider}
           onClose={() => {
             setPublishOne(null)
+            if (activeVideo) refreshClips(activeVideo)
+          }}
+        />
+      )}
+
+      {publishMany && (
+        <PublishAllDialog
+          clips={publishMany.clips}
+          initialWhen={publishMany.when}
+          provider={publishProvider}
+          onClose={() => {
+            setPublishMany(null)
             if (activeVideo) refreshClips(activeVideo)
           }}
         />

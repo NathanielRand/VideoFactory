@@ -34,6 +34,12 @@ class _FakeDB:
     def get_clip(self, clip_id):
         return self._clips.get(clip_id)
 
+    # Publish paths load through get_publishable (clips or compilations).
+    get_publishable = get_clip
+
+    def get_flag(self, key, default=""):
+        return default
+
     def record_clip_publish(self, clip_id, platform, fields):
         self.recorded.append((clip_id, platform, fields))
 

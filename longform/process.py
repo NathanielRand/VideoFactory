@@ -108,7 +108,14 @@ def process_longform(url: str, config: dict, db: StateDB, options: dict) -> None
         return
 
     print(f"[4/4] Rendering {len(candidates)} landscape clip(s) (1920x1080)...")
-    metas = generate_metadata_batch(candidates, segments, video.title, llm)
+    from core.pipeline import _always_on_tags, _audience
+    from llm.stages import StageModels
+
+    metas = generate_metadata_batch(
+        candidates, segments, video.title, StageModels(config["llm"], llm).for_stage("metadata"),
+        channel=video.channel or "", always_on=_always_on_tags(db),
+        audience=_audience(db, config, data_dir),
+    )
     candidates = [replace(c, start=c.start + _NUDGE, end=c.end + _NUDGE) for c in candidates]
 
     clip_dir = (

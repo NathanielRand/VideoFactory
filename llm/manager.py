@@ -133,12 +133,38 @@ def recommend_for(vram_gb: float | None) -> dict:
     }
 
 
+def _params_b(text: str) -> float | None:
+    """Ollama's "parameter_size" ("8.5B", "270M", "30.5B") in billions."""
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([BMK])\s*$", text or "", re.IGNORECASE)
+    if not m:
+        return None
+    n = float(m.group(1))
+    return {"B": n, "M": n / 1000, "K": n / 1e6}[m.group(2).upper()]
+
+
 def installed_models(host: str) -> list[dict]:
-    """Models currently pulled in Ollama: [{"name", "size_gb"}]."""
+    """Models currently pulled in Ollama: [{"name", "size_gb", "cloud",
+    "params_b", "family"}].
+
+    `params_b` and `family` are what Ollama read from the model file itself,
+    so the Models page grades a model by its real size, not by its tag (a
+    "gemma:7b" is 8.5B; "phi3:mini" says no size at all). None when absent.
+
+    `cloud` marks Ollama's cloud models (`qwen3.5:cloud`): what is "pulled"
+    is a manifest of a few hundred bytes and the model runs on ollama.com.
+    Its size is not a model size, and comparing a 5 GB model against 346
+    bytes told a creator gemma would take "14485125x longer".
+    """
     response = requests.get(f"{host.rstrip('/')}/api/tags", timeout=15)
     response.raise_for_status()
     return [
-        {"name": m["name"], "size_gb": m.get("size", 0) / 1e9}
+        {
+            "name": m["name"],
+            "size_gb": m.get("size", 0) / 1e9,
+            "cloud": bool(m.get("remote_host")) or m["name"].endswith((":cloud", "-cloud")),
+            "params_b": _params_b((m.get("details") or {}).get("parameter_size", "")),
+            "family": (m.get("details") or {}).get("family") or "",
+        }
         for m in response.json().get("models", [])
     ]
 

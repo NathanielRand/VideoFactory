@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
+import ThumbnailCard from './ThumbnailCard'
 
 /** Thumbnail picker, in the shape YouTube Studio uses: a few frames suggested
  *  from the video, plus your own image.
@@ -15,6 +16,8 @@ interface Props {
   clipId: number
   duration: number
   currentTime: number
+  /** The exact playhead at the moment of the click; `currentTime` follows playback a few times a second. */
+  getCurrentTime?: () => number
   value: string | null
   onChange: (thumbnail: string | null) => void
   disabled?: boolean
@@ -24,6 +27,7 @@ export default function YouTubeThumbnail({
   clipId,
   duration,
   currentTime,
+  getCurrentTime,
   value,
   onChange,
   disabled
@@ -119,6 +123,16 @@ export default function YouTubeThumbnail({
     <fieldset className="border border-raised/60 rounded-lg p-3 space-y-2">
       <legend className="label px-1">{t('Thumbnail')}</legend>
 
+      {/* A designed thumbnail is already the chosen one: saying so here
+          means it is sent without picking it again. */}
+      <ThumbnailCard
+        publishId={clipId}
+        compact
+        onState={(has) => has && value === null && onChange('designed')}
+        onSaved={() => onChange('designed')}
+      />
+      <p className="text-[11px] text-muted">{t('Or use a frame as it is:')}</p>
+
       <div className="grid grid-cols-3 gap-2">
         {suggestions.map((at, i) => (
           <button
@@ -178,7 +192,7 @@ export default function YouTubeThumbnail({
           type="button"
           className="btn-ghost !px-2.5 !py-1 text-xs"
           disabled={disabled || busy}
-          onClick={() => pick(currentTime)}
+          onClick={() => pick(getCurrentTime ? getCurrentTime() : currentTime)}
         >
           {t('Use current frame')}
         </button>

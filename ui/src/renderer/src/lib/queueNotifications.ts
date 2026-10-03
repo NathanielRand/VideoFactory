@@ -55,7 +55,10 @@ export function useQueueNotifications(): void {
             : remaining === 0
               ? ''
               : ` ${remaining} ${remaining === 1 ? 'video' : 'videos'} remaining.`
-        send('Video Factory', `${name} has finished processing.${left}`)
+        send(
+          'Video Factory',
+          e.import_only ? `${name} is in your Library.${left}` : `${name} has finished processing.${left}`
+        )
       }
     }
 

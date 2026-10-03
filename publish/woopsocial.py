@@ -275,6 +275,11 @@ class WoopSocialClient:
     def create_post(self, body: dict) -> dict:
         return self._request("POST", "/posts", json_body=body, timeout=UPLOAD_TIMEOUT)
 
+    def delete_post(self, post_id: str) -> None:
+        """Cancel a scheduled post. WoopSocial only allows it while every
+        account's delivery is still NOT_STARTED; otherwise it answers 409."""
+        self._request("DELETE", f"/posts/{_safe_id(post_id)}")
+
     def get_post(self, post_id: str) -> dict:
         return self._request("GET", f"/posts/{_safe_id(post_id)}")
 
@@ -365,6 +370,10 @@ def build_post(
             # A video with no title is rejected rather than defaulted.
             child["title"] = (mine.get("title") or title or "")[:100]
             child["privacy"] = mine.get("privacy") or "public"
+            # The one YouTube question WoopSocial's API can answer. AI use and
+            # paid promotion have no field there; Studio asks those itself.
+            if mine.get("madeForKids") is not None:
+                child["madeForKids"] = bool(mine["madeForKids"])
         elif name == "tiktok":
             child["postType"] = mine.get("postType") or "VIDEO"
             child["privacyLevel"] = mine.get("privacyLevel") or "PUBLIC_TO_EVERYONE"

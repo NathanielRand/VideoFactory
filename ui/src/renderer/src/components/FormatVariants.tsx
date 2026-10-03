@@ -3,6 +3,7 @@
 // the subject tracking is computed once and shared (formats/variants.py).
 import { useCallback, useEffect, useState } from 'react'
 import { t } from '../lib/i18n'
+import VideoPlayer from './VideoPlayer'
 import {
   CANVAS_ORDER,
   formatsApi,
@@ -139,10 +140,10 @@ export default function FormatVariants({ clipId }: { clipId: number }): JSX.Elem
         {notice && <span className="text-xs text-accent">{notice}</span>}
       </div>
       {preview && byCanvas[preview] && (
-        <video
+        <VideoPlayer
           key={`${preview}-${byCanvas[preview].created_at}`}
-          className="w-full max-h-96 rounded bg-black"
-          controls
+          className="w-full"
+          label={`${preview} version preview`}
           src={formatsApi.mediaUrl(clipId, preview, byCanvas[preview].created_at)}
         />
       )}

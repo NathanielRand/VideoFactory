@@ -147,10 +147,24 @@ def revoke(token: str) -> bool:
         return False
 
 
-def scopes_for(playlists: bool) -> list[str]:
-    from publish.youtube_shorts import CONNECT_SCOPES, PLAYLIST_SCOPES
+def scopes_for(playlists: bool, analytics: bool = False) -> list[str]:
+    """What the sign-in asks Google for. `analytics` adds the read-only
+    YouTube Analytics permission (watch time, subscribers, per-day views): the
+    connection never asked for it before, so the Analytics page had nothing to
+    read until it was granted."""
+    from publish.youtube_shorts import (
+        ANALYTICS_SCOPE,
+        CONNECT_SCOPES,
+        PLAYLIST_SCOPES,
+        SCOPE_COMMENT,
+    )
 
-    return list(PLAYLIST_SCOPES if playlists else CONNECT_SCOPES)
+    scopes = list(PLAYLIST_SCOPES if playlists else CONNECT_SCOPES)
+    if playlists and SCOPE_COMMENT not in scopes:
+        scopes.append(SCOPE_COMMENT)
+    if analytics and ANALYTICS_SCOPE not in scopes:
+        scopes.append(ANALYTICS_SCOPE)
+    return scopes
 
 
 def require_client(config: dict | None) -> dict:

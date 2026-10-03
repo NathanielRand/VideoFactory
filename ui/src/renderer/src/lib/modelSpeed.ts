@@ -36,6 +36,9 @@ export interface SpeedNote {
 export interface ModelLike {
   name: string
   size_gb: number
+  cloud?: boolean
+  /** Billions of parameters, from Ollama; used by the grade (modelGrade.ts). */
+  params_b?: number | null
 }
 
 /** Weights have to sit in VRAM to run at full speed. Anything above roughly
@@ -61,6 +64,15 @@ export function speedNote(
   installed: ModelLike[],
   vramTotalBytes?: number | null
 ): SpeedNote | null {
+  // Nothing about a cloud model's speed can be read from this PC: its
+  // "size" is a manifest of a few hundred bytes.
+  if (model.cloud) {
+    return {
+      tone: 'ok',
+      text: "Runs on Ollama's servers, not this PC. Speed depends on your connection and their load."
+    }
+  }
+
   // Decimal GB, matching how the rest of the app reports sizes (SystemStats).
   const vramGb = vramTotalBytes && vramTotalBytes > 0 ? vramTotalBytes / 1e9 : null
 
@@ -78,24 +90,27 @@ export function speedNote(
     }
   }
 
-  const usable = installed.filter((m) => m.size_gb > 0)
+  // Only models whose weights are on this machine. A cloud model counted
+  // here became "the smallest" at 346 bytes, and every local model was
+  // then millions of times slower than it.
+  const usable = installed.filter((m) => m.size_gb > 0 && !m.cloud)
   if (usable.length < 2 || model.size_gb <= 0) return null // nothing to compare against
 
   const smallest = usable.reduce((a, b) => (b.size_gb < a.size_gb ? b : a))
   if (smallest.name === model.name) {
-    return { tone: 'ok', text: 'Fastest of your installed models. Picks clips less carefully than larger ones.' }
+    return { tone: 'ok', text: 'Fastest of your installed models.' }
   }
 
   const factor = model.size_gb / smallest.size_gb
   if (factor < NOTICEABLE) {
-    return { tone: 'ok', text: `Similar speed to ${smallest.name}, and picks clips a little better.` }
+    return { tone: 'ok', text: `About as fast as ${smallest.name}.` }
   }
 
   const rounded = factor < 3 ? factor.toFixed(1) : String(Math.round(factor))
   return {
     tone: factor >= 2.5 ? 'slow' : 'ok',
-    text:
-      `Picks clips better, but expect roughly ${rounded}x longer than ${smallest.name} ` +
-      `— a rough guide, since it depends on your hardware and the video.`
+    // How well it picks clips is the grade's job (lib/modelGrade.ts); this
+    // says only what it costs in time, and that it is an estimate.
+    text: `Roughly ${rounded}× the time of ${smallest.name}.`
   }
 }

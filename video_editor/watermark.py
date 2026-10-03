@@ -18,8 +18,19 @@ Config schema (stored in a branding profile or a clip's render_opts.watermark):
     "padding": 0.04,              # fraction of the SHORTER edge
     "scale": 0.18,               # image width as a fraction of the frame width
     "rotation": 0, "shadow": true,
-    "image_asset": "<hash>.png"  # filename under the branding assets dir
+    "image_asset": "<hash>.png",  # filename under the branding assets dir
+    "frame": "free",              # logo crop: free (as drawn) | square | circle
+    "cta": {                      # optional timed call to action (see below)
+      "enabled": true, "kind": "discord", "text": "Send us your clips on Discord",
+      "anchor": "start", "at": 3, "duration": 4, "repeat": 0,
+      "position": "top", "color": "#FFFFFF", "bg": "#5865F2"
+    }
   }
+
+The CTA is a boxed line of text that pops in for `duration` seconds, starting
+`at` seconds after the clip starts (anchor "start") or before it ends (anchor
+"end"), and again every `repeat` seconds when that is set. Like watermark text
+it is an ASS event, so it rides the existing subtitle burn for free.
 
 Positions are computed against the OUTPUT frame (1080x1920 or 1920x1080), so
 one config scales correctly for both vertical Shorts and horizontal video.
@@ -66,11 +77,29 @@ def has_text(cfg: dict) -> bool:
     return cfg.get("type") in ("text", "both") and bool(str(cfg.get("text", "")).strip())
 
 
+def has_cta(cfg: dict) -> bool:
+    cta = cfg.get("cta")
+    return isinstance(cta, dict) and bool(cta.get("enabled")) and bool(_clean(cta.get("text")))
+
+
+def has_overlay_text(cfg: dict) -> bool:
+    """Anything that burns through the ASS file: watermark text and/or a CTA."""
+    return has_text(cfg) or has_cta(cfg)
+
+
 def has_image(cfg: dict, asset_dir: Path) -> bool:
     if cfg.get("type") not in ("image", "both"):
         return False
     name = safe_name(str(cfg.get("image_asset") or ""))
     return bool(name) and _asset_in(asset_dir, name) is not None
+
+
+def _clean(text) -> str:
+    """Plain text safe inside an ASS event: no override blocks, no escapes,
+    and no raw line breaks, which would end the event mid-line and corrupt
+    every event after it. A typed break becomes a space."""
+    text = str(text or "").replace("\\", "").replace("{", "").replace("}", "")
+    return " ".join(text.split())
 
 
 def _ass_color(hex_rgb: str) -> str:
@@ -164,19 +193,77 @@ def _text_events(text: str, cfg: dict, duration: float, canvas: tuple[int, int])
     return "\n".join(events)
 
 
+# CTA vertical placement as a fraction of the frame height. "bottom" sits
+# just above where bottom captions start, so the two never overlap.
+_CTA_Y = {"top": 0.17, "middle": 0.5, "bottom": 0.62}
+CTA_POP = 0.18  # seconds for the pop-in scale
+
+
+def _cta_style(cta: dict, canvas: tuple[int, int]) -> str:
+    """A boxed (BorderStyle 3) style: the box takes the CTA's background colour."""
+    s = canvas[1] / 1920
+    size = max(14, round(int(cta.get("font_size", 54)) * s))
+    fg = _ass_color(cta.get("color", "#FFFFFF"))
+    bg = _ass_color(cta.get("bg", "#111111"))
+    pad = max(4, round(18 * s))  # box padding = outline width in style 3
+    margin = round(canvas[0] * 0.08)
+    font = str(cta.get("font", "Arial Black"))
+    return (
+        f"Style: CTA,{font},{size},{fg},{fg},{bg},{bg},"
+        f"-1,0,0,0,100,100,0,0,3,{pad},0,5,{margin},{margin},0,1"
+    )
+
+
+def cta_windows(cta: dict, duration: float) -> list[tuple[float, float]]:
+    """When the CTA shows: (start, end) pairs, clipped to the clip."""
+    length = max(0.5, float(cta.get("duration", 4) or 4))
+    at = max(0.0, float(cta.get("at", 0) or 0))
+    total = duration if duration and duration > 0 else 60.0
+    first = total - at - length if cta.get("anchor") == "end" else at
+    first = max(0.0, first)
+    repeat = max(0.0, float(cta.get("repeat", 0) or 0))
+    out: list[tuple[float, float]] = []
+    t = first
+    while t < total and len(out) < 200:
+        out.append((t, min(t + length, total)))
+        if repeat <= 0:
+            break
+        t += max(repeat, length + 0.5)  # never overlap the previous showing
+    return out
+
+
+def _cta_events(cta: dict, duration: float, canvas: tuple[int, int]) -> str:
+    text = _clean(cta.get("text"))
+    x = round(canvas[0] / 2)
+    y = round(_CTA_Y.get(cta.get("position", "top"), _CTA_Y["top"]) * canvas[1])
+    pop = round(CTA_POP * 1000)
+    # Pop in from 70% with a fade, fade out; layer 3 sits above the watermark.
+    tag = f"{{\\an5\\pos({x},{y})\\fad(150,200)\\fscx70\\fscy70\\t(0,{pop},\\fscx100\\fscy100)}}"
+    return "\n".join(
+        f"Dialogue: 3,{_ass_t(a)},{_ass_t(b)},CTA,,0,0,0,,{tag}{text}"
+        for a, b in cta_windows(cta, duration)
+    )
+
+
 def ensure_text(
     ass_path: Path | None,
     target: Path,
     cfg: dict,
     canvas: tuple[int, int],
     duration: float = 0.0,
+    with_cta: bool = True,
 ) -> Path:
-    """Merge the watermark text into the clip's ASS file (or write a
-    standalone one). Static by default; 'moving' position hops it around the
+    """Merge the watermark text and the CTA into the clip's ASS file (or write
+    a standalone one). Static by default; 'moving' position hops it around the
     edges (TikTok-style, anti-crop). Returns the ASS file to burn."""
-    text = str(cfg["text"]).replace("\\", "").replace("{", "").replace("}", "").strip()
-    style = _text_style(cfg, canvas)
-    event = _text_events(text, cfg, duration, canvas)
+    styles, events = [], []
+    if has_text(cfg):
+        styles.append(_text_style(cfg, canvas))
+        events.append(_text_events(_clean(cfg["text"]), cfg, duration, canvas))
+    if with_cta and has_cta(cfg):
+        styles.append(_cta_style(cfg["cta"], canvas))
+        events.append(_cta_events(cfg["cta"], duration, canvas))
+    style, event = "\n".join(styles), "\n".join(e for e in events if e)
     if ass_path is not None and ass_path.exists():
         content = ass_path.read_text(encoding="utf-8")
         content = content.replace("\n[Events]", f"\n{style}\n\n[Events]", 1)
@@ -197,6 +284,22 @@ def _asset_in(asset_dir: Path, name: str) -> Path | None:
     except OSError:  # folder missing: no assets, same answer
         return None
     return None
+
+
+def _frame_chain(frame: str | None, logo_w: int) -> str:
+    """Scale the logo to `logo_w` and crop it to its frame. Square and circle
+    take the centred square of the image; the circle then masks the corners
+    to transparent with a one-pixel soft edge so it isn't jagged."""
+    if frame not in ("square", "circle"):
+        return f"scale={logo_w}:-1:flags=lanczos,format=rgba"
+    chain = (
+        "crop='min(iw,ih)':'min(iw,ih)',"
+        f"scale={logo_w}:{logo_w}:flags=lanczos,format=rgba"
+    )
+    if frame == "circle":
+        edge = "clip(W/2-hypot(X+0.5-W/2,Y+0.5-H/2)+0.5,0,1)"
+        chain += f",geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*{edge}'"
+    return chain
 
 
 def apply_image(video_path: Path, cfg: dict, canvas: tuple[int, int], asset_dir: Path) -> None:
@@ -221,7 +324,7 @@ def apply_image(video_path: Path, cfg: dict, canvas: tuple[int, int], asset_dir:
         raise ValueError(f"branding asset not found in the assets folder: {name!r}")
     w, h = canvas
     pad = round(float(cfg.get("padding", 0.04)) * min(w, h))
-    logo_w = max(16, round(float(cfg.get("scale", 0.18)) * w))
+    logo_w = max(8, round(float(cfg.get("scale", 0.18)) * w))
     opacity = max(0.0, min(1.0, float(cfg.get("opacity", 0.85))))
     if cfg.get("position") == "custom":
         # Dragged point: x,y are frame fractions for the logo's CENTRE.
@@ -244,7 +347,7 @@ def apply_image(video_path: Path, cfg: dict, canvas: tuple[int, int], asset_dir:
         xexpr, yexpr = _OVERLAY_XY.get(cfg.get("position", "bottom_right"), _OVERLAY_XY["bottom_right"])
         xexpr, yexpr = xexpr.format(p=pad), yexpr.format(p=pad)
 
-    logo_chain = f"[1:v]scale={logo_w}:-1:flags=lanczos,format=rgba,colorchannelmixer=aa={opacity:.3f}"
+    logo_chain = f"[1:v]{_frame_chain(cfg.get('frame'), logo_w)},colorchannelmixer=aa={opacity:.3f}"
     rot = float(cfg.get("rotation", 0) or 0)
     if abs(rot) > 0.1:
         logo_chain += f",rotate={rot}*PI/180:ow=rotw({rot}*PI/180):oh=roth({rot}*PI/180):c=none"

@@ -13,6 +13,7 @@ import type {
 import FeatureBoundary from './FeatureBoundary'
 import MultilingualExport from './MultilingualExport'
 import WatermarkControls, { DEFAULT_WATERMARK } from './WatermarkControls'
+import { clipProfiles, useBrandingProfiles } from '../lib/branding'
 import {
   Badge,
   Ban,
@@ -165,6 +166,66 @@ function origToBaked(t: number, bakedKeep: Range[] | undefined): number {
   return offset
 }
 
+function fmtTime(t: number): string {
+  return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}.${Math.floor((t % 1) * 10)}`
+}
+
+const READOUT = 'absolute top-0 text-[10px] tabular-nums bg-black/70 text-white px-1 py-0.5 rounded whitespace-nowrap'
+
+/** The playhead line, knob and time readout.
+ *
+ *  It follows the video by moving its own DOM nodes on the animation frame.
+ *  It used to be a `playhead` state set from that loop, which re-rendered the
+ *  whole 1,700-line editor (every word, tab and panel in it) about thirty times
+ *  a second while a clip played, and that main-thread work is what made the
+ *  video stutter. Nothing here touches React after the first render. */
+function PlayheadMarker({
+  videoRef,
+  bakedKeep,
+  duration,
+  frozen
+}: {
+  videoRef: React.RefObject<HTMLVideoElement>
+  bakedKeep: Range[] | undefined
+  duration: number
+  /** A baked draft preview has its own timeline, so the marker stays put. */
+  frozen: boolean
+}): JSX.Element {
+  const box = useRef<HTMLDivElement>(null)
+  const label = useRef<HTMLSpanElement>(null)
+  useEffect(() => {
+    if (frozen) return
+    let raf = 0
+    let last = NaN
+    const tick = (): void => {
+      raf = requestAnimationFrame(tick)
+      const el = videoRef.current // read each frame: the element is replaced when a preview starts
+      if (!el) return
+      const t = bakedToOrig(el.currentTime, bakedKeep)
+      if (t === last) return // paused and not moving: no writes at all
+      last = t
+      const frac = t / Math.max(duration, 0.1)
+      if (box.current) box.current.style.left = `${(frac * 100).toFixed(2)}%`
+      if (label.current) {
+        label.current.textContent = fmtTime(t)
+        label.current.className = `${READOUT} ${frac > 0.85 ? 'right-2.5' : 'left-2.5'}`
+      }
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [videoRef, bakedKeep, duration, frozen])
+
+  return (
+    <div ref={box} className="absolute top-0 h-full pointer-events-none z-10" style={{ left: '0%' }}>
+      <div className="absolute inset-y-0 -left-px w-0.5 bg-white shadow" />
+      <div className="absolute top-0 -left-1.5 w-3 h-3 rounded-full bg-white shadow ring-1 ring-black/30" />
+      <span ref={label} className={`${READOUT} left-2.5`}>
+        0:00.0
+      </span>
+    </div>
+  )
+}
+
 export function bakedToOrig(t: number, bakedKeep: Range[] | undefined): number {
   if (!bakedKeep) return t
   let offset = 0
@@ -221,7 +282,16 @@ export default function TimelineEditor({
   const [history, setHistory] = useState<EditData[]>([])
   const [words, setWords] = useState<Word[]>([])
   const [captionBase, setCaptionBase] = useState<CaptionLine[] | null>(null)
-  const [playhead, setPlayhead] = useState(0) // original-timeline seconds
+  // Original-timeline seconds. `playhead` is what renders (which section is
+  // highlighted, the auto-scroll, the aria value) and follows playback about
+  // four times a second; `playheadRef` is exact and is what every action that
+  // acts AT the playhead reads (split, trim, mute, step).
+  const [playhead, setPlayheadState] = useState(0)
+  const playheadRef = useRef(0)
+  const setPlayhead = (t: number): void => {
+    playheadRef.current = t
+    setPlayheadState(t)
+  }
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   // Layout override: Auto = the AI decides (tracking/letterbox), Letterbox =
@@ -271,6 +341,7 @@ export default function TimelineEditor({
   // Watermark / branding for THIS clip — state lifted to EditorModal so the
   // live draggable overlay on the preview and these controls stay in sync.
   const storedWatermark = clip.render_opts?.watermark ?? null
+  const brandingProfiles = clipProfiles(useBrandingProfiles().profiles)
   // Caption text corrections: with "Edit caption text" ON, clicking a
   // transcript word opens a text box instead of muting it.
   const [textMode, setTextMode] = useState(false)
@@ -347,9 +418,12 @@ export default function TimelineEditor({
       raf = requestAnimationFrame(tick)
       const e = editRef.current
       const tOrig = bakedToOrig(el.currentTime, baked?.keep)
-      if (Math.abs(tOrig - lastShown) > 0.03) {
+      playheadRef.current = tOrig
+      // While playing, the rest of the editor only needs to know about every
+      // quarter second; when paused (a seek, a step) it needs to know at once.
+      if (Math.abs(tOrig - lastShown) > (el.paused ? 0.03 : 0.25)) {
         lastShown = tOrig
-        setPlayhead(tOrig)
+        setPlayheadState(tOrig)
       }
       // Skip over removed sections ONLY while genuinely playing and not while
       // the user is scrubbing/dragging — otherwise it fights manual seeks.
@@ -365,9 +439,16 @@ export default function TimelineEditor({
       const inNewMute =
         e.mutes.some(([a, b]) => tOrig >= a - 0.02 && tOrig <= b + 0.02) &&
         !(baked?.mutes ?? []).some(([a, b]) => tOrig >= a && tOrig <= b)
-      el.muted = e.mute_all || inNewMute
-      if (!el.muted) el.volume = Math.max(0, Math.min(1, e.volume))
-      el.playbackRate = Math.max(0.25, (e.speed ?? 1) / (baked?.speed ?? 1))
+      // Only write what changed: these are media-pipeline calls, and this loop
+      // runs every frame.
+      const muted = e.mute_all || inNewMute
+      if (el.muted !== muted) el.muted = muted
+      if (!muted) {
+        const volume = Math.max(0, Math.min(1, e.volume))
+        if (el.volume !== volume) el.volume = volume
+      }
+      const rate = Math.max(0.25, (e.speed ?? 1) / (baked?.speed ?? 1))
+      if (el.playbackRate !== rate) el.playbackRate = rate
     }
     raf = requestAnimationFrame(tick)
     return () => {
@@ -424,8 +505,7 @@ export default function TimelineEditor({
     window.setTimeout(() => (scrubbing.current = false), 150)
   }
 
-  const fmt = (t: number): string =>
-    `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}.${Math.floor((t % 1) * 10)}`
+  const fmt = fmtTime
 
   // ---- timeline zoom -------------------------------------------------------
   /** Zoom so the given original-timeline moment stays under the same pixel
@@ -521,13 +601,14 @@ export default function TimelineEditor({
 
   const trimToPlayhead = (edge: 'start' | 'end'): void => {
     const k = keep.map((r) => [...r] as Range)
-    if (edge === 'start') k[0][0] = Math.min(playhead, k[0][1] - MIN_SEG)
-    else k[k.length - 1][1] = Math.max(playhead, k[k.length - 1][0] + MIN_SEG)
+    const at = playheadRef.current
+    if (edge === 'start') k[0][0] = Math.min(at, k[0][1] - MIN_SEG)
+    else k[k.length - 1][1] = Math.max(at, k[k.length - 1][0] + MIN_SEG)
     push({ ...edit, keep: k })
   }
 
   const splitAtPlayhead = (): void => {
-    const t = playhead
+    const t = playheadRef.current
     const idx = keep.findIndex(([a, b]) => t > a + MIN_SEG && t < b - MIN_SEG)
     if (idx === -1) return
     const next = [...keep]
@@ -942,21 +1023,21 @@ export default function TimelineEditor({
           break
         case 'ArrowLeft':
           e.preventDefault()
-          seekOrig(playhead - (e.shiftKey ? 1 : 0.1))
+          seekOrig(playheadRef.current - (e.shiftKey ? 1 : 0.1))
           break
         case 'ArrowRight':
           e.preventDefault()
-          seekOrig(playhead + (e.shiftKey ? 1 : 0.1))
+          seekOrig(playheadRef.current + (e.shiftKey ? 1 : 0.1))
           break
         case 'j':
         case 'J':
           e.preventDefault()
-          seekOrig(playhead - 1)
+          seekOrig(playheadRef.current - 1)
           break
         case 'l':
         case 'L':
           e.preventDefault()
-          seekOrig(playhead + 1)
+          seekOrig(playheadRef.current + 1)
           break
         case 's':
         case 'S':
@@ -976,7 +1057,8 @@ export default function TimelineEditor({
         case 'm':
         case 'M': {
           e.preventDefault()
-          const w = words.find((x) => playhead >= x.start - 0.05 && playhead <= x.end + 0.05)
+          const at = playheadRef.current
+          const w = words.find((x) => at >= x.start - 0.05 && at <= x.end + 0.05)
           if (w) toggleWord(w)
           else setNotice('No transcript word at the playhead to mute')
           break
@@ -1208,20 +1290,12 @@ export default function TimelineEditor({
               title="Drag to trim the end"
             />
             {/* playhead: line + grab knob + live time readout */}
-            <div
-              className="absolute top-0 h-full pointer-events-none z-10"
-              style={{ left: pct(playhead) }}
-            >
-              <div className="absolute inset-y-0 -left-px w-0.5 bg-white shadow" />
-              <div className="absolute top-0 -left-1.5 w-3 h-3 rounded-full bg-white shadow ring-1 ring-black/30" />
-              <span
-                className={`absolute top-0 text-[10px] tabular-nums bg-black/70 text-white px-1 py-0.5 rounded whitespace-nowrap ${
-                  playhead / Math.max(duration, 0.1) > 0.85 ? 'right-2.5' : 'left-2.5'
-                }`}
-              >
-                {fmt(playhead)}
-              </span>
-            </div>
+            <PlayheadMarker
+              videoRef={videoRef}
+              bakedKeep={baked?.keep}
+              duration={duration}
+              frozen={draftActive}
+            />
           </div>
         </div>
       </div>
@@ -1419,6 +1493,28 @@ export default function TimelineEditor({
       {/* watermark / branding for this clip */}
       {activeTab === 'watermark' && (
         <div className="border border-raised/60 rounded-lg p-3 space-y-2">
+          {/* A saved profile is a starting point: loading one copies it onto
+              this clip, and changes here stay on this clip only. */}
+          {brandingProfiles.length > 0 && (
+            <label className="flex items-center gap-2 text-xs">
+              <span className="text-muted">{watermark ? 'Replace with profile' : 'Start from profile'}</span>
+              <select
+                className="input !w-48 !py-1 text-xs"
+                value=""
+                onChange={(e) => {
+                  const p = brandingProfiles.find((x) => x.id === Number(e.target.value))
+                  if (p) setWatermark({ ...p.config })
+                }}
+              >
+                <option value="">Choose…</option>
+                {brandingProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {!watermark ? (
             <button
               className="bg-raised px-2.5 py-1.5 rounded-md text-xs hover:bg-raised/70"
@@ -1693,6 +1789,7 @@ export default function TimelineEditor({
             pendingRender={dirty ? { render_opts: buildRenderOpts() } : null}
             duration={duration}
             currentTime={playhead}
+            getCurrentTime={() => playheadRef.current}
             onOpenSettings={() => window.dispatchEvent(new CustomEvent('open-settings'))}
           />
         </FeatureBoundary>

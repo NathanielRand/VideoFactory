@@ -38,6 +38,8 @@ class FakeFeed:
         self.ready: dict[str, Readiness] = {}
         self.fail: Exception | None = None
         self.readiness_calls: list[str] = []
+        self.histories: dict[str, list] = {}
+        self.history_asked = 0
 
     def resolve(self, platform, text):
         return Channel(platform, text, f"Channel {text}")
@@ -46,6 +48,10 @@ class FakeFeed:
         if self.fail:
             raise self.fail
         return list(self.listings.get(channel_key, []))
+
+    def history(self, platform, channel_key, limit):
+        self.history_asked = limit
+        return list(self.histories.get(channel_key, self.listings.get(channel_key, [])))
 
     def readiness(self, url, min_seconds=0):
         self.readiness_calls.append(url)
@@ -1016,3 +1022,222 @@ def test_a_video_that_taught_nothing_says_nothing(env):
     env.later(5)
     assert learned_lines(env) == []
 
+
+
+# ---- what a watch does: clips, a compilation, or just the Library -----------
+
+
+def set_actions(env, watch, **actions):
+    response = env.client.patch(f"/automation/watches/{watch['id']}", json={"actions": actions})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def finish_with_length(env, video_id, seconds=600.0):
+    env.finish(video_id)
+    env.run(lambda d: (d.conn.execute("UPDATE videos SET duration = ? WHERE video_id = ?",
+                                      (seconds, video_id)), d.conn.commit()))
+
+
+def recipe_segments(env, comp_id):
+    from compilation import store as compilations
+
+    return env.run(lambda d: compilations.get(d, comp_id)["recipe"].get("segments") or [])
+
+
+def test_existing_watches_keep_making_clips_and_nothing_else(env):
+    watch = watched(env)
+    assert watch["actions"]["clips"] is True and watch["actions"]["compile"] is False
+    assert watch["kind"] == "channel"
+
+
+def test_library_only_imports_and_publishes_nothing(env):
+    watch = watched(env)
+    set_actions(env, watch, clips=False, compile=False)
+    env.client.patch(f"/automation/watches/{watch['id']}",
+                     json={"publish": {"mode": "auto", "platforms": ["youtube"]}})
+    env.feed.listings[UC] = [yt("newnewnew01")]
+    env.later()
+    assert json.loads(env.jobs()[0]["payload"])["import_only"] is True
+    env.finish("newnewnew01")
+    env.later(5)
+    item = env.item("newnewnew01")
+    assert item["publish_state"] == "off" and item["imported"] is True
+    assert env.publish_calls == 0
+
+
+def test_a_new_compilation_is_made_and_each_video_added_whole_once(env):
+    watch = watched(env)
+    saved = set_actions(env, watch, clips=False, compile=True,
+                        compilation={"new_title": "Fails of the week"})
+    comp_id = saved["actions"]["compilation"]["compilation_id"]
+    assert saved["actions"]["compilation"]["title"] == "Fails of the week"
+    env.feed.listings[UC] = [yt("newnewnew01")]
+    env.later()
+    payload = json.loads(env.jobs()[0]["payload"])
+    assert payload["import_only"] is True and "add_to_compilation" not in payload
+    finish_with_length(env, "newnewnew01", 42.5)
+    env.later(5)
+    env.later(5)  # a second look adds nothing more
+    assert recipe_segments(env, comp_id) == [
+        {"credit": True, "video_id": "newnewnew01", "start": 0.0, "end": 42.5}
+    ]
+    assert env.item("newnewnew01")["compiled"] == 1
+
+
+def test_best_clips_go_in_in_the_order_they_happen(env):
+    watch = watched(env)
+    saved = set_actions(env, watch, clips=True, compile=True,
+                        compilation={"new_title": "Highlights", "what": "clips", "max_clips": 2})
+    comp_id = saved["actions"]["compilation"]["compilation_id"]
+    env.feed.listings[UC] = [yt("newnewnew01")]
+    env.later()
+    env.finish("newnewnew01")
+    # Scores: 30s clip best, then 0s, then 60s.
+    env.run(lambda d: [d.add_clip("newnewnew01", start, start + 8, score, "hook")
+                       for start, score in ((0.0, 80), (30.0, 95), (60.0, 50))])
+    env.later(5)
+    assert [(s["start"], s["end"]) for s in recipe_segments(env, comp_id)] == [(0.0, 8.0), (30.0, 38.0)]
+
+
+def test_best_clips_need_clips_switched_on(env):
+    watch = watched(env)
+    response = env.client.patch(f"/automation/watches/{watch['id']}", json={"actions": {
+        "clips": False, "compile": True, "compilation": {"new_title": "X", "what": "clips"}}})
+    assert response.status_code == 400
+
+
+def test_switching_a_compilation_on_later_takes_only_what_comes_after(env):
+    watch = watched(env)
+    env.feed.listings[UC] = [yt("newnewnew01")]
+    env.later()
+    finish_with_length(env, "newnewnew01")
+    env.later(5)
+    saved = set_actions(env, watch, clips=True, compile=True, compilation={"new_title": "Later"})
+    env.later(5)
+    assert recipe_segments(env, saved["actions"]["compilation"]["compilation_id"]) == []
+
+
+def test_a_watch_feeding_a_compilation_keeps_shorts(env):
+    watch = watched(env)
+    set_actions(env, watch, clips=False, compile=True, compilation={"new_title": "Shorts"})
+    env.feed.ready["https://www.youtube.com/watch?v=shortshort1"] = Readiness("ready", duration=41)
+    short = yt("shortshort1")
+    short.short = True
+    env.feed.listings[UC] = [short]
+    env.later()
+    assert len(env.jobs()) == 1
+
+
+def test_a_playlist_watch_makes_no_creator_profile(env):
+    pl = "PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+    env.feed.listings[pl] = []
+    watch = env.add(pl)
+    assert watch["kind"] == "playlist" and watch["creator"] is None
+
+
+# ---- catching up on what was there before -----------------------------------
+
+DAY = 24 * 60 * 60
+PL = "PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+
+
+def add_with_backfill(env, key=UC, actions=None, **backfill):
+    body = {"platform": "youtube", "channel": key, "backfill": backfill}
+    if actions:
+        body["actions"] = actions
+    response = env.client.post("/automation/watches", json=body)
+    assert response.status_code == 200, response.text
+    env.watcher.tick()
+    return response.json()
+
+
+def queued_ids(env):
+    return [j["video_id"] for j in env.jobs()]
+
+
+def test_catching_up_takes_the_latest_n_by_date(env):
+    videos = [yt(f"video{n:06d}", published_at=START - n * DAY) for n in range(30)]
+    env.feed.listings[UC] = videos[:15]
+    env.feed.histories[UC] = list(reversed(videos))  # order does not matter when dated
+    watch = add_with_backfill(env, count=5)
+    assert watch["backfill"]["count"] == 5 and env.feed.history_asked == 5
+    env.later(5)
+    assert sorted(queued_ids(env)) == [f"video{n:06d}" for n in range(5)]
+    assert env.item("video000010")["status"] == "earlier"
+
+
+def test_a_playlist_catches_up_from_the_end_new_videos_are_added_at(env):
+    videos = [yt(f"plvid{n:06d}", channel=PL) for n in range(20)]  # undated, oldest first
+    env.feed.listings[PL] = videos
+    add_with_backfill(env, key=PL, count=3, newest_at="bottom")
+    env.later(5)
+    assert sorted(queued_ids(env)) == ["plvid000017", "plvid000018", "plvid000019"]
+
+
+def test_a_playlist_with_new_videos_on_top_takes_the_top(env):
+    videos = [yt(f"plvid{n:06d}", channel=PL) for n in range(20)]
+    env.feed.listings[PL] = videos
+    add_with_backfill(env, key=PL, count=2, newest_at="top")
+    env.later(5)
+    assert sorted(queued_ids(env)) == ["plvid000000", "plvid000001"]
+
+
+def test_catching_up_back_to_a_date_checks_undated_videos_as_it_goes(env):
+    from datetime import datetime
+
+    since = datetime.fromtimestamp(START - 10 * DAY).strftime("%Y-%m-%d")
+    recent, old = yt("recentvid01", channel=PL), yt("oldvideo001", channel=PL)
+    env.feed.listings[PL] = [old, recent]
+    env.feed.ready[recent.url] = Readiness("ready", duration=3600, published_at=START - 2 * DAY)
+    env.feed.ready[old.url] = Readiness("ready", duration=3600, published_at=START - 60 * DAY)
+    add_with_backfill(env, key=PL, since=since)
+    env.later(5)
+    assert queued_ids(env) == ["recentvid01"]
+    assert env.item("oldvideo001")["status"] == "earlier"
+
+
+def test_a_dated_video_before_the_date_is_not_looked_at_again(env):
+    from datetime import datetime
+
+    since = datetime.fromtimestamp(START - 10 * DAY).strftime("%Y-%m-%d")
+    env.feed.listings[UC] = [yt("newish00001", published_at=START - DAY),
+                             yt("ancient0001", published_at=START - 400 * DAY)]
+    add_with_backfill(env, since=since, count=50)
+    assert "https://www.youtube.com/watch?v=ancient0001" not in env.feed.readiness_calls
+    env.later(5)
+    assert queued_ids(env) == ["newish00001"]
+
+
+def test_an_import_already_in_the_library_is_not_downloaded_again_but_joins_the_compilation(env):
+    env.run(lambda d: (d.upsert_video("havealready", title="Old one", duration=42),
+                       d.set_video_status("havealready", "imported")))
+    (env.data_dir / "downloads").mkdir(exist_ok=True)
+    (env.data_dir / "downloads" / "havealready.mp4").write_bytes(b"x")
+    env.feed.listings[UC] = [yt("havealready", published_at=START - DAY), yt("brandnew001", published_at=START - 2 * DAY)]
+    watch = add_with_backfill(env, count=10, actions={"clips": False, "compile": True,
+                                                      "compilation": {"new_title": "Catch-up"}})
+    env.later(5)
+    assert queued_ids(env) == ["brandnew001"]
+    item = env.item("havealready")
+    assert item["status"] == "complete" and item["imported"] and item["compiled"] == 1
+    comp_id = watch["actions"]["compilation"]["compilation_id"]
+    assert [s["video_id"] for s in recipe_segments(env, comp_id)] == ["havealready"]
+
+
+def test_an_import_whose_file_was_deleted_is_downloaded_again(env):
+    env.run(lambda d: (d.upsert_video("filegone001", title="Old one", duration=42),
+                       d.set_video_status("filegone001", "imported")))
+    env.feed.listings[UC] = [yt("filegone001", published_at=START - DAY)]
+    add_with_backfill(env, count=5, actions={"clips": False, "compile": False})
+    env.later(5)
+    assert queued_ids(env) == ["filegone001"]
+
+
+def test_a_video_another_watch_has_is_not_taken_twice(env):
+    shared = yt("sharedvid01", published_at=START - DAY)
+    watched(env, shared)  # the first watch saw it
+    env.feed.listings[PL] = [shared, yt("onlyhere001", channel=PL)]
+    add_with_backfill(env, key=PL, count=10)
+    env.later(5)
+    assert queued_ids(env) == ["onlyhere001"]

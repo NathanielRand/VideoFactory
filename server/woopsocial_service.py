@@ -174,11 +174,12 @@ def committed_times(db) -> list[str]:
     allowance. Not counted: failures, which hold nothing.
     """
     rows = db.conn.execute(
-        "SELECT state, scheduled_for, updated_at FROM clip_publishes "
+        "SELECT clip_id, state, scheduled_for, updated_at FROM clip_publishes "
         "WHERE state IN ('queued', 'processing', 'published', 'sending')"
     ).fetchall()
     today = datetime.now(timezone.utc).date().isoformat()
     out: list[str] = []
+    seen: set[tuple[int, str]] = set()
     for r in rows:
         when = r["scheduled_for"] or ""
         if r["state"] == "published":
@@ -188,8 +189,20 @@ def committed_times(db) -> list[str]:
             if not stamp.startswith(today):
                 continue
             when = stamp
-        if when:
+        # One post to three platforms is one post, not three of the day's five.
+        if when and (r["clip_id"], when) not in seen:
+            seen.add((r["clip_id"], when))
             out.append(when)
+    # Direct-YouTube uploads waiting to go live, and uploads still queued
+    # here, hold slots too but never wrote a clip_publishes row.
+    try:
+        from server import schedule_api
+
+        for item in schedule_api._uploads(db) + schedule_api._jobs(db):
+            if item["scheduled_for"]:
+                out.append(item["scheduled_for"])
+    except Exception:
+        pass
     return out
 
 
@@ -301,6 +314,7 @@ def publish_clips(
     lead_hashtags: list[str] | None = None,
     ai_hashtags: bool = True,
     day_start: str = "",
+    times: list[str] | None = None,
 ) -> dict:
     """Publish a set of clips, optionally spaced out over time.
 
@@ -340,6 +354,12 @@ def publish_clips(
 
     client = make_client(data_dir)
     publisher = WoopSocialPublisher(client, resolve_project(db, client))
+    # The channel's standing hashtags (Publish page) lead every caption,
+    # ahead of a creator's own, so a platform that trims the end keeps them.
+    from server import publishing_api
+
+    standing_tags = publishing_api.load_settings(db).get("hashtags") or []
+    lead_hashtags = [*standing_tags, *(lead_hashtags or [])]
     standing = (load_settings(db).get("common_description") or "").strip()
 
     start = datetime.now(tz.utc)
@@ -356,6 +376,12 @@ def publish_clips(
         db, len(clip_ids), per_day=per_day, gap_hours=gap_hours, start_at=start_at,
         day_start=day_start,
     )
+    if times:
+        # Picked slot by slot (best times). Each goes through the same
+        # validator a hand-picked time does.
+        from publish.schedule import validate_publish_at
+
+        slot_times = [validate_publish_at(t) for t in times]
 
     # Exceptions, keyed by clip id. JSON turns integer keys into strings on
     # the way in, so both are accepted rather than one silently missing.
@@ -370,7 +396,7 @@ def publish_clips(
     skipped: list[dict] = []
     slot = 0
     for index, clip_id in enumerate(clip_ids):
-        clip = db.get_clip(clip_id)
+        clip = db.get_publishable(clip_id)
         if clip is None:
             skipped.append({"clip_id": clip_id, "reason": "no such clip"})
             continue
@@ -412,6 +438,7 @@ def publish_clips(
             text = body or headline
         if standing:
             text = (text + "\n\n" + standing).strip()
+        text = publishing_api.with_source(db, clip, text)
         if footer.strip():
             text = (text + "\n\n" + footer.strip()).strip()
         # The clip's own tags first, then anything asked for across the whole
@@ -474,7 +501,9 @@ def publish_clips(
             result = publisher.start(
                 _Path(clip["path"]),
                 platforms=wanted,
-                title=(clip["title"] or clip["hook"] or f"Clip {clip_id}").strip(),
+                title=publishing_api.title_for(
+                    db, clip, (clip["title"] or clip["hook"] or f"Clip {clip_id}").strip()
+                ),
                 text=text,
                 scheduled_for=when,
                 overrides=overrides or {},
@@ -548,7 +577,7 @@ def reconcile_sending(db, data_dir: Path, *, older_than: float = STALE_SENDING_S
             except PublishError:
                 continue  # unreachable now; a later refresh tries again
         if found is not None and found.outcomes:
-            record_outcomes(db, clip_id, db.get_clip(clip_id), found)
+            record_outcomes(db, clip_id, db.get_publishable(clip_id), found)
             adopted += 1
             platforms = [p for p in platforms if p not in {o.platform for o in found.outcomes}]
         for platform in platforms:
@@ -608,7 +637,7 @@ def refresh_in_flight(db, data_dir: Path, *, limit: int = 60) -> dict:
             failed += 1
             continue
         if result.outcomes:
-            record_outcomes(db, clip_id, db.get_clip(clip_id), result)
+            record_outcomes(db, clip_id, db.get_publishable(clip_id), result)
             updated += 1
 
     return {
@@ -628,8 +657,10 @@ def upcoming(db, *, limit: int = 200) -> list[dict]:
     """
     rows = db.conn.execute(
         "SELECT p.clip_id, p.platform, p.state, p.scheduled_for, p.post_url, "
-        "       p.error, c.title, c.hook "
+        "       p.error, c.title, c.hook, m.title AS comp_title "
         "FROM clip_publishes p LEFT JOIN clips c ON c.id = p.clip_id "
+        # Compilations publish under the negative of their id.
+        "LEFT JOIN compilations m ON p.clip_id < 0 AND m.id = -p.clip_id "
         "WHERE p.scheduled_for != '' "
         "ORDER BY p.scheduled_for ASC LIMIT ?",
         (int(limit),),
@@ -644,7 +675,7 @@ def upcoming(db, *, limit: int = 200) -> list[dict]:
                 "scheduled_for": r["scheduled_for"],
                 "post_url": r["post_url"] or "",
                 "error": r["error"] or "",
-                "title": (r["title"] or r["hook"] or f"Clip {r['clip_id']}"),
+                "title": (r["title"] or r["hook"] or r["comp_title"] or f"Clip {r['clip_id']}"),
             }
         )
     return out

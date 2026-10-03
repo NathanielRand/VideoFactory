@@ -243,3 +243,14 @@ export const YouTube = (p: IconProps = {}): JSX.Element =>
       <path d="M10 9.2v5.6l4.8-2.8z" />
     </>
   )
+
+export const CalendarX = (p: IconProps = {}): JSX.Element =>
+  base(
+    p,
+    <>
+      <rect x="3" y="4" width="18" height="18" rx="2" />
+      <path d="M16 2v4M8 2v4M3 10h18" />
+      <path d="m10 14 4 4m0-4-4 4" />
+    </>
+  )
+

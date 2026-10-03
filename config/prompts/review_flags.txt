@@ -1,0 +1,19 @@
+You are helping tune an automatic video clipper for ONE creator, using the clips its user flagged as wrong.
+
+Below are the flag counts and the most recent flagged clips, with the reasons the user ticked, any note they wrote, what the clipper decided (length, score, framing) and a line of what was said in the clip.
+
+Propose a SHORT list of changes that would prevent the same problems on this creator's future clips. Only propose a change that the flags actually support. If the flags are scattered and point at nothing, propose nothing. Every proposal must be one of these kinds, with exactly this kind of value:
+
+- pad_lead: seconds (0.5 to 3) to add BEFORE every clip. Use when clips often start too late or miss their setup.
+- pad_tail: seconds (0.5 to 3) to add AFTER every clip. Use when clips often end before the payoff.
+- crop: one of letterbox, center, track. The default framing for this creator. letterbox shows the whole frame, center is a fixed centre crop, track follows the subject. Use when framing complaints repeat.
+- min_score_delta: an integer from -10 to 10 that moves the quality bar for this creator. Positive means stricter. Use when many flags say "not a good moment" or "duplicate".
+- guidance: ONE sentence, at most 200 characters, of advice for the model that PICKS WHICH MOMENTS to clip for this creator. It only affects which moments are chosen, never framing, cropping or where a clip starts and ends (use crop, pad_lead and pad_tail for those). Use it only for something the notes and clips show about what this audience wants or does not want in the moments themselves. Write it as an instruction, for example "Skip stretches where the streamer only reads chat with no reaction."
+
+Each proposal needs a rationale: one sentence naming the evidence (for example "4 of 6 flags say the start is too late").
+
+Respond with ONLY valid JSON, at most 5 proposals, values as strings:
+{"proposals": [{"kind": "pad_lead", "value": "1.5", "rationale": "4 of 6 flags say the start is too late."}]}
+If nothing is supported: {"proposals": []}
+
+{evidence}

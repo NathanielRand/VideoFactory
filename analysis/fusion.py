@@ -49,7 +49,12 @@ def find_clips(
     creator_context=None,  # creator.retrieval.CreatorContext | None
     weight_bias: dict | None = None,  # per-channel multipliers from creator.learning
     audience: "np.ndarray | None" = None,  # analysis.hype curve (chat/heatmap), 0..1
+    stages=None,  # llm.stages.StageModels: a model per job; None = `llm` for all of them
+    guidance: str = "",  # approved standing advice for this creator (creator.reviewer)
 ) -> tuple[list[ClipCandidate], list[Rejection]]:
+    def model(stage: str) -> LLMBackend:
+        return stages.for_stage(stage) if stages is not None else llm
+
     clips_cfg = config["clips"]
     analysis_cfg = config["analysis"]
     scoring_cfg = config.get("scoring", {})
@@ -62,8 +67,10 @@ def find_clips(
         # creator — bounded (max 20% shift per channel) and renormalized.
         from creator.learning import apply_bias
 
-        weights = apply_bias(weights, weight_bias)
-        print("  Using learned scoring preferences for this creator")
+        biased = apply_bias(weights, weight_bias)
+        if biased is not weights:
+            print("  Using learned scoring preferences for this creator")
+        weights = biased
 
     # ---- 1. extract + normalize signals --------------------------------
     progress.emit(stage="signals")
@@ -88,7 +95,7 @@ def find_clips(
 
     # ---- 2. candidate pools ---------------------------------------------
     candidates, _ = highlights.find_highlights(
-        segments, llm,
+        segments, model("propose"),
         min_score=0,  # fusion owns thresholding now
         max_clips=999,
         min_duration=clips_cfg["min_duration"],
@@ -100,6 +107,7 @@ def find_clips(
         chunk_overlap_seconds=analysis_cfg["chunk_overlap_seconds"],
         long_video_threshold_seconds=analysis_cfg["long_video_threshold_seconds"],
         events=events,
+        guidance=guidance,
     )
 
     # Candidate windows from signal peaks — detected PER MODALITY, not just
@@ -131,12 +139,14 @@ def find_clips(
     if peak_windows:
         print(f"  {len(peak_windows)} signal-peak window(s) found beyond transcript picks "
               f"(per-modality: visual/audio/combined)")
-        signal_cands = highlights.score_windows(segments, llm, peak_windows, events=events)
+        signal_cands = highlights.score_windows(segments, model("propose"), peak_windows,
+                                                events=events, guidance=guidance)
         # Signal peaks are seeded tight around the hot moment — grow them to a
         # full ~25s clip on sentence boundaries so action moments aren't tiny.
         signal_cands = [
             highlights._fit_to_segments(
-                c, segments, clips_cfg["min_duration"], clips_cfg["max_duration"], target_duration=25.0
+                c, segments, clips_cfg["min_duration"], clips_cfg["max_duration"],
+                target_duration=25.0, lead_in=True,
             )
             for c in signal_cands
         ]
@@ -159,6 +169,8 @@ def find_clips(
             "engagement": round(engagement * 100),
             "source": c.source,
         }
+        if c.proposed is not None:
+            c.subscores["proposed_start"], c.subscores["proposed_end"] = (round(x, 2) for x in c.proposed)
 
     # Reaction (YOLO per window) is the expensive signal — compute it only
     # for candidates that need it; the rest keep a neutral 0.5.
@@ -281,6 +293,25 @@ def find_clips(
         max_segment_reuse=analysis_cfg["max_segment_reuse"],
     )
 
+    # ---- 4b. refine edges: a strong model earns its keep here --------------
+    # Everything above places clip edges with rules (sentence snapping). Only
+    # the finalists are worth a per-clip call: the model sees the transcript
+    # around each one and says where the setup starts and the payoff ends.
+    if scoring_cfg.get("refine_boundaries", True) and finalists:
+        finalists, refine_rejections = _refine_finalists(
+            finalists, segments, model("refine"), clips_cfg, analysis_cfg,
+            limit=int(scoring_cfg.get("refine_max", 30)),
+        )
+        rejections += refine_rejections
+
+    # ---- 4c. rubric: grade what is left on separate, anchored questions ----------
+    # After the edges are final, because "are the edges right" is one of the
+    # questions. Off / shadow (stored, changes nothing) / on: see analysis/rubric.
+    rubric_mode = str(scoring_cfg.get("rubric", "off")).lower()
+    if rubric_mode in ("shadow", "on") and finalists:
+        _grade_finalists(finalists, segments, model("rubric"), guidance, apply=(rubric_mode == "on"),
+                         floor=int(clips_cfg["min_score"]))
+
     # ---- 5. rerank: relative judgment beats absolute scoring --------------
     # Batched: head-to-head comparison is only reliable for small groups, so
     # long videos with many finalists are reranked in rerank_pool-sized
@@ -299,12 +330,77 @@ def find_clips(
             cancel.check_active()  # one more LLM call per batch
             progress.emit(stage="ranking", current=bi, total=n_batches)
             batch = finalists[i : i + batch_size]
-            reranked += _rerank(batch, segments, llm) if len(batch) > 1 else batch
+            reranked += (_rerank(batch, segments, model("rerank"), use_rubric=(rubric_mode == "on"))
+                         if len(batch) > 1 else batch)
         finalists = sorted(reranked, key=lambda c: c.score, reverse=True)
 
     kept = finalists[:max_clips] if max_clips > 0 else finalists
     rejections += [Rejection(c, "over_limit") for c in finalists[len(kept):]]
     return kept, rejections
+
+
+def _grade_finalists(finalists: list[ClipCandidate], segments: list[Segment], llm: LLMBackend,
+                     guidance: str, apply: bool, floor: int = 0) -> None:
+    """Store a rubric grade on each finalist; with `apply`, blend it into the
+    score, never below `floor` for a clip that was already above it (the bar
+    is decided before this, and a clip that passed it stays passed). Best-effort:
+    a clip the model could not grade keeps what it had."""
+    from analysis import rubric
+
+    cancel.check_active()
+    print(f"  Grading {len(finalists)} finalist(s) against the rubric"
+          f"{'' if apply else ' (recorded only)'}...")
+    progress.emit(stage="ranking", current=0, total=len(finalists))
+    items = [(f"{c.start:.0f}s-{c.end:.0f}s", highlights._clip_text(c, segments)) for c in finalists]
+    graded = 0
+    for c, r in zip(finalists, rubric.rate(items, llm, guidance)):
+        if r is None:
+            continue
+        graded += 1
+        c.subscores = c.subscores or {}
+        c.subscores["rubric"] = r["score"]
+        c.subscores["rubric_detail"] = {d: r[d] for d in rubric.DIMENSIONS}
+        if apply:
+            c.score = max(rubric.blend(c.score, r["score"]), min(c.score, floor))
+    if graded < len(finalists):
+        print(f"  Rubric: {len(finalists) - graded} clip(s) could not be graded")
+
+
+def _refine_finalists(
+    finalists: list[ClipCandidate],
+    segments: list[Segment],
+    llm: LLMBackend,
+    clips_cfg: dict,
+    analysis_cfg: dict,
+    limit: int,
+) -> tuple[list[ClipCandidate], list[Rejection]]:
+    """Let the model re-place the edges of the top `limit` finalists, then drop
+    any that now duplicate a better clip (moved edges can collide)."""
+    ordered = sorted(finalists, key=lambda c: c.score, reverse=True)
+    todo = ordered[:limit]
+    print(f"  Refining clip edges for {len(todo)} finalist(s)...")
+    moved = 0
+    for i, c in enumerate(todo, 1):
+        cancel.check_active()
+        progress.emit(stage="ranking", current=i, total=len(todo))
+        before = (c.start, c.end)
+        if highlights.refine_boundaries(
+            c, segments, llm, clips_cfg["min_duration"], clips_cfg["max_duration"]
+        ):
+            moved += 1
+            c.subscores = c.subscores or {}
+            c.subscores["refined_from"] = [round(before[0], 2), round(before[1], 2)]
+    if not moved:
+        return ordered, []
+    print(f"  Refined {moved} clip(s)")
+    return highlights._select_unique(
+        ordered, segments,
+        min_score=0,
+        max_clips=len(ordered),
+        max_overlap=analysis_cfg["max_overlap"],
+        max_text_similarity=analysis_cfg["max_text_similarity"],
+        max_segment_reuse=analysis_cfg["max_segment_reuse"],
+    )
 
 
 def _fuse(c: ClipCandidate, weights: dict, reaction: float, speech_ratio: float = 1.0) -> float:
@@ -431,9 +527,11 @@ def _signal_peak_windows(
     video_end = segments[-1].end if segments else float(combined.size)
     result = []
     for lo, hi in windows:
-        # Pad to minimum duration around the peak, clamp into the video.
-        pad = max(0.0, (min_duration - (hi - lo)) / 2)
-        start, end = max(0.0, lo - pad), min(video_end, hi + pad + 1)
+        # Pad to minimum duration around the peak, clamp into the video. Most
+        # of the padding goes BEFORE the peak: a peak is the reaction, and the
+        # thing it reacts to is what makes the clip make sense.
+        pad = max(0.0, min_duration - (hi - lo))
+        start, end = max(0.0, lo - pad * 0.65), min(video_end, hi + pad * 0.35 + 1)
         if end - start < min_duration:
             continue
         end = min(end, start + max_duration)
@@ -449,16 +547,23 @@ def _signal_peak_windows(
 # ---- rerank ------------------------------------------------------------------
 
 
-def _rerank(finalists: list[ClipCandidate], segments: list[Segment], llm: LLMBackend) -> list[ClipCandidate]:
+def _rerank(finalists: list[ClipCandidate], segments: list[Segment], llm: LLMBackend,
+            use_rubric: bool = False) -> list[ClipCandidate]:
     """One LLM call ordering the finalists best-first; blends rank into score."""
     template = RERANK_PROMPT_PATH.read_text(encoding="utf-8")
     lines = []
     for i, c in enumerate(finalists):
-        text = highlights._clip_text(c, segments)[:300]
+        text = highlights._clip_text(c, segments)
+        # Judge the whole clip: the ending is what the score turns on, and a
+        # head-only cut hid it. Long clips show their start and their finish.
+        if len(text) > 500:
+            text = text[:250] + " ... " + text[-250:]
         s = c.subscores or {}
+        detail = s.get("rubric_detail") if use_rubric else None
+        graded = (" " + " ".join(f"{k}={v}" for k, v in detail.items())) if detail else ""
         lines.append(
             f'{i}: [{c.start:.0f}s-{c.end:.0f}s] audio={s.get("audio", "?")} visual={s.get("visual", "?")} '
-            f'reaction={s.get("reaction", "?")} | "{text}"'
+            f'reaction={s.get("reaction", "?")}{graded} | "{text}"'
         )
     prompt = template.replace("{candidates}", "\n".join(lines)).replace("{count}", str(len(finalists)))
 

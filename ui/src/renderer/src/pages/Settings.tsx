@@ -163,7 +163,8 @@ function StorageCard(): JSX.Element {
     orphan_transcripts: 'Transcripts with no video',
     render_leftovers: 'Leftovers from failed renders',
     orphan_clips: 'Clip files not in your library',
-    previews: 'Editor previews (rebuilt on demand)'
+    previews: 'Editor previews (rebuilt on demand)',
+    posters: 'Clip stills for the grid (rebuilt on demand)'
   }
 
   return (
@@ -215,7 +216,7 @@ function StorageCard(): JSX.Element {
           <p className="text-[11px] text-muted/80 border-t border-raised/60 pt-2">
             {t('Source videos')}: {info.sources.files} · {GB(info.sources.bytes)}.{' '}
             {t(
-              'These are the biggest thing on disk and are NOT touched - editing, re-rendering and translated burns all read them. Delete a video from the Dashboard to remove its source along with its clips.'
+              'These are the biggest thing on disk and are NOT touched - editing, re-rendering and translated burns all read them. Delete a video from the Library to remove its source along with its clips.'
             )}
           </p>
         </>
@@ -563,46 +564,6 @@ function NotificationsCard(): JSX.Element {
   )
 }
 
-/** The end-card toggle.
- *
- * Last card on the page, and just the one line. It is here so someone who
- * specifically wants the branding off can find and turn it off — not as a
- * decision every user is walked through. The label says plainly what it does;
- * it does not argue the case either way.
- */
-function BrandingCard(): JSX.Element {
-  const [outro, setOutro] = useState(true)
-
-  useEffect(() => {
-    api
-      .settings()
-      .then((s) => setOutro(s.outro !== false))
-      .catch(() => {})
-  }, [])
-
-  return (
-    <div className="card space-y-3" aria-label="Branding">
-      <h3 className="font-semibold">{t('Branding')}</h3>
-      <label className="flex items-center gap-3">
-        <input
-          type="checkbox"
-          checked={outro}
-          onChange={async (e) => {
-            const next = e.target.checked
-            setOutro(next)
-            try {
-              await api.patchSettings({ outro: next })
-            } catch {
-              setOutro(!next) // put the switch back if it did not save
-            }
-          }}
-        />
-        <span className="text-sm">{t('Add the Video Factory end card to every clip')}</span>
-      </label>
-    </div>
-  )
-}
-
 export default function Settings(): JSX.Element {
   return (
     <div className="p-6 space-y-5 max-w-xl">
@@ -633,8 +594,6 @@ export default function Settings(): JSX.Element {
       <WoopSocialCard />
       <YouTubeCard />
       <UploadPostCard />
-
-      <BrandingCard />
 
       <div className="card text-sm text-muted">
         Local models are managed on the <span className="text-ink">Models</span> page; where the AI runs

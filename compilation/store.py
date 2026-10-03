@@ -14,6 +14,7 @@ from pathlib import Path
 
 from compilation import recipe as recipe_mod
 from compilation.render import SourceInfo, render_all
+from core.cancel import CancelledError
 from core.paths import cached_source, discard, resolve_data_dir
 from formats.profiles import length_warnings, tag
 
@@ -30,7 +31,7 @@ def _row(r: sqlite3.Row | None) -> dict | None:
     if r is None:
         return None
     d = dict(r)
-    for key in ("recipe", "outputs"):
+    for key in ("recipe", "outputs", "publish_meta"):
         try:
             d[key] = json.loads(d.get(key) or "{}")
         except ValueError:
@@ -52,6 +53,14 @@ def create(db, title: str, recipe: dict | None = None) -> int:
 
 def get(db, comp_id: int) -> dict | None:
     return _row(db.conn.execute("SELECT * FROM compilations WHERE id = ?", (comp_id,)).fetchone())
+
+
+def set_publish_meta(db, comp_id: int, meta: dict) -> None:
+    db.conn.execute(
+        "UPDATE compilations SET publish_meta = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(meta), _now(), comp_id),
+    )
+    db.conn.commit()
 
 
 def list_all(db) -> list[dict]:
@@ -385,6 +394,83 @@ def delete_template(db, template_id: int) -> bool:
 # ---- library lookups -------------------------------------------------------------------------
 
 
+def _repeats(a: dict, b: dict) -> bool:
+    """Two segments show the same footage: same video, and they overlap by at
+    least half of the shorter one. The whole video and any clip of it repeat;
+    two clips that only touch at the edges do not."""
+    if not isinstance(a, dict) or not isinstance(b, dict) or not a.get("video_id"):
+        return False
+    if a.get("video_id") != b.get("video_id"):
+        return False
+    try:
+        a0, a1 = float(a.get("start") or 0), float(a.get("end") or 0)
+        b0, b1 = float(b.get("start") or 0), float(b.get("end") or 0)
+    except (TypeError, ValueError):
+        return False
+    shorter = min(a1 - a0, b1 - b0)
+    if shorter <= 0:
+        return a0 == b0 and a1 == b1
+    return min(a1, b1) - max(a0, b0) >= shorter / 2
+
+
+def duplicate_of(segments: list, segment: dict) -> int | None:
+    """The index of the first of `segments` that `segment` repeats, or None."""
+    return next((i for i, s in enumerate(segments or []) if _repeats(s, segment)), None)
+
+
+def duplicates(segments: list) -> dict[int, int]:
+    """{index: index of the earlier segment it repeats} for every segment
+    that shows footage an earlier one already does."""
+    segs = segments or []
+    out: dict[int, int] = {}
+    for i, seg in enumerate(segs):
+        j = duplicate_of(segs[:i], seg)
+        if j is not None:
+            out[i] = j
+    return out
+
+
+def append_segment(db, comp_id: int, segment: dict) -> bool:
+    """Add one segment to the end of a compilation's recipe. False if there is
+    no such compilation, or it is rendering (its recipe is frozen until done).
+    A segment repeating one already there is not added again, and counts as
+    there (True): callers that want to say so check duplicate_of first."""
+    comp = get(db, comp_id)
+    if comp is None or comp["status"] in ("queued", "rendering"):
+        return False
+    recipe = dict(comp["recipe"] or {})
+    if duplicate_of(recipe.get("segments") or [], segment) is not None:
+        return True
+    recipe["segments"] = [*(recipe.get("segments") or []), {"credit": True, **segment}]
+    return update(db, comp_id, recipe=recipe)
+
+
+def append_whole_video(db, comp_id: int, video_id: str) -> bool:
+    """The whole of a library video as the next segment: what "add this upload
+    to a compilation" means when it is already the clip you want."""
+    duration = library_durations(db, [video_id]).get(video_id, 0.0)
+    if duration <= 0:
+        return False
+    return append_segment(db, comp_id, {"video_id": video_id, "start": 0.0, "end": round(duration, 2)})
+
+
+def usage_by_video(db) -> dict[str, list[dict]]:
+    """{video_id: [{id, title, status, segments}]}: which compilations use each
+    library video, and in how many of their segments."""
+    out: dict[str, list[dict]] = {}
+    for comp in list_all(db):
+        counts: dict[str, int] = {}
+        for seg in (comp["recipe"] or {}).get("segments") or []:
+            vid = seg.get("video_id") if isinstance(seg, dict) else None
+            if vid:
+                counts[vid] = counts.get(vid, 0) + 1
+        for vid, n in counts.items():
+            out.setdefault(vid, []).append(
+                {"id": comp["id"], "title": comp["title"], "status": comp["status"], "segments": n}
+            )
+    return out
+
+
 def library_durations(db, video_ids) -> dict[str, float]:
     ids = list(dict.fromkeys(video_ids))
     if not ids:
@@ -420,7 +506,27 @@ def sources_for(db, video_ids, downloads: Path) -> dict[str, SourceInfo]:
     return out
 
 
+def with_profile_credits(db, data: dict) -> dict:
+    """The recipe with its credits filled from the branding profile, unless
+    this compilation set its own. A recipe from before `credits_custom` existed
+    counts as custom when it carries credits, so it keeps its look."""
+    banner = data.get("banner")
+    if not isinstance(banner, dict) or "profile_id" not in banner:
+        return data
+    custom = data.get("credits_custom")
+    if custom is None:
+        custom = "credits" in data
+    if custom:
+        return data
+    row = db.get_branding(int(banner["profile_id"]))
+    if row is None:
+        return data
+    credit = json.loads(row["config"] or "{}").get("credit")
+    return {**data, "credits": credit or {"enabled": False}}
+
+
 def validate(db, data: dict, config: dict, *, require_segments: bool = True) -> recipe_mod.Recipe:
+    data = with_profile_credits(db, data)
     parsed = recipe_mod.parse(
         data,
         durations=library_durations(db, [s.get("video_id") for s in data.get("segments") or [] if isinstance(s, dict)]),
@@ -434,6 +540,9 @@ def resolve_banner(db, banner: dict | None) -> dict | None:
     carrying the config inline."""
     if not banner:
         return None
+    if isinstance(banner.get("custom"), dict):
+        # This compilation's own settings, kept beside the profile it started from.
+        return banner["custom"]
     if "profile_id" in banner:
         row = db.get_branding(int(banner["profile_id"]))
         if row is None:
@@ -466,7 +575,12 @@ def output_dir(config: dict) -> Path:
     return resolve_data_dir(config) / "compilations"
 
 
-def run(db, comp_id: int, config: dict, on_progress=None) -> Path:
+def loudness_cache_path(data_dir: Path) -> Path:
+    """Where measured loudness is kept, shared by renders and the editor."""
+    return Path(data_dir) / "cache" / "loudness.json"
+
+
+def run(db, comp_id: int, config: dict, on_progress=None, on_fraction=None) -> Path:
     """The `compile` job: validate, render, record the result."""
     comp = get(db, comp_id)
     if comp is None:
@@ -486,8 +600,13 @@ def run(db, comp_id: int, config: dict, on_progress=None) -> Path:
             banner_assets=data_dir / "branding" / "assets",
             cancel_key=cancel_key(comp_id),
             on_progress=on_progress,
+            on_fraction=on_fraction,
             parallel=int((config.get("video") or {}).get("parallel_renders", 2)),
+            loudness_cache=loudness_cache_path(data_dir),
         )
+    except CancelledError:
+        settle_cancelled(db, comp_id)
+        raise
     except Exception as e:
         set_status(db, comp_id, "failed", error=str(e)[:2000])
         raise
@@ -497,6 +616,15 @@ def run(db, comp_id: int, config: dict, on_progress=None) -> Path:
     set_status(db, comp_id, "done", output_path=str(primary), outputs=outputs)
     prune(db, comp_id)
     return primary
+
+
+def settle_cancelled(db, comp_id: int) -> None:
+    """A render stopped before it finished: back to how it was, done if an
+    earlier version is still there to watch, a draft if not. Not failed:
+    nothing went wrong."""
+    comp = get(db, comp_id)
+    if comp is not None:
+        set_status(db, comp_id, "done" if comp.get("output_path") else "draft")
 
 
 def cancel_key(comp_id: int) -> str:

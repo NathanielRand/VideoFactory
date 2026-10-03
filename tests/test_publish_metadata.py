@@ -6,6 +6,8 @@ body-building lives in publish/metadata.py rather than inside the uploader.
 
 from pathlib import Path
 
+import pytest
+
 from publish.base import PublishRequest
 from publish.metadata import (
     build_insert_body,
@@ -13,6 +15,7 @@ from publish.metadata import (
     clamp_tags,
     clamp_title,
     creator_tag,
+    decorate_title,
     description_with_hashtags,
     parts_for,
     with_common_block,
@@ -182,7 +185,8 @@ def test_the_whole_description_reads_in_the_right_order():
 
 def test_body_has_only_fields_the_api_accepts():
     body = build_insert_body(_request(tags=["a"], description="d"))
-    assert set(body) <= {"snippet", "status", "recordingDetails", "localizations"}
+    assert set(body) <= {"snippet", "status", "recordingDetails", "localizations",
+                         "paidProductPlacementDetails"}
     assert set(body["snippet"]) <= {
         "title", "description", "tags", "categoryId", "defaultLanguage",
     }
@@ -206,11 +210,26 @@ def test_publishing_now_carries_no_publish_at():
     assert "publishAt" not in body["status"]
 
 
-def test_synthetic_media_is_only_sent_when_declared():
+def test_ai_use_answer_is_sent_as_given_and_never_assumed():
+    """A "no" goes as a no (left out, YouTube's question stays open and Studio
+    holds processing), and no answer is never turned into one."""
     assert "containsSyntheticMedia" not in build_insert_body(_request())["status"]
-    assert build_insert_body(_request(contains_synthetic_media=True))["status"][
-        "containsSyntheticMedia"
-    ] is True
+    for answer in (True, False):
+        assert build_insert_body(_request(contains_synthetic_media=answer))["status"][
+            "containsSyntheticMedia"
+        ] is answer
+
+
+def test_paid_promotion_is_sent_only_once_answered():
+    from publish.metadata import parts_for
+
+    unanswered = _request()
+    assert "paidProductPlacementDetails" not in build_insert_body(unanswered)
+    assert "paidProductPlacementDetails" not in parts_for(unanswered)
+    for answer in (True, False):
+        req = _request(has_paid_product_placement=answer)
+        assert build_insert_body(req)["paidProductPlacementDetails"] == {"hasPaidProductPlacement": answer}
+        assert "paidProductPlacementDetails" in parts_for(req).split(",")
 
 
 def test_made_for_kids_is_always_sent():
@@ -238,3 +257,76 @@ def test_optional_blocks_appear_only_when_used():
     assert body["recordingDetails"]["recordingDate"] == "2026-09-01T00:00:00Z"
     assert body["localizations"]["es"]["title"] == "Hola"
     assert parts_for(rich) == "snippet,status,recordingDetails,localizations"
+
+
+def test_a_refused_paid_promotion_answer_never_costs_the_upload(tmp_path, monkeypatch):
+    """If YouTube will not take the paid-promotion answer at upload, the video
+    still goes up (without it) and the person is told to answer in Studio."""
+    pytest.importorskip("googleapiclient")
+    from publish.base import PublishRequest
+    from publish.errors import PublishError
+    from publish.youtube_shorts import YouTubeShortsPublisher
+
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"\x00" * 1024)
+    sent_parts: list[str] = []
+
+    class Insert:
+        def __init__(self, part):
+            self.part = part
+
+        def next_chunk(self, num_retries=0):
+            if "paidProductPlacementDetails" in self.part:
+                raise PublishError("Bad request", detail="paidProductPlacementDetails is not writable")
+            return None, {"id": "vid1", "status": {"privacyStatus": "public"}, "snippet": {}}
+
+    class Videos:
+        def insert(self, part, body, media_body, notifySubscribers):
+            sent_parts.append(part)
+            return Insert(part)
+
+    class Service:
+        def videos(self):
+            return Videos()
+
+    pub = YouTubeShortsPublisher()
+    monkeypatch.setattr(pub, "service", lambda scopes=None: Service())
+    result = pub.publish(PublishRequest(video_path=video, title="t", has_paid_product_placement=True))
+    assert result.video_id == "vid1"
+    assert len(sent_parts) == 2 and "paidProductPlacementDetails" not in sent_parts[1]
+    assert any("paid-promotion" in w for w in result.warnings)
+
+
+# ---- title: source channel + one always-on hashtag ----------------------------------
+
+
+def test_title_gets_the_channel_and_the_tag():
+    assert decorate_title("Wild clutch", "Some Streamer", "#gaming") == "Wild clutch | Some Streamer #gaming"
+
+
+def test_title_without_a_channel_only_gets_the_tag():
+    assert decorate_title("Wild clutch", "", "gaming") == "Wild clutch #gaming"
+    assert decorate_title("Wild clutch", "Ann", "") == "Wild clutch | Ann"
+    assert decorate_title("Wild clutch", "", "") == "Wild clutch"
+
+
+def test_decorating_twice_does_not_stack():
+    once = decorate_title("Wild clutch", "Some Streamer", "gaming")
+    assert decorate_title(once, "Some Streamer", "gaming") == once
+    assert decorate_title("Some Streamer goes wild", "some streamer", "") == "Some Streamer goes wild"
+
+
+def test_title_gives_way_to_the_suffix_at_the_limit():
+    out = decorate_title("word " * 40, "Some Streamer", "gaming")
+    assert len(out) <= 100 and out.endswith(" | Some Streamer #gaming")
+    assert decorate_title("x" * 300, "", "") == "x" * 100
+
+
+def test_a_channel_too_long_to_leave_room_is_dropped():
+    out = decorate_title("Wild clutch", "C" * 80, "gaming")
+    assert out == "Wild clutch #gaming"
+
+
+def test_tag_is_cleaned_to_a_single_hashtag():
+    assert decorate_title("Hi", "", "# my tag!") == "Hi #mytag"
+    assert decorate_title("Hi", "a<b>", "") == "Hi | ab"

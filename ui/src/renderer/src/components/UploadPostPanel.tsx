@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import type { Clip } from '../lib/types'
+import { FirstCommentField, VideoHashtagsField } from './PublishExtras'
+import YouTubeQuestions, { answered, rememberedAnswers, uploadPostYoutubeOverrides, type YouTubeAnswers } from './YouTubeQuestions'
 import {
   MAX_POLLS,
   describeState,
@@ -53,7 +55,11 @@ export default function UploadPostPanel({
   const [description, setDescription] = useState(clip.description || '')
   // The clip stores hashtags as an array; the field edits them as one line.
   const [hashtags, setHashtags] = useState((clip.hashtags || []).join(' '))
-  const [firstComment, setFirstComment] = useState('')
+  // The clip's own comment if it has one; empty sends the standing one.
+  const [firstComment, setFirstComment] = useState(clip.first_comment ?? '')
+  const [suggestedComment, setSuggestedComment] = useState(clip.suggested_comment ?? '')
+  // YouTube holds processing until these are answered.
+  const [answers, setAnswers] = useState<YouTubeAnswers>(rememberedAnswers)
   const [useThumbnail, setUseThumbnail] = useState(false)
   const [rows, setRows] = useState<PlatformRow[]>([])
   const [requestId, setRequestId] = useState('')
@@ -155,6 +161,16 @@ export default function UploadPostPanel({
     }, nextPollDelay(attempts.current))
   }
 
+  /** YouTube's answers win over anything typed in its per-platform box. */
+  const withYoutubeAnswers = (o: Record<string, Record<string, string>>): Record<string, Record<string, unknown>> => {
+    if (!platforms.includes('youtube')) return o
+    const youtube =
+      provider === 'woopsocial'
+        ? { ...(o.youtube ?? {}), madeForKids: answers.kids }
+        : { ...(o.youtube ?? {}), ...uploadPostYoutubeOverrides(answers) }
+    return { ...o, youtube }
+  }
+
   const publish = async (): Promise<void> => {
     if (busy || !platforms.length || !title.trim()) return
     setBusy(true)
@@ -176,8 +192,8 @@ export default function UploadPostPanel({
           : {}),
         // Only the platforms actually selected — an override left behind
         // from a deselected platform must not travel with the request.
-        overrides: Object.fromEntries(
-          Object.entries(overrides).filter(([p]) => platforms.includes(p))
+        overrides: withYoutubeAnswers(
+          Object.fromEntries(Object.entries(overrides).filter(([p]) => platforms.includes(p)))
         ),
         scheduled_date: when === 'schedule' ? localInputToIso(at) : '',
         timezone: when === 'schedule' ? localZone() : '',
@@ -368,31 +384,15 @@ export default function UploadPostPanel({
             </p>
           )}
         </div>
-        <div>
-          <label className="label block mb-1" htmlFor="up-hashtags">
-            {t('Hashtags')}
-          </label>
-          <input
-            id="up-hashtags"
-            className="input !py-1 text-sm"
-            value={hashtags}
-            placeholder="#gaming #twitch #clips"
-            onChange={(e) => setHashtags(e.target.value)}
-          />
-        </div>
+        <VideoHashtagsField value={hashtags} onChange={setHashtags} id="up-hashtags" />
         {provider === 'uploadpost' && (
-        <div>
-          <label className="label block mb-1" htmlFor="up-first-comment">
-            {t('First comment')}
-          </label>
-          <input
-            id="up-first-comment"
-            className="input !py-1 text-sm"
+          <FirstCommentField
+            publishId={clip.id}
             value={firstComment}
-            placeholder={t('Optional - posted under the clip')}
-            onChange={(e) => setFirstComment(e.target.value)}
+            suggestion={suggestedComment}
+            onChange={setFirstComment}
+            onSuggestion={setSuggestedComment}
           />
-        </div>
         )}
         {provider === 'uploadpost' && (
           <label className="flex items-center gap-2 text-xs">
@@ -563,12 +563,17 @@ export default function UploadPostPanel({
         </p>
       )}
 
+      {platforms.includes('youtube') && (
+        <YouTubeQuestions value={answers} onChange={setAnswers} via={provider} />
+      )}
+
       <button
         className="btn-accent w-full !py-2"
         disabled={
           busy ||
           inFlight ||
           !platforms.length ||
+          (platforms.includes('youtube') && !answered(answers, provider)) ||
           !title.trim() ||
           lacking.length > 0 ||
           (when === 'schedule' && !at)

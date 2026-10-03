@@ -66,6 +66,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from core import progress
 from video.capture import video_capture
 
 # Shared framing components, factored out of the Podcast rebuild. Cut
@@ -95,17 +96,26 @@ def _get_model(model_name: str):
     global _model
     with _infer_lock:
         if _model is None:
-            from ultralytics import YOLO  # lazy: heavy import, pulls in torch
-
+            from core import cancel, governor
             from core.binaries import yolo_weights
             from core.gpu import cuda_usable
 
-            # Absolute path, not the bare name: ultralytics resolves a bare
-            # name against the working directory and downloads it when that
-            # misses. The engine is spawned without a working directory, so
-            # that miss is guaranteed in a packaged build and the download
-            # fails outright on a machine with no route to GitHub.
-            _model = YOLO(yolo_weights(model_name))
+            def load():
+                from ultralytics import YOLO  # lazy: heavy import, pulls in torch
+
+                # Absolute path, not the bare name: ultralytics resolves a
+                # bare name against the working directory and downloads it
+                # when that misses. The engine is spawned without a working
+                # directory, so that miss is guaranteed in a packaged build
+                # and the download fails outright with no route to GitHub.
+                return YOLO(yolo_weights(model_name))
+
+            # torch's CUDA libraries take ~2.4 GB of commit once the first
+            # inference runs. Loading them on a machine without that much to
+            # spare is what crashed a PC with WinError 1455; see core/governor.
+            _model = governor.load_heavy(
+                "the tracking model (torch + YOLO)", 2.5, load, cancel.check_active
+            )
 
             usable, reason = cuda_usable()
             if not usable:
@@ -857,6 +867,7 @@ def compute_tracking(
         wide_boxes: list[tuple[float, float, float, float]] = []  # subject bbox when a
         #                                             9:16 crop can't hold it (normalized)
         frame_idx = 0
+        _total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
         while True:
             ok = cap.grab()
@@ -872,6 +883,7 @@ def compute_tracking(
             t = frame_idx / video_fps
             h, w = frame.shape[:2]
             n_samples += 1
+            progress.sub(frame_idx / max(1, _total_frames))
 
             # ---- camera cuts, checked on the SAMPLE grid ---------------------
             # Only sample frames are decoded. Decoding every frame just to spot

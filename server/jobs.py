@@ -18,7 +18,7 @@ import time
 import traceback
 from pathlib import Path
 
-from core import cancel, progress, queue
+from core import cancel, governor, progress, queue
 from core.cancel import CancelledError
 from core.paths import discard
 from core.prefetch import Prefetcher
@@ -46,7 +46,51 @@ _STAGES = {
     # Video Factory: a compilation job is one stage from start to finish.
     "compile": (0.0, 1.0, "Rendering compilation"),
     "variants": (0.0, 1.0, "Rendering other formats"),
+    # One clip re-rendered: the render names its own steps (core/progress.py).
+    "rerender": (0.0, 1.0, "Re-rendering clip"),
 }
+
+
+
+def _inherit_branding(db, render_opts: dict) -> None:
+    """A clip set to use a branding profile takes the profile as it is NOW, on
+    every render, so editing the profile carries to its clips the next time
+    they render. `branding` = {"profile_id", "custom_watermark", "custom_credit"}:
+    a custom part is this clip's own (kept in render_opts["watermark"]) and the
+    rest follows the profile. A clip with no `branding` key is branding as
+    processed, left alone."""
+    link = render_opts.get("branding")
+    if not isinstance(link, dict):
+        return
+    profile: dict = {}
+    if link.get("profile_id"):
+        row = db.get_branding(int(link["profile_id"]))
+        if row is not None and row["kind"] == "clip":
+            profile = json.loads(row["config"] or "{}")
+    own = render_opts.get("watermark") or {}
+    merged = dict(profile)
+    if link.get("custom_watermark"):
+        merged = {k: v for k, v in own.items() if k not in ("credit", "captions")}
+        if "credit" in profile:
+            merged["credit"] = profile["credit"]
+    if link.get("custom_credit"):
+        if own.get("credit") is not None:
+            merged["credit"] = own["credit"]
+        else:
+            merged.pop("credit", None)
+    # Captions ride in the profile but are burned from caption_style.
+    if link.get("custom_captions"):
+        if own.get("captions") is not None:
+            merged["captions"] = own["captions"]
+        else:
+            merged.pop("captions", None)
+    elif "captions" in profile:
+        merged["captions"] = profile["captions"]
+    else:
+        merged.pop("captions", None)
+    if merged.get("captions"):
+        render_opts["caption_style"] = merged["captions"]
+    render_opts["watermark"] = merged or None   # None: explicitly no branding
 
 
 class Worker(threading.Thread):
@@ -129,6 +173,12 @@ class Worker(threading.Thread):
                 self._wake.wait(timeout=2.0)
                 self._wake.clear()
                 continue
+            # Do not start new work on a machine that is about to run out of
+            # memory. The job stays queued and starts once pressure clears.
+            if not governor.may_start_job():
+                self._wake.wait(timeout=2.0)
+                self._wake.clear()
+                continue
             job = db.claim_next_job()
             if job is None:
                 self._wake.wait(timeout=2.0)
@@ -172,92 +222,11 @@ class Worker(threading.Thread):
                 self.prefetch.wait_for(vid)
             self.prefetch.maybe_start(db)
             try:
-                if job["type"] == "process":
-                    from core.pipeline import process_video
-
-                    # ALWAYS a private copy. The worker holds one config dict
-                    # for the life of the process, so any mutation below would
-                    # outlive the job that made it: with a queue of
-                    # differently-configured videos, job 2's caption style
-                    # silently lands on job 5. The guard that used to skip this
-                    # copy was only correct while every mutation below stayed
-                    # listed in it — a condition no one can keep true by hand
-                    # across future edits. Copying a settings dict costs
-                    # microseconds against an hour of video work.
-                    cfg = copy.deepcopy(self.config)
-                    if payload.get("podcast"):
-                        # Multi-cam podcast: letterbox every clip, no tracking.
-                        cfg["clips"]["podcast"] = True
-                    if "captions" in payload:
-                        cfg["clips"]["captions"] = bool(payload["captions"])
-                    if payload.get("min_score") is not None:
-                        cfg["clips"]["min_score"] = int(payload["min_score"])
-                    if payload.get("long_clips"):
-                        # TikTok monetization requires >60s: target 61-180s clips.
-                        cfg["clips"]["min_duration"] = 61
-                        cfg["clips"]["max_duration"] = 180
-                    if payload.get("filter"):
-                        cfg["clips"]["filter"] = payload["filter"]
-                    if payload.get("hashtags"):
-                        # Tags the request insisted on: every clip of this job
-                        # carries them, on top of whatever the model writes.
-                        cfg["clips"]["required_hashtags"] = list(payload["hashtags"])
-                    if payload.get("max_clips"):
-                        n = int(payload["max_clips"])
-                        cfg["clips"]["max_clips_per_video"] = n
-                        # The rerank pool must be at least as big as the ask.
-                        pool = cfg.setdefault("scoring", {}).get("rerank_pool", 8)
-                        cfg["scoring"]["rerank_pool"] = max(pool, n)
-                    if payload.get("caption_style"):
-                        # Style chosen in the Generate bar: applied to every
-                        # clip of this job (and persisted per clip).
-                        cfg["clips"]["caption_style"] = payload["caption_style"]
-                    if payload.get("watermark_profile_id"):
-                        # Branding chosen in the Generate bar: resolve the
-                        # profile to its config and apply it to every clip.
-                        row = db.get_branding(int(payload["watermark_profile_id"]))
-                        if row:
-                            cfg["clips"]["watermark"] = json.loads(row["config"])
-                    if payload.get("longform"):
-                        # Separate longform system (1920x1080 horizontal),
-                        # built on the same stages — Shorts path untouched.
-                        from longform.process import process_longform
-
-                        process_longform(payload["url"], cfg, db, payload["longform"])
-                    else:
-                        process_video(payload["url"], cfg, db, force=payload.get("force", False))
-                elif job["type"] == "render":
-                    self._rerender_clip(db, payload)
-                elif job["type"] == "translate":
-                    self._translate_clips(db, payload)
-                elif job["type"] == "variants":
-                    from formats import variants
-
-                    def variants_progress(i: int, total: int, label: str) -> None:
-                        progress.emit(stage="variants", current=i + 1, total=total, message=label)
-
-                    variants.render(
-                        db, int(payload["clip_id"]), payload.get("canvases") or [],
-                        copy.deepcopy(self.config), on_progress=variants_progress,
-                    )
-                elif job["type"] == "compile":
-                    from compilation import store as compilations
-
-                    def compile_progress(i: int, total: int, label: str) -> None:
-                        progress.emit(stage="compile", current=i + 1, total=total, message=label)
-
-                    comp_key = compilations.cancel_key(int(payload["compilation_id"]))
-                    # Registered like a video, so the queue's existing Cancel reaches it.
-                    cancel.clear(comp_key)
-                    cancel.set_active(comp_key)
-                    compilations.run(
-                        db, int(payload["compilation_id"]), copy.deepcopy(self.config),
-                        on_progress=compile_progress,
-                    )
-                else:
-                    raise ValueError(f"Unknown job type {job['type']!r}")
+                with governor.pipeline_work():
+                    self._run_job(db, job, payload)
                 db.finish_job(job["id"], "done")
                 self._run_follow_up(db, job, payload)
+                self._send_to_destinations(db, job, payload)
                 self._announce(db, job, "done")
             except CancelledError:
                 db.finish_job(job["id"], "cancelled", "Cancelled by user")
@@ -285,6 +254,123 @@ class Worker(threading.Thread):
                 feedback.close_job_log()
                 self._prune_logs()
 
+    def _run_job(self, db: StateDB, job, payload: dict) -> None:
+        """Run one claimed job to completion. Raises on failure or cancel;
+        the loop in run() records the outcome."""
+        if job["type"] == "process":
+            from core.pipeline import process_video
+
+            # ALWAYS a private copy. The worker holds one config dict
+            # for the life of the process, so any mutation below would
+            # outlive the job that made it: with a queue of
+            # differently-configured videos, job 2's caption style
+            # silently lands on job 5. The guard that used to skip this
+            # copy was only correct while every mutation below stayed
+            # listed in it — a condition no one can keep true by hand
+            # across future edits. Copying a settings dict costs
+            # microseconds against an hour of video work.
+            cfg = copy.deepcopy(self.config)
+            if payload.get("podcast"):
+                # Multi-cam podcast: letterbox every clip, no tracking.
+                cfg["clips"]["podcast"] = True
+            if "captions" in payload:
+                cfg["clips"]["captions"] = bool(payload["captions"])
+            if payload.get("min_score") is not None:
+                cfg["clips"]["min_score"] = int(payload["min_score"])
+            if payload.get("long_clips"):
+                # TikTok monetization requires >60s: target 61-180s clips.
+                cfg["clips"]["min_duration"] = 61
+                cfg["clips"]["max_duration"] = 180
+            if payload.get("filter"):
+                cfg["clips"]["filter"] = payload["filter"]
+            if payload.get("hashtags"):
+                # Tags the request insisted on: every clip of this job
+                # carries them, on top of whatever the model writes.
+                cfg["clips"]["required_hashtags"] = list(payload["hashtags"])
+            if payload.get("max_clips"):
+                n = int(payload["max_clips"])
+                cfg["clips"]["max_clips_per_video"] = n
+                # The rerank pool must be at least as big as the ask.
+                pool = cfg.setdefault("scoring", {}).get("rerank_pool", 8)
+                cfg["scoring"]["rerank_pool"] = max(pool, n)
+            if payload.get("caption_style"):
+                # Style chosen in the Generate bar: applied to every
+                # clip of this job (and persisted per clip).
+                cfg["clips"]["caption_style"] = payload["caption_style"]
+            if payload.get("no_watermark"):
+                # Chosen as "No branding": present-but-empty, so the
+                # creator's default branding is not applied either.
+                cfg["clips"]["watermark"] = None
+            elif payload.get("watermark_profile_id"):
+                # Branding chosen in the Generate bar: resolve the
+                # profile to its config and apply it to every clip.
+                row = db.get_branding(int(payload["watermark_profile_id"]))
+                if row and row["kind"] == "clip":
+                    cfg["clips"]["watermark"] = json.loads(row["config"])
+                    # The profile's caption look, unless the Generate bar chose one.
+                    look = cfg["clips"]["watermark"].get("captions")
+                    if look and not payload.get("caption_style"):
+                        cfg["clips"]["caption_style"] = look
+            if payload.get("import_only"):
+                # Into the library, no clips: chosen at upload as
+                # "for a compilation" or "decide later".
+                from core.pipeline import import_video
+
+                import_video(payload["url"], cfg, db)
+            elif payload.get("longform"):
+                # Separate longform system (1920x1080 horizontal),
+                # built on the same stages — Shorts path untouched.
+                from longform.process import process_longform
+
+                process_longform(payload["url"], cfg, db, payload["longform"])
+            else:
+                process_video(payload["url"], cfg, db, force=payload.get("force", False))
+        elif job["type"] == "render":
+            self._rerender_clip(db, payload)
+        elif job["type"] == "translate":
+            self._translate_clips(db, payload)
+        elif job["type"] == "variants":
+            from formats import variants
+
+            def variants_progress(i: int, total: int, label: str) -> None:
+                progress.emit(stage="variants", current=i + 1, total=total, message=label)
+                # Between steps is a safe place to wait out memory pressure.
+                governor.checkpoint(cancel.check_active)
+
+            variants.render(
+                db, int(payload["clip_id"]), payload.get("canvases") or [],
+                copy.deepcopy(self.config), on_progress=variants_progress,
+            )
+        elif job["type"] == "compile":
+            from compilation import store as compilations
+
+            def compile_step(i: int, total: int, label: str) -> None:
+                # Between steps is a safe place to wait out memory pressure.
+                governor.checkpoint(cancel.check_active)
+
+            last = {"at": 0.0}
+
+            def compile_fraction(fraction: float, label: str) -> None:
+                # FFmpeg reports twice a second for each format rendering;
+                # a few updates a second is plenty for a bar.
+                now = time.monotonic()
+                if fraction < 1.0 and now - last["at"] < 0.25:
+                    return
+                last["at"] = now
+                progress.emit(stage="compile", fraction=round(fraction, 4), message=label,
+                              compilation_id=int(payload["compilation_id"]))
+
+            comp_key = compilations.cancel_key(int(payload["compilation_id"]))
+            # Registered like a video, so the queue's existing Cancel reaches it.
+            cancel.clear(comp_key)
+            cancel.set_active(comp_key)
+            compilations.run(
+                db, int(payload["compilation_id"]), copy.deepcopy(self.config),
+                on_progress=compile_step, on_fraction=compile_fraction,
+            )
+        else:
+            raise ValueError(f"Unknown job type {job['type']!r}")
+
     def _record_progress(self, job_id: int, event: dict) -> None:
         stage = _STAGES.get(event.get("stage") or "")
         if stage is None:
@@ -300,7 +386,7 @@ class Worker(threading.Thread):
         fraction = min(0.99, base + weight * min(1.0, max(0.0, within)))
         if event.get("stage") == "render" and event.get("clip") and event.get("total"):
             label = f"Rendering clip {event['clip']}/{event['total']}"
-        if event.get("stage") in ("compile", "variants") and event.get("message"):
+        if event.get("stage") in ("compile", "variants", "rerender") and event.get("message"):
             label = str(event["message"])
         with self._progress_lock:
             entry = self._progress.get(job_id)
@@ -359,6 +445,14 @@ class Worker(threading.Thread):
             ).fetchone()[0]
         if error:
             event["error"] = error
+        try:
+            payload = json.loads(job["payload"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        # An import makes no clips by design; "0 clips" must not read as a
+        # run that found nothing.
+        if payload.get("import_only"):
+            event["import_only"] = True
         broadcaster.publish(event)
         broadcaster.publish({"type": "queue"})
 
@@ -366,10 +460,6 @@ class Worker(threading.Thread):
         # webhook_url cost anything here, this is the one place every terminal
         # state passes through, and a delivery that fails is logged inside
         # deliver() rather than raised: the job is already finished either way.
-        try:
-            payload = json.loads(job["payload"] or "{}")
-        except (TypeError, ValueError):
-            payload = {}
         if payload.get("webhook_url"):
             from server import webhooks
 
@@ -546,6 +636,19 @@ class Worker(threading.Thread):
             print(f"      (could not rebuild captions: {e})")
             return []
 
+    def _send_to_destinations(self, db: StateDB, job, payload: dict) -> None:
+        """Queue what the job made for every export destination set to take
+        it (Local and Cloud pages). Never fails the job: the clips exist."""
+        try:
+            from delivery import store as exports
+
+            exports.ensure_schema(db)
+            queued = exports.after_job(db, job, payload)
+            if queued:
+                print(f"  Sending {queued} file(s) to your export destinations")
+        except Exception as e:
+            print(f"  Couldn't queue exports (non-fatal): {e}")
+
     def _run_follow_up(self, db: StateDB, job, payload: dict) -> None:
         """Do what the request asked for AFTER the clips exist.
 
@@ -559,6 +662,20 @@ class Worker(threading.Thread):
         failed, because the clips were still produced and that is what the job
         was. The reason goes in the log and the per-platform rows.
         """
+        # Re-read: the video id is filled in after the job is claimed.
+        row = db.get_job(job["id"]) if payload.get("add_to_compilation") else None
+        if row and row["video_id"]:
+            from compilation import store as compilations
+
+            comp_id = int(payload["add_to_compilation"])
+            try:
+                if compilations.append_whole_video(db, comp_id, row["video_id"]):
+                    broadcaster.publish({"type": "compilation", "compilation_id": comp_id})
+                else:
+                    print(f"Could not add {row['video_id']} to compilation {comp_id} "
+                          "(deleted, rendering, or no length yet) - add it from the Library")
+            except Exception as e:
+                print(f"Adding to compilation {comp_id} failed (non-fatal): {e}")
         then = payload.get("then") or {}
         if then.get("action") != "publish":
             return
@@ -642,6 +759,7 @@ class Worker(threading.Thread):
             merged_style = {**render_opts.get("caption_style", {}), **(incoming["caption_style"] or {})}
             render_opts["caption_style"] = merged_style
         render_opts.update({k: v for k, v in incoming.items() if k != "caption_style"})
+        _inherit_branding(db, render_opts)
 
         vrow = db.conn.execute(
             "SELECT title, channel_name FROM videos WHERE video_id = ?", (video_id,)
@@ -657,13 +775,50 @@ class Worker(threading.Thread):
 
         # Keep the user-facing metadata across the re-render — a re-render
         # never needs a fresh LLM metadata call.
+        from server import publishing_api
+
+        def _list(raw) -> list:
+            try:
+                got = _json.loads(raw or "[]")
+            except (TypeError, ValueError):
+                return []
+            return got if isinstance(got, list) else []
+
+        # Clips made before the source channel was added to their metadata get
+        # it now, and keywords (which a re-render used to drop) are kept.
+        stored = publishing_api.enrich_clip_metadata(
+            db, video_id, clip["start_s"] or 0,
+            title=clip["title"] or "", description=clip["description"] or "",
+            hashtags=_list(clip["hashtags"]), keywords=_list(clip["keywords"]),
+        )
         keep = {
-            "title": clip["title"],
-            "description": clip["description"],
-            "hashtags": clip["hashtags"],
+            "title": stored["title"],
+            "description": stored["description"],
+            "hashtags": _json.dumps(stored["hashtags"]),
+            "keywords": _json.dumps(stored["keywords"]),
             "status": clip["status"],
+            # Where it goes on YouTube is the clip's own choice, not the render's.
+            "playlist_id": clip["playlist_id"],
         }
         old_path = Path(clip["path"]) if clip["path"] else None
+
+        from transcription.transcriber import detected_language
+
+        content_lang = detected_language(video_id, data_dir / "transcripts")
+        # Name each step so the bar moves through the render instead of
+        # sitting at 0% until it is done (core/progress.py).
+        progress.begin_steps(video_id=video_id, title=video_title)
+        try:
+            final_path, _ = _render_files(
+                source, candidate, segments, clip_dir, self.config, render_opts, content_lang
+            )
+        finally:
+            progress.end_steps()
+        progress.emit(stage="rerender", message="Saving the clip", fraction=0.99, ceil=0.995)
+        # Only now, with the new render on disk, does the old row go. It used to
+        # go before the render started, which had two costs: the clip vanished
+        # from the grid for the minutes the render took, and a render that
+        # failed left the user with no clip at all.
         # Translations, uploads and feedback REFERENCE this clip, and
         # foreign_keys is ON, so they have to be lifted out before the row can
         # go — otherwise this DELETE raises "FOREIGN KEY constraint failed" and
@@ -671,13 +826,6 @@ class Worker(threading.Thread):
         detached = db.detach_clip_rows(clip["id"])
         db.conn.execute("DELETE FROM clips WHERE id = ?", (clip["id"],))  # avoid UNIQUE clash
         db.conn.commit()
-
-        from transcription.transcriber import detected_language
-
-        content_lang = detected_language(video_id, data_dir / "transcripts")
-        final_path, _ = _render_files(
-            source, candidate, segments, clip_dir, self.config, render_opts, content_lang
-        )
         meta = ClipMetadata(
             title=clip["title"] or "",
             description=clip["description"] or "",
@@ -695,6 +843,15 @@ class Worker(threading.Thread):
             restore["render_opts"] = _json.dumps(render_opts)
             db.set_clip(new_row["id"], **restore)
             db.reattach_clip_rows(new_row["id"], detached)
+            # The thumbnail follows the clip to its new id, and the app does not
+            # make another for a re-render (server/thumbnails_api.py).
+            try:
+                from server.thumbnails_api import carry_over
+
+                carry_over(data_dir, clip["id"], new_row["id"],
+                           keep_design=abs(start - float(clip["start_s"])) < 0.05)
+            except Exception as e:
+                print(f"      (could not carry the thumbnail over: {e})")
             # Video Factory: the clip changed, so its other-format renders no
             # longer match it. Kept (they may be posted), flagged for refresh.
             db.conn.execute("UPDATE clip_variants SET stale = 1 WHERE clip_id = ?", (new_row["id"],))

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from analysis.fusion import find_clips
 from analysis.metadata import ClipMetadata, generate_metadata_batch
-from core import cancel, progress
+from core import cancel, governor, progress
 from core.binaries import ffprobe
 from core.models import ClipCandidate, RenderedClip, Segment
 from core.outcome import explain_no_clips, summarise_run
@@ -208,7 +208,10 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
                 print(f"      Creator context loaded for {creator_ctx.creator_name}")
             # What the user KEEPS for this creator (exports/edits) — bounded
             # scoring-weight bias; None until there's enough feedback data.
-            creator_prefs = learning.preferences(db, creator_id)
+            creator_prefs = learning.preferences(
+                db, creator_id,
+                use_flags=(config.get("learning") or {}).get("from_flags", True),
+            )
             # Branding: if the job didn't pick a watermark but THIS creator
             # has a default branding profile, apply it. Lets a clipper set
             # each creator's logo once and have every video auto-brand.
@@ -223,8 +226,10 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
                     brow = db.get_branding(bid)
                     if brow:
                         # Rebind (don't mutate the possibly-shared config).
-                        config = {**config, "clips": {**config["clips"],
-                                  "watermark": _json.loads(brow["config"])}}
+                        wm = _json.loads(brow["config"])
+                        config = {**config, "clips": {**config["clips"], "watermark": wm,
+                                  **({"caption_style": wm["captions"]}
+                                     if wm.get("captions") and not config["clips"].get("caption_style") else {})}}
                         print(f"      Applying {creator_ctx.creator_name if creator_ctx else 'creator'}'s default branding")
     except Exception as e:
         print(f"      (creator tagging failed: {e})")
@@ -233,6 +238,9 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         return []
     db.set_video_status(video.video_id, "downloaded")
     cancel.check(video.video_id)
+    # Stage boundaries are where a job can safely wait out a machine that is
+    # about to run out of memory (core/governor.py).
+    governor.checkpoint(cancel.check_active)
 
     # Audio/visual signal extraction needs no transcript, and it's FFmpeg +
     # numpy work while Whisper occupies the GPU compute — so it runs in the
@@ -302,13 +310,29 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
     db.set_video_status(video.video_id, "transcribed")
 
     cancel.check(video.video_id)
+    governor.checkpoint(cancel.check_active)
     print("[3/4] Multimodal analysis (transcript + audio + visual)...")
     progress.emit(stage="analyze", video_id=video.video_id)
     signals_thread.join()  # usually already done — transcription takes longer
     hype_thread.join(timeout=60)  # network fetch; hard cap so it never stalls
     llm = create_backend(_with_usable_model(config["llm"]))
+    from llm.stages import StageModels
+
+    stages = StageModels(config["llm"], llm)
+    # What this creator's own approved advice changes (creator/reviewer.py):
+    # standing guidance for the model, and a nudge to the quality bar.
+    overrides = (creator_prefs or {}).get("overrides") or {}
+    delta = int(overrides.get("min_score_delta") or 0)
+    scoring_config = config
+    if delta:
+        base = int(config["clips"]["min_score"])
+        scoring_config = {**config, "clips": {**config["clips"], "min_score": max(0, min(100, base + delta))}}
+        print(f"      Quality bar for this creator: {scoring_config['clips']['min_score']} "
+              f"({delta:+d} from your approved review)")
     candidates, rejections = find_clips(
-        video.path, segments, llm, config,
+        video.path, segments, llm, scoring_config,
+        stages=stages,
+        guidance="\n".join(f"- {g}" for g in overrides.get("guidance") or []),
         signals=signals_out.get("signals"),
         creator_context=creator_ctx,
         weight_bias=(creator_prefs or {}).get("weight_bias"),
@@ -327,7 +351,19 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         print(f"      Rejected {dup_count} duplicate/overlapping candidate(s) (logged)")
     db.set_video_status(video.video_id, "analyzed")
 
-    outcome = summarise_run(candidates, rejections, config)
+    # What flagged clips taught us about this creator's edges. Applied before
+    # the outcome, metadata and renders so all three see the same window.
+    boundary = (creator_prefs or {}).get("boundary")
+    if candidates and boundary and (boundary["lead"] or boundary["tail"]):
+        from creator.learning import adjust_boundaries
+
+        adjust_boundaries(candidates, boundary, segments, video.duration,
+                          config["clips"]["max_duration"])
+        n = sum(1 for c in candidates if (c.subscores or {}).get("learned_pad"))
+        print(f"      Widened {n} clip(s) by up to {boundary['lead']:.1f}s before / "
+              f"{boundary['tail']:.1f}s after (learned from your flags)")
+
+    outcome = summarise_run(candidates, rejections, scoring_config)
     db.set_outcome(video.video_id, outcome)
 
     if not candidates:
@@ -360,8 +396,11 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
     # (one call per clip made long streams crawl through analysis).
     print(f"      Writing titles & hashtags for {len(candidates)} clip(s) (batched)...")
     metas = generate_metadata_batch(
-        candidates, segments, video.title, llm,
+        candidates, segments, video.title, stages.for_stage("metadata"),
         creator_context=(creator_ctx.summary if creator_ctx else ""),
+        channel=video.channel or "",
+        always_on=_always_on_tags(db),
+        audience=_audience(db, config, data_dir),
     )
 
     # Hashtags the request insisted on (chat: "put #creatorname on all of
@@ -426,10 +465,27 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
     # reasons are counted and reported once at the end.
     last_failure: str | None = None
     repeated_failures = 0
+    failed = 0
+    governor.checkpoint(cancel.check_active)
+
+    def _governed_render(*args):
+        # The pool is sized for the configured maximum; the governor decides
+        # how many of those workers may actually render at this moment, so the
+        # count drops while other applications need the machine and recovers
+        # once they are done.
+        with governor.pipeline_work(), governor.render_slot(cancel.check_active):
+            return _render_files(*args)
+
+    # A crop the user's flags keep asking for becomes this creator's default.
+    learned_crop = (creator_prefs or {}).get("crop")
+    learned_opts = {"crop": learned_crop} if learned_crop else None
+    if learned_crop:
+        print(f"      Using '{learned_crop}' framing by default (learned from your flags)")
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(
-                _render_files, video.path, candidate, segments, clip_dir, config, None,
+                _governed_render, video.path, candidate, segments, clip_dir, config, learned_opts,
                 content_lang,
             ): (candidate, meta)
             for candidate, meta in zip(candidates, metas)
@@ -450,6 +506,7 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
             except Exception as e:
                 where = f"{candidate.start:.0f}s-{candidate.end:.0f}s"
                 reason = _render_failure_reason(e)
+                failed += 1
                 if reason == last_failure:
                     repeated_failures += 1      # reported once, after the loop
                 else:
@@ -464,6 +521,17 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
 
     if repeated_failures:
         print(f"      ({repeated_failures} more clip(s) failed the same way)")
+
+    # The outcome was recorded when selection finished, before anything was
+    # rendered. If the renders then fail, the video would otherwise show
+    # "no clips, and nothing went wrong" over a job that plainly went wrong.
+    if failed:
+        outcome["clips"] = len(rendered)
+        outcome["render_failed"] = failed
+        outcome["render_error"] = last_failure
+        if not rendered:
+            outcome["cause"] = "render_failed"
+        db.set_outcome(video.video_id, outcome)
 
     if knowledge_thread is not None:
         knowledge_thread.join(timeout=600)  # normally finished during renders
@@ -480,6 +548,50 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
         print(f"      {_line}")
     print(f"      Done in {elapsed / 60:.1f} min ({len(rendered)} clips)")
     return rendered
+
+
+def import_video(url: str, config: dict, db: StateDB) -> str:
+    """Bring a video into the library WITHOUT clipping it.
+
+    The first half of process_video and nothing more: download (or reuse the
+    cached file), record its metadata, file it under its creator. What it is
+    for is decided later — clips, a compilation segment, or both — so the
+    import itself must not presume either. A video that was already clipped
+    keeps its status; only a fresh row is marked 'imported'. Returns the
+    video id."""
+    data_dir = Path(config["paths"]["data_dir"])
+    print(f"[import] Downloading: {url}")
+    progress.emit(stage="download", message=url)
+    video = _cached_or_download(url, data_dir, db)
+    progress.emit(stage="downloaded", video_id=video.video_id, title=video.title, duration=video.duration)
+
+    from video.encoding import SLOW_SOURCE_CODECS, ensure_h264_source, source_codec
+
+    # Same one-off conversion as process_video: compilation scrubbing and
+    # rendering decode this file too, and slow codecs decode in software.
+    if source_codec(video.path) in SLOW_SOURCE_CODECS:
+        progress.emit(stage="converting source to H.264", video_id=video.video_id)
+        ensure_h264_source(video.path, config)
+
+    db.upsert_video(
+        video.video_id,
+        title=video.title,
+        channel_name=video.channel,
+        duration=video.duration,
+        source_url="" if url.startswith("local:") else url,
+        channel_url=video.channel_url,
+    )
+    try:
+        from creator import identity
+
+        identity.tag_video(db, video.video_id, video.channel)
+    except Exception as e:
+        print(f"      (creator tagging failed: {e})")
+    if db.video_status(video.video_id) in (None, "queued"):
+        db.set_video_status(video.video_id, "imported")
+    progress.emit(stage="done", video_id=video.video_id, clips=0)
+    print(f"      Imported {video.title} ({video.duration:.0f}s) — no clips made")
+    return video.video_id
 
 
 def _cached_or_download(url: str, data_dir: Path, db: StateDB):
@@ -604,6 +716,7 @@ def _render_files(
     # Safe for the API's re-render paths too: this only fires when the video
     # the worker is actively processing has been cancelled.
     cancel.check_active()
+    progress.step("Preparing", 0.0, 0.03)
 
     opts = render_opts or {}
     # Deterministic timestamp-based name: re-runs overwrite instead of piling up.
@@ -702,10 +815,10 @@ def _render_files(
 
     wm_cfg = opts["watermark"] if "watermark" in opts else config["clips"].get("watermark")
     wm_assets = Path(config["paths"]["data_dir"]) / "branding" / "assets"
-    if wm_cfg and _wm.has_text(wm_cfg):
-        ass_path = _wm.ensure_text(
-            ass_path, clip_dir / f"{stem}.ass", wm_cfg, canvas, duration=candidate.duration
-        )
+    if wm_cfg and _wm.has_overlay_text(wm_cfg):
+        # The CTA can be timed from the END, so this is the edited length.
+        shown = edit.final_duration() if edit is not None else candidate.duration
+        ass_path = _wm.ensure_text(ass_path, clip_dir / f"{stem}.ass", wm_cfg, canvas, duration=shown)
 
     # Whisper's word timestamps often end a hair BEFORE the word is finished
     # being spoken, so a cut exactly at the last word's end clips its audio —
@@ -726,6 +839,7 @@ def _render_files(
             # Cut a horizontal intermediate, track the subject, render 9:16.
             intermediate = clip_dir / f"{stem}.source.mp4"
             scratch.append(intermediate)
+            progress.step("Cutting the clip", 0.03, 0.12)
             cut_clip(source, padded, intermediate)
 
             if edit is not None:
@@ -735,6 +849,7 @@ def _render_files(
 
                 edited = clip_dir / f"{stem}.edited.mp4"
                 scratch.append(edited)
+                progress.step("Applying your edits", 0.12, 0.2)
                 apply_edits(intermediate, edit, edited)
                 discard(intermediate)
                 intermediate = edited
@@ -751,6 +866,7 @@ def _render_files(
                 if tracking_cache is not None and "podcast" in tracking_cache:
                     decision = copy.deepcopy(tracking_cache["podcast"])
                 else:
+                    progress.step("Analysing the shot", 0.2, 0.45)
                     decision = podcast_mod.analyze(
                         intermediate,
                         model_name=tracking_cfg["detector"],
@@ -764,6 +880,7 @@ def _render_files(
                     decision = {"mode": "track", "path": [(0.0, 0.5)]}
                 elif crop_mode == "letterbox":
                     decision = {"mode": "fit_blur", "region": None}
+                progress.step("Rendering the clip", 0.45, 0.88)
                 podcast_mod.render_clip(
                     intermediate, render_path, decision, ass_path=ass_path,
                     vf_extra=vf_extra, normalize=normalize, size=canvas,
@@ -779,6 +896,7 @@ def _render_files(
                     tracking = copy.deepcopy(tracking_cache["tracking"])
                 else:
                     tracking_cfg = config["tracking"]
+                    progress.step("Following the subject", 0.2, 0.55)
                     tracking = compute_tracking(
                         intermediate,
                         model_name=tracking_cfg["detector"],
@@ -796,6 +914,7 @@ def _render_files(
                         tracking["path"] = [(t, x + shift) for t, x in tracking["path"]]
                     if tracking_cache is not None:
                         tracking_cache["tracking"] = copy.deepcopy(tracking)
+                progress.step("Rendering the clip", 0.55, 0.88)
                 render_vertical(
                     intermediate, tracking, render_path, ass_path=ass_path, vf_extra=vf_extra,
                     normalize=normalize, size=canvas,
@@ -808,9 +927,12 @@ def _render_files(
 
                 plain = clip_dir / f"{stem}.plain.mp4"
                 scratch.append(plain)
+                progress.step("Cutting the clip", 0.03, 0.4)
                 cut_clip(source, padded, plain, vf_extra=vf_extra)
+                progress.step("Rendering the clip", 0.4, 0.88)
                 apply_edits(plain, edit, render_path, ass_path=ass_path, normalize=normalize)
             else:
+                progress.step("Rendering the clip", 0.03, 0.88)
                 cut_clip(source, padded, render_path, ass_path=ass_path, vf_extra=vf_extra,
                          normalize=normalize)
     finally:
@@ -828,13 +950,32 @@ def _render_files(
 
     # Image watermark: one overlay pass on the finished clip (only when set).
     if wm_cfg and _wm.has_image(wm_cfg, wm_assets):
+        progress.step("Adding the watermark", 0.88, 0.93)
         _wm.apply_image(render_path, wm_cfg, canvas, wm_assets)
+
+    # Credit the source channel (the branding profile's "credit" block), the
+    # way a compilation does. Decoration: a failure here costs the credit, not
+    # the clip that was already rendered.
+    from video_editor import credit as _credit
+
+    credit_style = _credit.style_of(wm_cfg)
+    if credit_style is not None:
+        try:
+            progress.step("Adding the credit", 0.93, 0.97)
+            info = _credit.source_info(source, config)
+            _credit.apply(
+                render_path, credit_style, canvas, duration=edit.final_duration() if edit is not None
+                else candidate.duration, asset_dir=wm_assets, **info,
+            )
+        except Exception as e:
+            print(f"      (credit skipped: {str(e)[:200]})")
 
     # Writes final_path complete, with the card. Never raises and never loses
     # the clip: if the card cannot be made it still writes final_path without
     # one, because every step here WRITES the destination rather than
     # replacing it, which is what a held file permits.
     if wants_card:
+        progress.step("Adding the end card", 0.97, 0.99)
         _outro.finish(render_path, final_path, config)
 
     render_opts_json = json.dumps(
@@ -851,6 +992,38 @@ def _render_files(
         }
     ) if (opts or caption_style or filter_name != "none" or wm_cfg) else ""
     return final_path, render_opts_json
+
+
+def _audience(db: StateDB, config: dict, data_dir: Path) -> str:
+    """Who the connected YouTube channel's viewers are, for wording the copy
+    their way; "" when unknown. Never raises (analysis.audience.for_run)."""
+    from analysis import audience
+
+    return audience.for_run(db, config, data_dir)
+
+
+def _always_on_tags(db: StateDB) -> list[str]:
+    """The hashtags this install puts on every post (Publish settings), which
+    titles and descriptions are anchored to. Empty when there are none or the
+    settings cannot be read: metadata never fails over this."""
+    try:
+        from server.publishing_api import load_settings
+
+        return [str(t) for t in (load_settings(db).get("hashtags") or [])]
+    except Exception:
+        return []
+
+
+def _queue_poster(final_path: Path, config: dict | None) -> None:
+    """Make the grid card's still for a finished clip, in the background, so
+    opening the grid finds it waiting (video/poster.py)."""
+    try:
+        from video import poster
+
+        if config and config.get("paths", {}).get("data_dir"):
+            poster.queue(final_path, config["paths"]["data_dir"])
+    except Exception:
+        pass  # a missing poster is made on first view; it must never cost a clip
 
 
 def _register_clip(
@@ -872,6 +1045,19 @@ def _register_clip(
     renderer silently left two of the four longform profiles with no end card.
     Hooking the funnel means a mode added later cannot miss it either.
     """
+    # The source channel goes into what is stored, so the title, description,
+    # hashtags and keywords in the editor already carry it (idempotent).
+    try:
+        from server import publishing_api
+
+        stored = publishing_api.enrich_clip_metadata(
+            db, video_id, candidate.start,
+            title=meta.title, description=meta.description,
+            hashtags=list(meta.hashtags or []), keywords=list(getattr(meta, "keywords", []) or []),
+        )
+    except Exception:
+        stored = {"title": meta.title, "description": meta.description,
+                  "hashtags": list(meta.hashtags or []), "keywords": list(getattr(meta, "keywords", []) or [])}
     clip_id = db.add_clip(
         video_id,
         candidate.start,
@@ -880,11 +1066,16 @@ def _register_clip(
         candidate.hook,
         path=str(final_path),
         status="queued",  # awaiting a daily schedule slot
-        title=meta.title,
-        description=meta.description,
-        hashtags=json.dumps(meta.hashtags),
+        title=stored["title"],
+        description=stored["description"],
+        hashtags=json.dumps(stored["hashtags"]),
         scores=json.dumps(candidate.subscores or {}),
         render_opts=render_opts_json,
+        keywords=json.dumps(stored["keywords"]),
+        # Offered, not applied: the channel's standing comment goes out
+        # unless someone picks this for the clip (server/publishing_api.py).
+        suggested_comment=getattr(meta, "first_comment", "") or "",
+        alt_titles=json.dumps(getattr(meta, "alt_titles", []) or []),
     )
     if clip_id is None:
         # Same window already in the DB (re-run): point the existing row at
@@ -896,7 +1087,9 @@ def _register_clip(
         if row:
             db.set_clip(row["id"], path=str(final_path), scores=json.dumps(candidate.subscores or {}))
         print(f"      Re-rendered (kept existing metadata): {final_path.name}")
+        _queue_poster(final_path, config)
         return None
 
     print(f"      -> {final_path}  ({meta.title})")
+    _queue_poster(final_path, config)
     return RenderedClip(source_video_id=video_id, candidate=candidate, path=final_path)

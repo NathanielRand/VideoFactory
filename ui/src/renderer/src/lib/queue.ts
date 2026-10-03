@@ -57,12 +57,15 @@ export function sourceOf(url: string): string {
  *  Only what was chosen is listed — a row of "off" badges is noise. */
 export function describeOptions(o: JobOptions | undefined): string[] {
   if (!o) return []
+  // An import makes no clips, so the clip settings it carries say nothing.
+  if (o.import_only) return [o.add_to_compilation ? 'Import → compilation' : 'Import to Library']
   const chips: string[] = []
   if (o.captions === false) chips.push('No captions')
   if (o.long_clips) chips.push('60s+')
   if (o.podcast) chips.push('Podcast')
   if (o.longform) chips.push(`Longform · ${String(o.longform.mode ?? '').replace(/_/g, ' ')}`)
-  if (o.watermark_profile_id) chips.push('Watermark')
+  if (o.watermark_profile_id) chips.push('Branding')
+  if (o.no_watermark) chips.push('No branding')
   if (o.filter && o.filter !== 'none') chips.push(`Filter · ${o.filter}`)
   if (typeof o.max_clips === 'number') chips.push(`Max ${o.max_clips} clips`)
   if (typeof o.min_score === 'number') chips.push(`Score ≥ ${o.min_score}`)

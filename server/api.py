@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import threading
+import time
 import traceback
 import urllib.error
 from contextlib import asynccontextmanager
@@ -20,12 +21,16 @@ from pathlib import Path
 import requests as _requests
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+import anyio
 from fastapi.responses import FileResponse
+
+from server.media import poster as make_poster_file
+from server.media import BoostPlayback, TrackingCache, video_response
 from pydantic import BaseModel
 
 from core import queue
 from core.binaries import ffmpeg, ffprobe
-from core.paths import discard, picked_file, safe_name
+from core.paths import cached_source, discard, picked_file, safe_name
 from core.state import StateDB
 from server.events import broadcaster
 from server.jobs import Worker
@@ -48,7 +53,10 @@ class JobIn(BaseModel):
     min_score: int | None = None  # per-job quality bar override (0-100)
     longform: dict | None = None  # {"mode": short_clips|clips_140|highlights|edited_stream}
     watermark_profile_id: int | None = None  # branding profile applied to all clips
+    no_watermark: bool | None = None  # true = no branding, not even the creator's default
     podcast: bool | None = None   # multi-cam podcast: letterbox, no subject tracking
+    import_only: bool | None = None  # into the library without making clips
+    add_to_compilation: int | None = None  # once in the library, append it whole to this compilation
     webhook_url: str | None = None  # POST once when this job reaches a terminal state
     webhook_secret: str | None = None  # signs that POST (X-Clips-Kitty-Signature)
     hashtags: list[str] | None = None  # tags every clip of this job must carry
@@ -74,7 +82,10 @@ class JobPatch(BaseModel):
     min_score: int | None = None
     longform: dict | None = None
     watermark_profile_id: int | None = None
+    no_watermark: bool | None = None
     podcast: bool | None = None
+    import_only: bool | None = None
+    add_to_compilation: int | None = None
     webhook_url: str | None = None
     webhook_secret: str | None = None
     # Options to drop back to the app-wide default. Needed because null means
@@ -100,7 +111,10 @@ class BatchItemIn(BaseModel):
     min_score: int | None = None
     longform: dict | None = None
     watermark_profile_id: int | None = None
+    no_watermark: bool | None = None
     podcast: bool | None = None
+    import_only: bool | None = None
+    add_to_compilation: int | None = None
     webhook_url: str | None = None
     webhook_secret: str | None = None
 
@@ -118,7 +132,16 @@ class ClipPatch(BaseModel):
     title: str | None = None
     description: str | None = None
     hashtags: list[str] | None = None
+    keywords: list[str] | None = None   # YouTube search tags
+    first_comment: str | None = None
+    # The YouTube playlist this clip joins when it is published there; "" clears.
+    playlist_id: str | None = None
     exported: bool | None = None  # the clip's star; exporting also sets it
+
+
+class ClipsPlaylistIn(BaseModel):
+    clip_ids: list[int]
+    playlist_id: str = ""  # "" clears
 
 
 class MergeIn(BaseModel):
@@ -144,9 +167,13 @@ class PreviewIn(BaseModel):
     normalize_audio: bool | None = None  # pending loudness-matching toggle
 
 
+BRANDING_KINDS = ("clip", "compilation")
+
+
 class BrandingIn(BaseModel):
     name: str
     config: dict
+    kind: str | None = None   # what it brands; fixed at creation ('clip' if omitted)
 
 
 # What the two "import a file from this computer" endpoints will accept. Kept
@@ -181,9 +208,12 @@ class LocalVideoIn(BaseModel):
     # name, so listing them here is all that is needed.
     longform: dict | None = None
     watermark_profile_id: int | None = None
+    no_watermark: bool | None = None
     filter: str | None = None
     min_score: int | None = None
     max_clips: int | None = None
+    import_only: bool | None = None
+    add_to_compilation: int | None = None
     force: bool = False
     webhook_url: str | None = None
     webhook_secret: str | None = None
@@ -249,6 +279,10 @@ class BatchExportIn(BaseModel):
     folder: str
 
 
+class PerformanceModeIn(BaseModel):
+    mode: str
+
+
 class ModelIn(BaseModel):
     tag: str
 
@@ -260,7 +294,6 @@ class SettingsPatch(BaseModel):
     privacy: str | None = None
     content_language: str | None = None  # auto / ISO code (es, pt, hi, id...)
     translation_model: str | None = None  # local model used for translation
-    outro: bool | None = None  # append the Video Factory end card (clips.outro)
 
 
 class TranslateIn(BaseModel):
@@ -411,8 +444,22 @@ def _process_options(body, into: dict | None = None) -> dict:
         payload["podcast"] = True
     if getattr(body, "longform", None):
         payload["longform"] = body.longform
+    # What the video is FOR. Absent: make clips, as always. import_only puts
+    # it in the library and stops there, so it can go into a compilation now
+    # or later — and still be clipped later from the Library.
+    if getattr(body, "import_only", None):
+        payload["import_only"] = True
+    if getattr(body, "add_to_compilation", None):
+        payload["add_to_compilation"] = int(body.add_to_compilation)
+    # Branding is one choice with three answers: a profile, explicitly none,
+    # or neither key (the creator's default, if they have one). Setting either
+    # key drops the other, so a patch cannot leave a job holding both.
     if getattr(body, "watermark_profile_id", None):
         payload["watermark_profile_id"] = body.watermark_profile_id
+        payload.pop("no_watermark", None)
+    elif getattr(body, "no_watermark", None):
+        payload["no_watermark"] = True
+        payload.pop("watermark_profile_id", None)
     if getattr(body, "filter", None):
         from video.filters import is_valid
 
@@ -444,6 +491,7 @@ def _process_options(body, into: dict | None = None) -> dict:
 
 def create_app(config: dict, settings_path: Path) -> FastAPI:
     from server import feedback as feedback_mod
+
 
     feedback_mod.install_log_capture()  # pipeline prints -> bug-report log tail
 
@@ -498,18 +546,64 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
     publish_worker = PublishWorker(config, db_path, data_dir)
 
+    # The resource governor (core/governor.py) and the local model runtime
+    # (llm/runtime.py). One of each for the life of the process.
+    from core import governor as governor_mod
+    from llm import runtime as runtime_mod
+
+    ollama_runtime = runtime_mod.get(
+        config["llm"].get("ollama_host", "http://localhost:11434"), data_dir / "logs"
+    )
+    # Added last, so it is outermost and runs before anything else needs the
+    # interpreter: see server/media.py.
+    app.add_middleware(BoostPlayback)
+
+    def _local_model() -> bool:
+        from llm.spec import is_local
+
+        return is_local(config["llm"]["backend"])
+
+    def _auto_start_ollama() -> None:
+        # The desktop app launches its bundled Ollama a moment before this
+        # backend. Give it that moment, or both try to take the port.
+        time.sleep(5)
+        if _local_model() and config["llm"].get("auto_start", True):
+            ollama_runtime.start(wait=True)
+
+    def _quiet_reset(loop, context) -> None:
+        """Windows' asyncio prints a traceback whenever a client (the app's
+        window reloading, an aborted fetch, a closed event stream) drops a
+        connection: `_call_connection_lost` then calls shutdown() on a socket
+        the other side already reset. The connection is gone either way and
+        nothing is lost, so this one case is dropped rather than logged as an
+        error; every other exception still reaches the default handler."""
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError) and "_call_connection_lost" in str(context.get("handle", "")):
+            return
+        loop.default_exception_handler(context)
+
     async def _startup():
-        broadcaster.attach_loop(asyncio.get_running_loop())
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(_quiet_reset)
+        broadcaster.attach_loop(loop)
+        gov = governor_mod.install(config)
+        gov.llm_busy = ollama_runtime.busy
+        gov.unload_models = lambda: ollama_runtime.unload() if _local_model() else None
+        threading.Thread(target=_auto_start_ollama, daemon=True, name="ollama-autostart").start()
         worker.start()
         publish_worker.start()
         stream_watcher.start()
         channel_watcher.start()
+        export_worker.start()
+        stats_poller.start()
 
     async def _shutdown():
         worker.stop()
         publish_worker.stop()
         stream_watcher.stop()
         channel_watcher.stop()
+        export_worker.stop()
+        stats_poller.stop()
 
     # Publishing lives in its own module: it is optional, self-contained and
     # removable, and threading ~15 routes through this file would end that.
@@ -570,6 +664,48 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
     formats_api.install(app, db=db, data_dir=data_dir, worker=worker, broadcaster=broadcaster)
 
+    # Video Factory: exports. Finished files, and the folders and clouds they
+    # are sent to (the Local and Cloud pages).
+    from server import exports_api
+
+    export_worker = exports_api.install(app, db=db, broadcaster=broadcaster, data_dir=data_dir)
+
+    # Video Factory: what goes out with each post, whichever publisher sends
+    # it: keywords, per-platform captions, best times, compilation metadata.
+    from server import publishing_api
+
+    stats_poller = publishing_api.install(app, config=config, db=db, data_dir=data_dir)
+
+    # Video Factory: the thumbnail designer (frames, cut-outs, text ideas, save).
+    from server import thumbnails_api
+
+    thumbnails_api.install(app, config=config, db=db, data_dir=data_dir)
+
+    # What the connected sources report: views by content type, posts by provider.
+    from server import analytics_api
+
+    analytics_api.install(app, config=config, db=db, data_dir=data_dir)
+
+    # The posting schedule across providers: cancel what can be, clear what is finished.
+    from server import schedule_api
+
+    schedule_api.install(app, config=config, db=db, data_dir=data_dir)
+
+    # What each platform allows, against what has been done and is planned.
+    from server import quota_api
+
+    quota_api.install(app, config=config, db=db, data_dir=data_dir)
+
+    # Flagging a clip that came out wrong (bad edges, bad framing) for review.
+    from server import flags_api
+
+    flags_api.install(app, config=config, db=db, data_dir=data_dir, worker=worker)
+
+    # Proposed changes from a creator's flags, approved or refused one by one.
+    from server import review_api
+
+    review_api.install(app, config=config, db=db)
+
     # Streamer integrations such as the OBS plugin: hand over a finished stream,
     # find its VOD, report progress. Its own module for the same reason.
     from server import integrations
@@ -621,20 +757,62 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
         return preflight.run(config).as_dict()
 
+    # Walking the whole data directory stats every file in the library, which
+    # on a big library is real disk work. It was done on every poll, every five
+    # seconds, for a number that changes over minutes.
+    _dir_size: dict = {"at": 0.0, "bytes": 0}
+
+    def _data_dir_bytes() -> int:
+        if time.time() - _dir_size["at"] > 60:
+            _dir_size["bytes"] = sum(f.stat().st_size for f in data_dir.rglob("*") if f.is_file())
+            _dir_size["at"] = time.time()
+        return _dir_size["bytes"]
+
     @app.get("/system/stats")
     def system_stats():
         import psutil
 
         disk = shutil.disk_usage(data_dir)
+        gov = governor_mod.get()
+        latest = gov.latest() if gov else None
+        if latest:
+            # The governor samples every second anyway; reuse its reading
+            # rather than opening NVML and blocking on the CPU again.
+            cpu, ram = latest["cpu"], latest["ram"]
+            gpu = latest["gpu"]
+        else:
+            cpu = psutil.cpu_percent(interval=0.1)
+            ram = psutil.virtual_memory().percent
+            gpu = _gpu_stats()
         stats = {
-            "cpu_percent": psutil.cpu_percent(interval=0.1),
-            "ram_percent": psutil.virtual_memory().percent,
-            "data_dir_bytes": sum(f.stat().st_size for f in data_dir.rglob("*") if f.is_file()),
+            "cpu_percent": cpu,
+            "ram_percent": ram,
+            "data_dir_bytes": _data_dir_bytes(),
             "disk_free_bytes": disk.free,
-            "gpu": _gpu_stats(),
+            "gpu": gpu,
             **_build_stamp(),
         }
         return stats
+
+    @app.get("/system/activity")
+    def system_activity(history: int = 90):
+        """The governor's recent samples and what it is doing about them."""
+        gov = governor_mod.get()
+        if gov is None:
+            raise HTTPException(503, "resource monitor not started")
+        snap = gov.snapshot(max(1, min(180, history)))
+        snap.pop("latest", None)
+        return snap
+
+    @app.post("/system/mode")
+    def system_mode(body: PerformanceModeIn):
+        gov = governor_mod.get()
+        if gov is None:
+            raise HTTPException(503, "resource monitor not started")
+        try:
+            return {"mode": gov.set_mode(body.mode)}
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
 
     # ---- feedback hub -----------------------------------------------------
 
@@ -693,8 +871,33 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
     # ---- jobs -------------------------------------------------------------
 
+    def _attach_from_library(d, vid: str, comp_id: int | None) -> bool:
+        """An import of a video the library already holds: nothing to
+        download. Returns True when that is the case, having appended it to
+        `comp_id` if one was asked for, so the caller can skip queueing."""
+        if not vid or cached_source(data_dir / "downloads", vid) is None:
+            return False
+        if d.video_status(vid) is None:
+            return False  # a file with no row: let the import write one
+        if comp_id:
+            from compilation import store as compilations
+
+            if compilations.append_whole_video(d, int(comp_id), vid):
+                broadcaster.publish({"type": "compilation", "compilation_id": int(comp_id)})
+        return True
+
     @app.post("/jobs")
     def create_job(body: JobIn, status_code=201):
+        if body.import_only:
+            from sources.dispatch import identify
+
+            _, vid = identify(body.url)
+            d0 = db()
+            try:
+                if _attach_from_library(d0, vid or "", body.add_to_compilation):
+                    return {"job_id": None, "already_in_library": True, "video_id": vid}
+            finally:
+                d0.close()
         # Re-pasting an already-done URL without force would silently no-op —
         # tell the UI instead, so it can offer "process again with current
         # settings" (e.g. the same video in both 60s+ and regular modes).
@@ -703,7 +906,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         from sources.dispatch import identify
 
         vid = ""
-        if not body.force and not body.longform:
+        if not body.force and not body.longform and not body.import_only:
             _, vid = identify(body.url)
             if vid:
                 d0 = db()
@@ -713,7 +916,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
                     d0.close()
                 if status == "done":
                     return {"job_id": None, "already_processed": True, "video_id": vid}
-        elif not body.longform:
+        elif not body.longform or body.import_only:
             _, vid = identify(body.url)
 
         payload = _process_options(body, {"url": body.url, "force": body.force})
@@ -841,6 +1044,28 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         platform = body.platform if body.platform in ("youtube", "twitch", "kick") else "youtube"
         d = db()
         try:
+            if body.import_only:
+                # Already converted above, so an import has nothing left to
+                # do in the queue: the file is in the library now.
+                d.upsert_video(
+                    vid, title=title, channel_name=body.channel.strip(), duration=seconds
+                )
+                if body.channel.strip():
+                    from creator.identity import tag_video
+
+                    tag_video(d, vid, body.channel.strip(), platform=platform)
+                if d.video_status(vid) in (None, "queued"):
+                    d.set_video_status(vid, "imported")
+                added_to = None
+                if body.add_to_compilation:
+                    from compilation import store as compilations
+
+                    if compilations.append_whole_video(d, int(body.add_to_compilation), vid):
+                        added_to = int(body.add_to_compilation)
+                        broadcaster.publish({"type": "compilation", "compilation_id": added_to})
+                broadcaster.publish({"type": "library"})
+                return {"job_id": None, "video_id": vid, "imported": True,
+                        "added_to_compilation": added_to}
             if queue.capacity(d) <= 0:
                 raise HTTPException(
                     409,
@@ -1032,8 +1257,12 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
                 except Exception as e:
                     skipped.append({"url": url, "reason": "unrecognized", "detail": str(e)[:200]})
                     continue
+                if item.import_only and _attach_from_library(d, vid or "", item.add_to_compilation):
+                    created.append({"url": url, "job_id": None, "video_id": vid,
+                                    "already_in_library": True})
+                    continue
                 if vid and not item.force:
-                    if d.video_status(vid) == "done":
+                    if d.video_status(vid) == "done" and not item.import_only:
                         skipped.append({"url": url, "reason": "already_processed", "video_id": vid})
                         continue
                     if queue.duplicate_of(d, vid) is not None:
@@ -1121,6 +1350,18 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             d.conn.commit()
         except Exception:
             pass  # an audit row is not worth failing the request over
+
+    @app.get("/clip-work")
+    def clip_work(ids: str = ""):
+        """What is queued, running or has just failed for each of these clips
+        (comma-separated ids): the render, format or translation jobs that the
+        clip row itself says nothing about until they finish."""
+        wanted = [int(x) for x in ids.split(",")[:500] if x.strip().lstrip("-").isdigit()]
+        d = db()
+        try:
+            return d.clip_work(wanted)
+        finally:
+            d.close()
 
     @app.get("/storage")
     def storage():
@@ -1343,11 +1584,73 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         finally:
             d.close()
 
+    @app.get("/library")
+    def library():
+        """Every upload, and where it has been used.
+
+        One place to answer "what did I do with this video?": how many clips
+        were made from it and how many of those went out, and which
+        compilations use it. Any upload can be used anywhere, so this is
+        tracking, not a restriction."""
+        from compilation import store as compilations
+
+        d = db()
+        try:
+            rows = d.conn.execute(
+                """SELECT v.video_id, v.title, v.channel_name, v.status, v.duration,
+                          v.source_url, v.created_at, v.creator_id,
+                          cr.display_name AS creator_name,
+                          (SELECT COUNT(*) FROM clips c WHERE c.video_id = v.video_id) AS clip_count,
+                          (SELECT COUNT(DISTINCT p.start_s || ':' || p.end_s) FROM clip_publishes p
+                             WHERE p.video_id = v.video_id AND p.state = 'published') AS published_clips
+                   FROM videos v
+                   LEFT JOIN creators cr ON cr.creator_id = v.creator_id
+                   ORDER BY v.created_at DESC"""
+            ).fetchall()
+            used = compilations.usage_by_video(d)
+            queued = {
+                r["video_id"]: r["status"]
+                for r in d.conn.execute(
+                    "SELECT video_id, status FROM jobs WHERE type = 'process' "
+                    "AND status IN ('queued', 'running') AND video_id != ''"
+                ).fetchall()
+            }
+        finally:
+            d.close()
+        downloads = data_dir / "downloads"
+        return [
+            {
+                **dict(r),
+                "local": r["video_id"].startswith("local_"),
+                "has_source": cached_source(downloads, r["video_id"]) is not None,
+                "compilations": used.get(r["video_id"], []),
+                "in_queue": queued.get(r["video_id"], ""),
+            }
+            for r in rows
+        ]
+
     @app.get("/videos/{video_id}/clips")
     def clips_for_video(video_id: str):
         d = db()
         try:
             return [_clip_json(r) for r in d.clips_for_video(video_id)]
+        finally:
+            d.close()
+
+    @app.post("/clips/playlist")
+    def set_clips_playlist(body: ClipsPlaylistIn):
+        """Choose (or clear) the YouTube playlist for many clips at once: the
+        Clips page's Select all. Only stored here; it is applied when each
+        clip is published to YouTube."""
+        pid = re.sub(r"[^A-Za-z0-9_-]", "", body.playlist_id)[:64]
+        d = db()
+        try:
+            done = 0
+            for clip_id in dict.fromkeys(body.clip_ids[:1000]):
+                if d.get_clip(clip_id) is not None:
+                    d.set_clip(clip_id, playlist_id=pid)
+                    done += 1
+            return {"updated": done, "playlist_id": pid}
         finally:
             d.close()
 
@@ -1365,6 +1668,14 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
                 fields["description"] = body.description.strip()
             if body.hashtags is not None:
                 fields["hashtags"] = json.dumps(body.hashtags)
+            if body.keywords is not None:
+                from analysis.metadata import clean_keywords
+
+                fields["keywords"] = json.dumps(clean_keywords(body.keywords))
+            if body.first_comment is not None:
+                fields["first_comment"] = body.first_comment.strip()[:300]
+            if body.playlist_id is not None:
+                fields["playlist_id"] = re.sub(r"[^A-Za-z0-9_-]", "", body.playlist_id)[:64]
             # The clip's star, set by hand. Starring again keeps the first time,
             # and it is not logged as feedback: only a real export says "keep
             # this style".
@@ -1560,6 +1871,8 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         worker.notify()
         return {"job_id": job_id}
 
+    preview_tracking = TrackingCache()
+
     @app.post("/clips/{clip_id}/preview")
     def preview_clip(clip_id: int, body: PreviewIn):
         """Render this clip with every pending edit applied — into a preview
@@ -1614,8 +1927,16 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             from transcription.transcriber import detected_language
 
             content_lang = detected_language(row["video_id"], data_dir / "transcripts")
+            # Tracking is the slow part and does not depend on captions, colour or
+            # branding, so tuning those re-previews without redoing it.
+            tracking = preview_tracking.for_key(TrackingCache.key(
+                clip_id, source, row["start_s"], row["end_s"], opts.get("edit"),
+                opts.get("crop") or "track", bool(opts.get("podcast") or config["clips"].get("podcast")),
+                config["tracking"]["detector"], config["tracking"]["sample_fps"],
+            ))
             rendered, _ = _render_files(
-                source, candidate, segments, prev_dir, config, opts, content_lang
+                source, candidate, segments, prev_dir, config, opts, content_lang,
+                tracking_cache=tracking,
             )
             out.unlink(missing_ok=True)
             rendered.rename(out)
@@ -1630,7 +1951,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         path = (data_dir / "previews" / f"clip_{clip_id}.mp4").resolve()
         if not path.exists():
             raise HTTPException(404, "no draft preview")
-        return FileResponse(path, media_type="video/mp4")
+        return video_response(path)
 
     @app.get("/clips/{clip_id}/words")
     def clip_words(clip_id: int):
@@ -1661,6 +1982,39 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
                     )
         return {"words": words}
 
+    poster_lane = anyio.CapacityLimiter(3)
+
+    @app.get("/media/{clip_id}/poster")
+    async def media_poster(clip_id: int, w: int = 360):
+        """A small still of the clip, for a grid card. Normally already made
+        (when the clip was finalised); a clip from before that is made on first
+        ask and kept. Runs in its own three-thread lane: a screenful of missing
+        posters must not occupy the shared threads that stream video."""
+
+        def make() -> Path:
+            d = db()
+            try:
+                row = d.get_clip(clip_id)
+            finally:
+                d.close()
+            if row is None or not row["path"]:
+                raise HTTPException(404, "no such clip")
+            path = Path(row["path"]).resolve()
+            if not path.exists() or data_dir not in path.parents:
+                raise HTTPException(404, "clip file missing")
+            from core.binaries import ffmpeg
+
+            made = make_poster_file(ffmpeg(), data_dir / "posters", path, max(120, min(int(w), 720)))
+            if made is None:
+                raise HTTPException(404, "could not read a frame from this clip")
+            return made
+
+        made = await anyio.to_thread.run_sync(make, limiter=poster_lane)
+        # The name carries the file's modification time, so this URL's content
+        # only changes when the clip is re-rendered, which is a new clip id.
+        return FileResponse(made, media_type="image/jpeg",
+                            headers={"Cache-Control": "private, max-age=86400"})
+
     @app.get("/media/{clip_id}")
     def media(clip_id: int):
         d = db()
@@ -1673,7 +2027,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         path = Path(row["path"]).resolve()
         if not path.exists() or data_dir not in path.parents:
             raise HTTPException(404, "clip file missing")
-        return FileResponse(path, media_type="video/mp4")
+        return video_response(path)
 
     # ---- multilingual publishing (separate pipeline; see multilingual/) ----
 
@@ -1935,19 +2289,27 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
     # ---- watermark & branding ------------------------------------------------
 
     @app.get("/branding")
-    def list_branding():
+    def list_branding(kind: str | None = None):
+        if kind is not None and kind not in BRANDING_KINDS:
+            raise HTTPException(400, f"kind must be one of {', '.join(BRANDING_KINDS)}")
         d = db()
         try:
-            rows = d.list_branding()
+            rows = d.list_branding(kind)
         finally:
             d.close()
-        return [{"id": r["id"], "name": r["name"], "config": json.loads(r["config"])} for r in rows]
+        return [
+            {"id": r["id"], "name": r["name"], "kind": r["kind"], "config": json.loads(r["config"])}
+            for r in rows
+        ]
 
     @app.post("/branding")
     def create_branding(body: BrandingIn):
+        kind = body.kind or "clip"
+        if kind not in BRANDING_KINDS:
+            raise HTTPException(400, f"kind must be one of {', '.join(BRANDING_KINDS)}")
         d = db()
         try:
-            pid = d.add_branding(body.name.strip() or "Branding", json.dumps(body.config))
+            pid = d.add_branding(body.name.strip() or "Branding", json.dumps(body.config), kind)
         finally:
             d.close()
         return {"id": pid}
@@ -1968,6 +2330,13 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         d = db()
         try:
             d.delete_branding(profile_id)
+            # A creator pointing at a deleted profile would read as branded on
+            # the Branding page while nothing is applied.
+            d.conn.execute(
+                "UPDATE creators SET default_branding_id = NULL WHERE default_branding_id = ?",
+                (profile_id,),
+            )
+            d.conn.commit()
         finally:
             d.close()
         return {"deleted": profile_id}
@@ -2033,6 +2402,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         try:
             rows = d.conn.execute(
                 """SELECT c.creator_id, c.display_name, c.aliases, c.learning_enabled,
+                          c.default_branding_id,
                           COUNT(DISTINCT v.video_id) AS videos,
                           COUNT(cl.id) AS clips,
                           ROUND(AVG(cl.score), 1) AS avg_score
@@ -2121,6 +2491,10 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             from creator.learning import preferences
 
             prefs = preferences(d, creator_id)
+            flag_count = d.conn.execute(
+                "SELECT COUNT(*) FROM clip_flags f JOIN videos v ON v.video_id = f.video_id"
+                " WHERE v.creator_id = ?", (creator_id,),
+            ).fetchone()[0]
         finally:
             d.close()
         return {
@@ -2130,6 +2504,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             "knowledge": [{**dict(k), "state": knowledge_state(k)} for k in knowledge],
             "events": [dict(e) for e in events],
             "feedback": {f["action"]: f["n"] for f in feedback},
+            "flag_count": flag_count,
             "preferences": prefs,
         }
 
@@ -2275,6 +2650,10 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         several creators, each gets their own logo without re-picking."""
         d = db()
         try:
+            if body.branding_id is not None:
+                row = d.get_branding(body.branding_id)
+                if row is None or row["kind"] != "clip":
+                    raise HTTPException(400, "a creator's default must be a clip branding profile")
             d.conn.execute(
                 "UPDATE creators SET default_branding_id = ? WHERE creator_id = ?",
                 (body.branding_id, creator_id),
@@ -2563,6 +2942,47 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         threading.Thread(target=_pull, daemon=True).start()
         return {"started": body.tag}
 
+    # ---- local model runtime (start / stop / load / unload) ------------------
+
+    def _active_local_tag() -> str:
+        spec = config["llm"]["backend"]
+        return spec.split("/", 1)[-1] if spec.startswith("ollama/") else ""
+
+    @app.get("/models/runtime")
+    def model_runtime():
+        return {**ollama_runtime.status(), "model": _active_local_tag()}
+
+    @app.post("/models/runtime/start")
+    def model_runtime_start():
+        if not ollama_runtime.start(wait=True):
+            raise HTTPException(503, ollama_runtime.last_error or "Ollama did not start")
+        return {**ollama_runtime.status(), "model": _active_local_tag()}
+
+    @app.post("/models/runtime/stop")
+    def model_runtime_stop():
+        if ollama_runtime.busy():
+            raise HTTPException(409, "The model is answering a request right now; pause the queue first")
+        ollama_runtime.stop()
+        return {**ollama_runtime.status(), "model": _active_local_tag()}
+
+    @app.post("/models/runtime/load")
+    def model_runtime_load():
+        tag = _active_local_tag()
+        if not tag:
+            raise HTTPException(400, "The active model is not a local one")
+        try:
+            ollama_runtime.load(tag)
+        except Exception as e:
+            raise HTTPException(503, f"Could not load {tag}: {e}") from e
+        return {**ollama_runtime.status(), "model": tag}
+
+    @app.post("/models/runtime/unload")
+    def model_runtime_unload():
+        if ollama_runtime.busy():
+            raise HTTPException(409, "The model is answering a request right now; pause the queue first")
+        ollama_runtime.unload()
+        return {**ollama_runtime.status(), "model": _active_local_tag()}
+
     @app.delete("/models/{tag:path}")
     def delete_model(tag: str):
         resp = _requests.delete(f"{ollama_host}/api/delete", json={"model": tag}, timeout=60)
@@ -2581,9 +3001,6 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             "privacy": config.get("upload", {}).get("privacy", "public"),
             "content_language": config.get("content_language", "auto"),
             "translation_model": config.get("llm", {}).get("translation_model", ""),
-            # Absent counts as ON, matching how the pipeline reads it, so the
-            # toggle shows the state an upgrading user actually gets.
-            "outro": config.get("clips", {}).get("outro", True),
         }
 
     @app.patch("/settings")
@@ -2602,22 +3019,6 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             r"auto|[a-z]{2,3}", body.content_language
         ):
             raise HTTPException(400, "content_language must be 'auto' or an ISO code")
-        if body.outro is not None:
-            # clips.outro is NESTED under `clips:`, so the flat rewrite below --
-            # which is anchored at column 0 -- can never match its indented
-            # line. Same shape as translation_model above, plus an insert: no
-            # existing user's settings.yaml has an `outro:` line, so without
-            # the insert this would 400 for exactly the people turning it off.
-            value = "true" if body.outro else "false"
-            text, n = re.subn(r"(?m)^(\s*outro:\s*)\S*", rf"\g<1>{value}",
-                              text, count=1)
-            if n == 0:
-                text, n = re.subn(r"(?m)^(clips:[^\S\n]*$)",
-                                  rf"\g<1>\n  outro: {value}", text, count=1)
-            if n == 0:
-                raise HTTPException(400, "no 'clips:' section in settings.yaml")
-            config.setdefault("clips", {})["outro"] = body.outro
-
         edits = {
             "model": body.model,
             "channel": f'"{body.channel}"' if body.channel is not None else None,
@@ -2646,6 +3047,13 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 def _clip_json(row) -> dict:
     d = dict(row)
     d["hashtags"] = json.loads(d["hashtags"]) if d.get("hashtags") else []
+    for key in ("keywords", "alt_titles"):
+        try:
+            d[key] = json.loads(d[key]) if d.get(key) else []
+        except (TypeError, ValueError):
+            d[key] = []
+    d["first_comment"] = d.get("first_comment") or ""
+    d["suggested_comment"] = d.get("suggested_comment") or ""
     d["scores"] = json.loads(d["scores"]) if d.get("scores") else {}
     d["render_opts"] = json.loads(d["render_opts"]) if d.get("render_opts") else {}
     return d

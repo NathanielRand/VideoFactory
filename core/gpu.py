@@ -27,6 +27,10 @@ NO_GPU = "no CUDA GPU detected"
 
 _DEVICE: str | None = None
 
+# Returned when torch could not load because Windows ran out of commit
+# (WinError 1455). Temporary, so never cached as the answer.
+_OUT_OF_MEMORY = "PyTorch could not load: not enough memory (page file)"
+
 
 def gpu_too_old(reason: str) -> bool:
     """Whether `reason` describes a card BELOW the build's oldest architecture.
@@ -76,6 +80,10 @@ def cuda_usable() -> tuple[bool, str]:
     try:
         import torch
     except Exception as e:
+        if getattr(e, "winerror", None) == 1455 or isinstance(e, MemoryError):
+            # Out of memory, not out of GPU: torch_device() must not cache
+            # this and leave the rest of the run on the CPU.
+            return False, _OUT_OF_MEMORY
         return False, f"PyTorch did not load ({type(e).__name__})"
 
     try:
@@ -137,6 +145,8 @@ def torch_device() -> str:
     """
     global _DEVICE
     if _DEVICE is None:
-        usable, _ = cuda_usable()
+        usable, reason = cuda_usable()
+        if reason == _OUT_OF_MEMORY:
+            return "cpu"  # for this call only; ask again next time
         _DEVICE = "cuda" if usable else "cpu"
     return _DEVICE

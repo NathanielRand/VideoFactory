@@ -45,8 +45,11 @@ def find_highlights(
     chunk_overlap_seconds: float = 60.0,
     long_video_threshold_seconds: float = 1800.0,
     events: list[tuple[float, str]] | None = None,
+    guidance: str = "",
 ) -> tuple[list[ClipCandidate], list[Rejection]]:
     """Returns (selected clips, rejected candidates with reasons).
+    `guidance` is standing advice from the person who runs this channel,
+    shown to the model ahead of the task.
     `events` is an optional multimodal timeline [(second, description)] shown
     to the model alongside each chunk's transcript."""
     if not segments:
@@ -70,6 +73,7 @@ def find_highlights(
         prompt = prompt.replace("{events}", _events_block(events, chunk[0].start, chunk[-1].end))
         prompt = prompt.replace("{min_duration}", str(int(min_duration)))
         prompt = prompt.replace("{max_duration}", str(int(max_duration)))
+        prompt = guidance_block(guidance) + prompt
         raw = _generate_with_retry(llm, prompt)
         parsed = _parse_clips_json(raw)
         if parsed is None:
@@ -94,53 +98,139 @@ def find_highlights(
     )
 
 
+def guidance_block(guidance: str) -> str:
+    """Standing advice for the model, or nothing. It is the channel owner's own
+    words, approved by them (creator/reviewer.py), so it is framed as theirs."""
+    if not (guidance or "").strip():
+        return ""
+    return ("STANDING GUIDANCE from the person who runs this channel. Follow it when judging "
+            "which moments are worth clipping:\n" + guidance.strip() + "\n\n")
+
+
+# One call per batch, not one for every window. A 30-window prompt made a call
+# of several minutes on a partly-CPU model, the bar sat at one value the whole
+# time, and its ~30 JSON entries overran the output budget, so the reply was cut
+# off mid-object and every window fell back to a neutral 50.
+WINDOW_BATCH_SIZE = 6
+
+
 def score_windows(
     segments: list[Segment],
     llm: LLMBackend,
     windows: list[tuple[float, float]],
     events: list[tuple[float, str]] | None = None,
+    batch_size: int = WINDOW_BATCH_SIZE,
+    guidance: str = "",
 ) -> list[ClipCandidate]:
-    """Score specific time windows (signal peaks fusion found) in one LLM
-    call, so signal candidates get real text/engagement scores and grounded
+    """Score specific time windows (signal peaks fusion found) in batched LLM
+    calls, so signal candidates get real text/engagement scores and grounded
     hooks instead of placeholders."""
     if not windows:
         return []
-    # One call for all the windows, but on CPU that single call can take
-    # minutes. Say it is happening rather than going quiet mid-analyze.
-    print(f"  Scoring {len(windows)} signal-peak window(s) with the model...")
-    progress.emit(stage="analyze", current=1, total=1)
+    batch_size = max(1, batch_size)
+    n_batches = (len(windows) + batch_size - 1) // batch_size
+    print(f"  Scoring {len(windows)} signal-peak window(s) with the model "
+          f"({n_batches} batch(es))...")
     template = WINDOWS_PROMPT_PATH.read_text(encoding="utf-8")
 
-    blocks = []
-    for i, (start, end) in enumerate(windows):
-        text = " ".join(s.text for s in segments if s.end > start and s.start < end) or "(no speech)"
-        ev = _events_block(events, start, end)
-        blocks.append(f"WINDOW {i} [{start:.1f}s - {end:.1f}s]:\n{text}\n{ev}".strip())
-    prompt = template.replace("{windows}", "\n\n".join(blocks))
+    results: list[ClipCandidate] = []
+    for bi in range(n_batches):
+        cancel.check_active()
+        progress.emit(stage="analyze", current=bi + 1, total=n_batches)
+        batch = windows[bi * batch_size : (bi + 1) * batch_size]
 
-    raw = _generate_with_retry(llm, prompt)
-    parsed = _parse_clips_json(raw)
-    if parsed is None:
-        # Model failed — keep the windows anyway with neutral text scores;
-        # their audio/visual signals still let strong moments compete.
-        return [
-            ClipCandidate(start=s, end=e, score=50, hook="High-energy moment", source="signal")
-            for s, e in windows
-        ]
+        blocks = []
+        for i, (start, end) in enumerate(batch):
+            text = " ".join(s.text for s in segments if s.end > start and s.start < end) or "(no speech)"
+            ev = _events_block(events, start, end)
+            blocks.append(f"WINDOW {i} [{start:.1f}s - {end:.1f}s]:\n{text}\n{ev}".strip())
+        prompt = guidance_block(guidance) + template.replace("{windows}", "\n\n".join(blocks))
 
-    results = []
-    by_index = dict(enumerate(parsed))
-    for i, (start, end) in enumerate(windows):
-        c = by_index.get(i)
-        if c is not None:
-            # Trust the model's score/hook but keep OUR window timestamps —
-            # these came from the signals, not from the model.
-            results.append(ClipCandidate(start=start, end=end, score=c.score, hook=c.hook,
-                                         reason=c.reason, source="signal", engagement=c.engagement))
-        else:
-            results.append(ClipCandidate(start=start, end=end, score=50,
-                                         hook="High-energy moment", source="signal"))
+        raw = _generate_with_retry(llm, prompt)
+        parsed = _parse_clips_json(raw)
+        # A batch the model fails keeps its windows anyway with neutral text
+        # scores; their audio/visual signals still let strong moments compete.
+        by_index = dict(enumerate(parsed)) if parsed is not None else {}
+        for i, (start, end) in enumerate(batch):
+            c = by_index.get(i)
+            if c is not None:
+                # Trust the model's score/hook but keep OUR window timestamps —
+                # these came from the signals, not from the model.
+                results.append(ClipCandidate(start=start, end=end, score=c.score, hook=c.hook,
+                                             reason=c.reason, source="signal", engagement=c.engagement))
+            else:
+                results.append(ClipCandidate(start=start, end=end, score=50,
+                                             hook="High-energy moment", source="signal"))
     return results
+
+
+REFINE_PROMPT_PATH = Path(__file__).resolve().parent.parent / "config" / "prompts" / "refine_bounds.txt"
+REFINE_SCHEMA = {
+    "type": "object",
+    "properties": {"start_index": {"type": "integer"}, "end_index": {"type": "integer"}},
+    "required": ["start_index", "end_index"],
+    "additionalProperties": False,
+}
+# Context shown around a clip when the model picks its edges.
+REFINE_BEFORE_SECONDS = 20.0
+REFINE_AFTER_SECONDS = 15.0
+
+
+def refine_boundaries(
+    c: ClipCandidate,
+    segments: list[Segment],
+    llm: LLMBackend,
+    min_duration: float,
+    max_duration: float,
+) -> bool:
+    """Ask the model where this clip's setup begins and its payoff ends.
+
+    The model picks segment INDEXES, never timestamps, so its answer always
+    lands on a real transcript boundary and small local models can do it
+    reliably. A reply that is unusable or breaks the duration range leaves the
+    clip untouched. Returns True when the clip moved.
+    """
+    lo_all = [i for i, s in enumerate(segments) if s.end > c.start - REFINE_BEFORE_SECONDS]
+    if not lo_all:
+        return False
+    first = lo_all[0]
+    last = max((i for i, s in enumerate(segments) if s.start < c.end + REFINE_AFTER_SECONDS), default=first)
+    inside = {i for i, s in enumerate(segments) if s.end > c.start and s.start < c.end}
+    if not inside or last <= first:
+        return False
+
+    lines = []
+    for i in range(first, last + 1):
+        s = segments[i]
+        mark = ">>" if i in inside else "  "
+        lines.append(f"{mark} [{i}] ({s.start:.1f}-{s.end:.1f}) {s.text.strip()}")
+    prompt = (
+        REFINE_PROMPT_PATH.read_text(encoding="utf-8")
+        .replace("{min_duration}", str(int(min_duration)))
+        .replace("{max_duration}", str(int(max_duration)))
+        .replace("{lines}", "\n".join(lines))
+    )
+    try:
+        data = json.loads(_json_object(generate_json(llm, prompt, REFINE_SCHEMA)))
+        a, b = int(data["start_index"]), int(data["end_index"])
+    except Exception:
+        return False
+    if not (first <= a <= b <= last):
+        return False
+    start, end = segments[a].start, segments[b].end
+    if not (min_duration - 1 <= end - start <= max_duration):
+        return False
+    # Ignore a wobble: only a real move is worth re-cutting the clip for.
+    if abs(start - c.start) < 0.5 and abs(end - c.end) < 0.5:
+        return False
+    c.start, c.end = round(start, 2), round(end, 2)
+    return True
+
+
+def _json_object(raw: str) -> str:
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+    s, e = text.find("{"), text.rfind("}")
+    return text[s : e + 1] if s != -1 and e > s else "{}"
 
 
 def _events_block(events: list[tuple[float, str]] | None, start: float, end: float) -> str:
@@ -343,6 +433,9 @@ def _valid_range(c: ClipCandidate, video_end: float) -> bool:
 # brackets count — Whisper writes 〈he said "stop."〉 with the stop inside.
 _SENTENCE_END = (".", "!", "?", "…")
 
+# How far back a clip's start may reach to open on a sentence start.
+START_REACH_SECONDS = 6.0
+
 
 def _ends_sentence(seg) -> bool:
     text = (getattr(seg, "text", "") or "").strip().rstrip("\"')]»”’")
@@ -355,6 +448,7 @@ def _fit_to_segments(
     min_duration: float,
     max_duration: float,
     target_duration: float | None = None,
+    lead_in: bool = False,
 ) -> ClipCandidate:
     """Fit a candidate to whole-sentence boundaries with a NATURAL length.
 
@@ -364,9 +458,15 @@ def _fit_to_segments(
     good 30s stays ~30s) but never less than a sensible clip length — this is
     what stops everything collapsing to the bare minimum. Landing on sentence
     edges gives varied natural lengths across the 10-60s range.
+
+    lead_in: grow backwards as much as forwards. A signal peak marks the
+    REACTION (the laugh, the shout); the thing reacted to came before it, so
+    forward-first growth starts the clip after its own setup.
     """
     if not segments:
         return c
+    if c.proposed is None:
+        c.proposed = (c.start, c.end)
     idxs = [i for i, s in enumerate(segments) if s.end > c.start and s.start < c.end]
     if not idxs:  # candidate fell between segments — anchor to the nearest one
         idxs = [min(range(len(segments)), key=lambda i: abs(segments[i].start - c.start))]
@@ -380,15 +480,21 @@ def _fit_to_segments(
     target = target_duration if target_duration is not None else max(c.end - c.start, 18.0)
     target = max(min_duration, min(target, max_duration))
 
+    lo0, hi0 = lo, hi
     while dur() < target:
-        grew = False
-        if hi + 1 < len(segments) and (segments[hi + 1].end - segments[lo].start) <= max_duration:
-            hi += 1
-            grew = True
-        elif lo > 0 and (segments[hi].end - segments[lo - 1].start) <= max_duration:
+        can_fwd = hi + 1 < len(segments) and (segments[hi + 1].end - segments[lo].start) <= max_duration
+        can_back = lo > 0 and (segments[hi].end - segments[lo - 1].start) <= max_duration
+        # Back first while the lead-in is the shorter side, so the peak ends up
+        # roughly 60/40 into the clip instead of at its very start.
+        back_first = lead_in and (
+            segments[lo0].start - segments[lo].start <= 1.5 * (segments[hi].end - segments[hi0].end)
+            or not (hi + 1 < len(segments))
+        )
+        if can_back and (back_first or not can_fwd):
             lo -= 1
-            grew = True
-        if not grew:
+        elif can_fwd:
+            hi += 1
+        else:
             break
     # Trim whole trailing sentences if somehow over the cap.
     while dur() > max_duration and hi > lo:
@@ -418,14 +524,27 @@ def _fit_to_segments(
             if k > lo and (segments[k].end - segments[lo].start) >= min_duration:
                 hi = k
 
-    # Start on a fresh thought too, but only by moving INWARD: growing
-    # backwards would pull in unrelated talk just to find a full stop.
+    # Start on a fresh thought too. Reach a few seconds OUTWARD first, because a
+    # clip that opens mid-sentence has lost its setup; only when no sentence
+    # start is that close move INWARD, since reaching further back would pull
+    # in unrelated talk just to find a full stop.
     if lo > 0 and not _ends_sentence(segments[lo - 1]):
-        k = lo
-        while k < hi and not _ends_sentence(segments[k - 1]):
-            k += 1
-        if k < hi and (segments[hi].end - segments[k].start) >= min_duration:
-            lo = k
+        j = lo
+        while (
+            j > 0
+            and not _ends_sentence(segments[j - 1])
+            and segments[lo].start - segments[j - 1].start <= START_REACH_SECONDS
+            and (segments[hi].end - segments[j - 1].start) <= max_duration
+        ):
+            j -= 1
+        if j == 0 or _ends_sentence(segments[j - 1]):
+            lo = j
+        else:
+            k = lo
+            while k < hi and not _ends_sentence(segments[k - 1]):
+                k += 1
+            if k < hi and (segments[hi].end - segments[k].start) >= min_duration:
+                lo = k
 
     start = segments[lo].start
     end = segments[hi].end

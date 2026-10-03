@@ -34,6 +34,25 @@ export default function NoClipsExplanation({ outcome, compact }: Props): JSX.Ele
 
   const { candidates, best_score, min_score, cause, measured, nothing_detected } = outcome
 
+  // Clips were chosen, then every one failed to render. That is a fault, and
+  // the one case where this panel must not say "nothing went wrong".
+  if (cause === 'render_failed') {
+    return (
+      <div
+        className={`border border-raised/60 rounded-lg p-3 space-y-2 ${size} max-w-2xl`}
+        role="alert"
+      >
+        <p className="font-medium text-ink">
+          {outcome.render_failed} {t('clips were picked, but none of them could be rendered.')}
+        </p>
+        {outcome.render_error && <p className="text-muted break-words">{outcome.render_error}</p>}
+        <p className="text-muted">
+          {t('Processing the video again will retry them. If it keeps failing, report it with this message.')}
+        </p>
+      </div>
+    )
+  }
+
   const numbers =
     best_score === null || best_score === undefined
       ? `${candidates} ${t('moments were considered.')}`

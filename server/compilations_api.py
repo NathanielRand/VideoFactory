@@ -12,6 +12,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
+
+from server.media import video_response
 from pydantic import BaseModel
 
 from compilation import store
@@ -31,9 +33,20 @@ class CompilationPatch(BaseModel):
     recipe: dict | None = None
 
 
+class SegmentIn(BaseModel):
+    video_id: str
+    # Both absent: the whole video. The Clips tab sends a clip's own range.
+    start: float | None = None
+    end: float | None = None
+
+
 class TemplateIn(BaseModel):
     name: str = ""
     config: dict = {}
+
+
+class TemplateRename(BaseModel):
+    name: str
 
 
 class CreditIn(BaseModel):
@@ -102,9 +115,42 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
         path = cached_source(downloads, video_id)
         if path is None:
             raise HTTPException(404, "source file not on disk")
-        return FileResponse(path, media_type="video/mp4")
+        return video_response(path)
 
     # ---- compilations ---------------------------------------------------------
+
+    @app.get("/compilations/progress")
+    def compilation_progress():
+        """Every compilation waiting to render or rendering, keyed by id: its
+        job, and either how far through it is (percent, what it is doing, time
+        left) or how many jobs are ahead of it. Declared before
+        /compilations/{comp_id} so "progress" is not read as an id."""
+        import json
+
+        d = db()
+        try:
+            rows = d.conn.execute(
+                "SELECT id, status, payload FROM jobs WHERE type = 'compile' "
+                "AND status IN ('queued', 'running') ORDER BY id"
+            ).fetchall()
+            waiting = [r["id"] for r in d.queued_jobs()]
+            paused = queue.is_paused(d)
+        finally:
+            d.close()
+        out: dict[str, dict] = {}
+        for r in rows:
+            try:
+                comp_id = int(json.loads(r["payload"] or "{}")["compilation_id"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            entry: dict = {"job_id": r["id"], "state": r["status"]}
+            if r["status"] == "running":
+                entry.update(worker.progress_snapshot(r["id"]) or {"percent": 0, "label": "Starting…"})
+            else:
+                entry["ahead"] = waiting.index(r["id"]) if r["id"] in waiting else 0
+                entry["queue_paused"] = paused
+            out[str(comp_id)] = entry
+        return out
 
     @app.get("/compilations")
     def list_compilations():
@@ -153,6 +199,38 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
         finally:
             d.close()
 
+    @app.post("/compilations/{comp_id}/segments")
+    def append_compilation_segment(comp_id: int, body: SegmentIn):
+        """Add one segment to the end, from outside the compilation editor:
+        a clip from the Clips tab, or a whole upload from the Library. Done
+        here rather than as a client read-modify-write, so it cannot race an
+        edit the editor is saving at the same moment."""
+        d = db()
+        try:
+            comp = _get(d, comp_id)
+            if comp["status"] in ("queued", "rendering"):
+                raise HTTPException(409, "This compilation is rendering. Wait for it to finish, or cancel it.")
+            if body.start is None and body.end is None:
+                duration = store.library_durations(d, [body.video_id]).get(body.video_id, 0.0)
+                if duration <= 0:
+                    raise HTTPException(400, "That video is not in the library yet, or its length is unknown.")
+                seg = {"video_id": body.video_id, "start": 0.0, "end": round(duration, 2)}
+            else:
+                start = max(0.0, float(body.start or 0))
+                end = float(body.end if body.end is not None else 0)
+                if end <= start:
+                    raise HTTPException(400, "A segment must end after it starts.")
+                seg = {"video_id": body.video_id, "start": start, "end": end}
+            dup = store.duplicate_of((comp["recipe"] or {}).get("segments") or [], seg)
+            if dup is not None:
+                raise HTTPException(409, f"Already in {comp['title']!r} (segment {dup + 1}).")
+            store.append_segment(d, comp_id, seg)
+            comp = _annotate(d, store.get(d, comp_id))
+        finally:
+            d.close()
+        broadcaster.publish({"type": "compilation", "compilation_id": comp_id})
+        return comp
+
     @app.delete("/compilations/{comp_id}")
     def delete_compilation(comp_id: int):
         d = db()
@@ -164,6 +242,52 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
             return {"ok": True}
         finally:
             d.close()
+
+    @app.post("/compilations/{comp_id}/loudness")
+    def measure_loudness(comp_id: int):
+        """How loud each part is and what evening-out will do to it: the
+        measured level, the gain that matches it to the target, and the
+        segment's own trim. Measurements are cached and shared with the
+        render, so measuring here makes the render quicker, not slower."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from compilation import loudness
+        from compilation.render import probe
+
+        d = db()
+        try:
+            comp = _get(d, comp_id)
+            try:
+                parsed = store.validate(d, comp["recipe"], config, require_segments=False)
+                sources = store.sources_for(d, [s.video_id for s in parsed.segments], downloads)
+            except store.recipe_mod.RecipeError as e:
+                raise HTTPException(400, str(e)) from e
+        finally:
+            d.close()
+        cache = store.loudness_cache_path(Path(data_dir))
+
+        jobs: list[tuple[str, int | None, Path, float, float, float]] = []
+        for which in ("intro", "outro"):
+            path = getattr(parsed, which)
+            if path is not None and Path(path).exists():
+                jobs.append((which, None, Path(path), 0.0, probe(Path(path))[0], 1.0))
+        for i, seg in enumerate(parsed.segments):
+            jobs.append(("segment", i, sources[seg.video_id].path, seg.start, seg.duration, seg.volume))
+
+        def one(job):
+            kind, index, path, start, duration, volume = job
+            m = loudness.measure(path, start, duration, cache)
+            return {"kind": kind, "index": index, **loudness.report(m, parsed.loudness_target, volume)}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            parts = list(pool.map(one, jobs))
+        levels = [p["lufs"] for p in parts if p["kind"] == "segment" and not p["silent"]]
+        return {
+            "target": parsed.loudness_target,
+            "parts": parts,
+            # The spread evening-out removes: how far apart the creators were.
+            "spread": round(max(levels) - min(levels), 1) if len(levels) > 1 else 0.0,
+        }
 
     @app.post("/compilations/{comp_id}/render")
     def render_compilation(comp_id: int):
@@ -188,6 +312,41 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
         broadcaster.publish({"type": "queue"})
         return {"job_id": job_id, "started": started}
 
+    @app.post("/compilations/{comp_id}/cancel")
+    def cancel_render(comp_id: int):
+        """Stop a render: a waiting one leaves the queue, a running one stops
+        its FFmpeg pass at once. Either way the compilation goes back to how
+        it was before Render, not to "failed"."""
+        import json
+
+        from core import cancel
+
+        d = db()
+        try:
+            _get(d, comp_id)
+            rows = d.conn.execute(
+                "SELECT id, status, payload FROM jobs WHERE type = 'compile' "
+                "AND status IN ('queued', 'running')"
+            ).fetchall()
+            job = next((r for r in rows
+                        if json.loads(r["payload"] or "{}").get("compilation_id") == comp_id), None)
+            if job is None:
+                store.settle_cancelled(d, comp_id)
+                state = "idle"
+            elif job["status"] == "queued":
+                d.conn.execute("DELETE FROM jobs WHERE id = ?", (job["id"],))
+                d.conn.commit()
+                store.settle_cancelled(d, comp_id)
+                state = "removed"
+            else:
+                cancel.request_cancel(store.cancel_key(comp_id))
+                state = "cancelling"
+        finally:
+            d.close()
+        broadcaster.publish({"type": "queue"})
+        broadcaster.publish({"type": "compilation", "compilation_id": comp_id})
+        return {"state": state}
+
     @app.get("/compilations/{comp_id}/media")
     def compilation_media(comp_id: int, canvas: str = ""):
         """The rendered file; `canvas` (e.g. 4x5 or 4:5) picks one format."""
@@ -203,7 +362,7 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
         path = Path(chosen).resolve()
         if not path.exists() or Path(data_dir).resolve() not in path.parents:
             raise HTTPException(404, "rendered file missing")
-        return FileResponse(path, media_type="video/mp4")
+        return video_response(path)
 
     # ---- versions: every render kept, with the recipe it was made from --------------
 
@@ -213,7 +372,7 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
         path = Path(path_str).resolve()
         if not path.exists() or Path(data_dir).resolve() not in path.parents:
             raise HTTPException(404, "rendered file missing")
-        return FileResponse(path, media_type="video/mp4")
+        return video_response(path)
 
     @app.get("/compilations/{comp_id}/renders")
     def list_compilation_renders(comp_id: int):
@@ -329,7 +488,9 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
     def create_compilation_template(body: TemplateIn):
         d = db()
         try:
-            problem = _problem(d, body.config, require_segments=False)
+            # Only the look is kept, so only the look is checked: a segment whose
+            # video has since left the library must not block saving it.
+            problem = _problem(d, store.recipe_mod.template_of(body.config), require_segments=False)
             if problem:
                 raise HTTPException(400, problem)
             # Names are how templates are picked, so two of the same name
@@ -347,13 +508,38 @@ def install(app, *, config, db, data_dir: Path, worker, broadcaster) -> None:
         try:
             if store.get_template(d, template_id) is None:
                 raise HTTPException(404, "no such template")
-            problem = _problem(d, body.config, require_segments=False)
+            # Only the look is kept, so only the look is checked: a segment whose
+            # video has since left the library must not block saving it.
+            problem = _problem(d, store.recipe_mod.template_of(body.config), require_segments=False)
             if problem:
                 raise HTTPException(400, problem)
             other = store.template_named(d, body.name)
             if other is not None and other != template_id:
                 raise HTTPException(409, f"A template called {body.name.strip()!r} already exists")
             store.save_template(d, body.name, body.config, template_id)
+            return store.get_template(d, template_id)
+        finally:
+            d.close()
+
+    @app.patch("/compilation-templates/{template_id}")
+    def rename_compilation_template(template_id: int, body: TemplateRename):
+        """Rename only. The look is left exactly as stored and not re-checked,
+        so a template pointing at something since removed (a branding profile,
+        an intro file) can still be renamed."""
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "A template needs a name.")
+        d = db()
+        try:
+            if store.get_template(d, template_id) is None:
+                raise HTTPException(404, "no such template")
+            other = store.template_named(d, name)
+            if other is not None and other != template_id:
+                raise HTTPException(409, f"A template called {name!r} already exists")
+            d.conn.execute(
+                "UPDATE compilation_templates SET name = ? WHERE id = ?", (name[:100], template_id)
+            )
+            d.conn.commit()
             return store.get_template(d, template_id)
         finally:
             d.close()

@@ -31,24 +31,50 @@ export function useWoopAccounts(): { ready: boolean; connected: string[] } | nul
   return woop
 }
 
-const MODES: { id: WatchPublish['mode']; label: string; hint: string }[] = [
-  { id: 'off', label: 'Off', hint: 'Only make the clips.' },
-  { id: 'ask', label: 'Ask first', hint: 'Make the clips, then wait for you to press Publish.' },
+/** What happens once a watch's clips are made. Shared with the add form. */
+export const PUBLISH_MODES: { id: WatchPublish['mode']; label: string; hint: string }[] = [
+  { id: 'off', label: 'Keep them', hint: 'Only make the clips. Publish any of them yourself, when you like.' },
+  { id: 'ask', label: 'Ask me first', hint: 'Make the clips, then wait for you to press Publish.' },
   {
     id: 'auto',
-    label: 'Automatic (hands-off)',
+    label: 'Publish automatically',
     hint: 'Publish as soon as the clips are made. Anything that fails is tried again, so it keeps going with nobody at the PC.'
   }
 ]
 
-const BACKLOG: { id: Watch['backlog']; label: string }[] = [
-  { id: 'newest', label: 'Only the newest one' },
-  { id: 'all', label: 'All of them' },
-  { id: 'day', label: 'The ones from the last 24 hours' },
-  { id: 'none', label: 'None, I will pick' }
-]
+/** Radio buttons drawn as one segmented control. */
+export function ModePicker({
+  value,
+  onChange
+}: {
+  value: WatchPublish['mode']
+  onChange: (mode: WatchPublish['mode']) => void
+}): JSX.Element {
+  return (
+    <div className="space-y-2">
+      <p className="label">{t('When the clips are made')}</p>
+      <div className="inline-flex flex-wrap rounded-lg bg-raised/60 p-1 gap-1" role="radiogroup">
+        {PUBLISH_MODES.map((m) => (
+          <button
+            key={m.id}
+            type="button"
+            role="radio"
+            aria-checked={value === m.id}
+            onClick={() => onChange(m.id)}
+            className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
+              value === m.id ? 'bg-accent text-base font-semibold' : 'text-muted hover:text-ink'
+            }`}
+          >
+            {t(m.label)}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-muted">{t(PUBLISH_MODES.find((m) => m.id === value)?.hint ?? '')}</p>
+    </div>
+  )
+}
 
-/** What happens to a watched channel's clips, and to videos it finds late.
+/** What happens to a watch's clips once they are made.
  *
  *  Configured once per channel, so nobody fills in a publish form for every
  *  video. The platforms offered are the ones actually connected to
@@ -77,8 +103,6 @@ export default function WatchPublishSettings({
   const [overrides, setOverrides] = useState<PlatformOverrides>(
     (p.overrides ?? {}) as PlatformOverrides
   )
-  const [backlog, setBacklog] = useState(watch.backlog)
-  const [minMinutes, setMinMinutes] = useState(watch.min_minutes)
   const woop = useWoopAccounts()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -106,9 +130,7 @@ export default function WatchPublishSettings({
           ai_hashtags: aiHashtags,
           footer,
           overrides
-        },
-        backlog,
-        min_minutes: minMinutes
+        }
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)
@@ -123,7 +145,7 @@ export default function WatchPublishSettings({
   // Every change saves itself a moment later: one panel, no button to forget.
   // Only real changes, compared with what was last saved.
   const current = JSON.stringify([
-    mode, platforms, schedule, hashtags, aiHashtags, footer, overrides, backlog, minMinutes
+    mode, platforms, schedule, hashtags, aiHashtags, footer, overrides
   ])
   const lastSaved = useRef(current)
   useEffect(() => {
@@ -137,25 +159,8 @@ export default function WatchPublishSettings({
   }, [current])
 
   return (
-    <div className="mt-3 pt-3 border-t border-raised/60 space-y-4">
-      <div className="space-y-2">
-        <p className="label">{t('When the clips are made')}</p>
-        <div className="flex gap-x-5 gap-y-2 flex-wrap">
-          {MODES.map((m) => (
-            <label key={m.id} className="flex items-center gap-2 cursor-pointer text-sm" title={t(m.hint)}>
-              <input
-                type="radio"
-                name={`publish-mode-${watch.id}`}
-                className="size-4 accent-[#38BDF8]"
-                checked={mode === m.id}
-                onChange={() => setMode(m.id)}
-              />
-              {t(m.label)}
-            </label>
-          ))}
-        </div>
-        <p className="text-xs text-muted">{t(MODES.find((m) => m.id === mode)?.hint ?? '')}</p>
-      </div>
+    <div className="space-y-4">
+      <ModePicker value={mode} onChange={setMode} />
 
       {mode !== 'off' && (
         <>
@@ -249,36 +254,6 @@ export default function WatchPublishSettings({
           </label>
         </>
       )}
-
-      <div className="flex gap-x-6 gap-y-3 flex-wrap items-end">
-        <label className="text-sm space-y-1">
-          <span className="label block">
-            {t('If several videos were posted while Video Factory was not watching, clip')}
-          </span>
-          <select
-            className="input !w-72"
-            value={backlog}
-            onChange={(e) => setBacklog(e.target.value as Watch['backlog'])}
-          >
-            {BACKLOG.map((b) => (
-              <option key={b.id} value={b.id}>
-                {t(b.label)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-sm space-y-1">
-          <span className="label block">{t('Skip videos shorter than (minutes)')}</span>
-          <input
-            type="number"
-            min={0}
-            max={600}
-            className="input !w-24"
-            value={minMinutes}
-            onChange={(e) => setMinMinutes(Math.max(0, Number(e.target.value) || 0))}
-          />
-        </label>
-      </div>
 
       <div className="flex items-center gap-3">
         <span className="text-xs text-muted">

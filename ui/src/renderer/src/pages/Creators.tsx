@@ -1,13 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../lib/api'
-import type {
-  BrandingProfile,
-  CreatorDetail,
-  CreatorSuggestion,
-  CreatorSummary,
-  WatermarkConfig
-} from '../lib/types'
-import WatermarkControls, { DEFAULT_WATERMARK } from '../components/WatermarkControls'
+import { useBrandingProfiles } from '../lib/branding'
+import type { CreatorDetail, CreatorSuggestion, CreatorSummary } from '../lib/types'
+import FlagReview from '../components/FlagReview'
 import { Trash } from '../components/icons'
 
 const PLATFORM_BADGE: Record<string, string> = {
@@ -77,15 +72,7 @@ export default function Creators({
   const [error, setError] = useState('')
   const [addPlatform, setAddPlatform] = useState('youtube')
   const [addChannel, setAddChannel] = useState('')
-  const [brandingProfiles, setBrandingProfiles] = useState<BrandingProfile[]>([])
-  const [wmCreating, setWmCreating] = useState(false)
-  const [wmName, setWmName] = useState('')
-  const [wmConfig, setWmConfig] = useState<WatermarkConfig>(DEFAULT_WATERMARK)
-
-  const loadBranding = (): void => {
-    api.branding().then(setBrandingProfiles).catch(() => setBrandingProfiles([]))
-  }
-  useEffect(loadBranding, [])
+  const { profiles: brandingProfiles } = useBrandingProfiles()
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -301,75 +288,19 @@ export default function Creators({
                 </label>
               </div>
 
+              {/* Chosen on the Branding page, with every other creator's, so
+                  profiles are made and assigned in one place. */}
               <div>
                 <h4 className="text-sm font-semibold mb-2">Default branding</h4>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <select
-                    className="input !w-56 !py-1.5 text-sm"
-                    value={detail.default_branding_id ?? ''}
-                    disabled={busy}
-                    onChange={(e) => {
-                      const v = e.target.value ? Number(e.target.value) : null
-                      void act(() => api.setCreatorBranding(detail.creator_id, v))
-                    }}
+                <p className="text-sm">
+                  {brandingProfiles.find((p) => p.id === detail.default_branding_id)?.name ?? 'None'}
+                  <button
+                    className="ml-3 text-xs text-accent hover:underline"
+                    onClick={() => window.dispatchEvent(new Event('open-branding'))}
                   >
-                    <option value="">None</option>
-                    {brandingProfiles.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                  {!wmCreating && (
-                    <button
-                      className="btn-ghost !py-1 text-xs"
-                      onClick={() => {
-                        setWmCreating(true)
-                        setWmName(`${detail.display_name} branding`)
-                        setWmConfig({ ...DEFAULT_WATERMARK, text: `@${detail.display_name}` })
-                      }}
-                    >
-                      + New branding
-                    </button>
-                  )}
-                  <span className="text-[11px] text-muted">
-                    auto-applied to this creator’s videos
-                  </span>
-                </div>
-
-                {wmCreating && (
-                  <div className="mt-3 border border-raised/60 rounded-lg p-3 space-y-2">
-                    <input
-                      className="input !py-1.5 text-sm !w-64"
-                      value={wmName}
-                      placeholder="Profile name"
-                      onChange={(e) => setWmName(e.target.value)}
-                    />
-                    <WatermarkControls
-                      config={wmConfig}
-                      onChange={(patch) => setWmConfig((c) => ({ ...c, ...patch }))}
-                    />
-                    <div className="flex items-center gap-2">
-                      <button
-                        className="btn-accent !py-1.5"
-                        disabled={busy}
-                        onClick={() =>
-                          act(async () => {
-                            const { id } = await api.createBranding(wmName || 'Branding', wmConfig)
-                            await api.setCreatorBranding(detail.creator_id, id)
-                            loadBranding()
-                            setWmCreating(false)
-                          })
-                        }
-                      >
-                        Create &amp; assign
-                      </button>
-                      <button className="text-xs text-muted hover:text-ink" onClick={() => setWmCreating(false)}>
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                )}
+                    Change on the Branding page
+                  </button>
+                </p>
               </div>
 
               <div>
@@ -586,11 +517,17 @@ export default function Creators({
                 <h4 className="text-sm font-semibold mb-1">Your preferences for this creator</h4>
                 {detail.preferences ? (
                   <p className="text-xs text-muted">
-                    Active — based on {detail.preferences.signals} of your exports/edits, clip
-                    scoring now leans toward what you keep
+                    Active — based on {detail.preferences.signals} of your exports/edits
+                    and {detail.preferences.flags} flagged clip(s), clip scoring now leans toward
+                    what you keep
                     {detail.preferences.preferred_duration != null &&
                       ` (you tend to keep ~${Math.round(detail.preferences.preferred_duration)}s clips)`}
                     .
+                    {(detail.preferences.boundary.lead > 0 || detail.preferences.boundary.tail > 0) &&
+                      ` Clips start ${detail.preferences.boundary.lead}s earlier and end ${detail.preferences.boundary.tail}s later than the raw pick.`}
+                    {detail.preferences.crop && ` Framing defaults to ${detail.preferences.crop}.`}
+                    {detail.preferences.overrides.min_score_delta !== 0 &&
+                      ` Quality bar ${detail.preferences.overrides.min_score_delta > 0 ? '+' : ''}${detail.preferences.overrides.min_score_delta}.`}
                   </p>
                 ) : (
                   <p className="text-xs text-muted">
@@ -599,6 +536,12 @@ export default function Creators({
                   </p>
                 )}
               </div>
+
+              <FlagReview
+                creatorId={detail.creator_id}
+                flagCount={detail.flag_count}
+                onChange={() => void act(async () => undefined)}
+              />
             </div>
           )}
         </div>

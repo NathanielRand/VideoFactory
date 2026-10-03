@@ -191,3 +191,53 @@ def test_twitch_vods_are_never_taken_for_shorts():
     videos = cf.latest("twitch", "streamer", extract=lambda url, *, flat, size=15: listing)
     assert videos[0].short is False
 
+
+
+# ---- playlists ---------------------------------------------------------------
+
+PL = "PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+
+
+@pytest.mark.parametrize("text", [
+    f"https://www.youtube.com/playlist?list={PL}",
+    f"https://www.youtube.com/watch?v=XM04mbymDsE&list={PL}&index=3",
+    PL,
+])
+def test_a_pasted_playlist_is_recognised(text):
+    assert cf.playlist_id(text) == PL
+
+
+@pytest.mark.parametrize("text", ["@somechannel", "https://www.youtube.com/@somechannel", UC,
+                                  "https://www.youtube.com/watch?v=XM04mbymDsE"])
+def test_a_channel_is_not_taken_for_a_playlist(text):
+    assert cf.playlist_id(text) is None
+
+
+def test_a_playlist_resolves_to_its_title():
+    def extract(url, *, flat, size=cf.LISTING_SIZE):
+        assert url == f"https://www.youtube.com/playlist?list={PL}"
+        return {"id": PL, "title": "Best fails"}
+
+    channel = cf.resolve("youtube", f"https://www.youtube.com/playlist?list={PL}", extract=extract)
+    assert (channel.channel_key, channel.name, channel.kind) == (PL, "Best fails", "playlist")
+    assert cf.is_playlist("youtube", PL) and not cf.is_playlist("youtube", UC)
+
+
+@pytest.mark.parametrize("list_id", ["RDXM04mbymDsE", "WL", "LLabcdefghijkl"])
+def test_mixes_and_private_lists_are_refused(list_id):
+    with pytest.raises(ValueError):
+        cf.resolve("youtube", f"https://www.youtube.com/watch?v=XM04mbymDsE&list={list_id}",
+                   extract=lambda *a, **k: {"id": list_id, "title": "x"})
+
+
+def test_a_playlist_is_read_past_the_first_fifteen():
+    # Oldest first: what was added last is at the end, so the whole list is read.
+    ids = [f"vid{n:08d}" for n in range(40)]
+
+    def entries():
+        for vid in ids:
+            yield {"url": f"https://www.youtube.com/watch?v={vid}", "title": vid, "duration": 600}
+
+    videos = cf.latest("youtube", PL, extract=lambda url, *, flat, size: {"entries": entries()})
+    assert [v.video_id for v in videos] == ids
+    assert all(v.channel_key == PL for v in videos)

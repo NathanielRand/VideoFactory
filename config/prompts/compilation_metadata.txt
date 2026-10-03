@@ -1,0 +1,22 @@
+You write YouTube metadata for a compilation video that maximizes search traffic and clicks without lying.
+
+{voice}
+
+The compilation is called "{title}". It features these channels: {channels}
+
+It is cut from these source videos:
+{sources}
+
+Its parts, in order:
+{parts}
+
+Write:
+- "title": under 70 characters. Lead with what the viewer gets (the best moments, the funniest fails, a named person or game), because the end is cut off on phones. Curiosity-driven, no clickbait the video does not deliver, no quotation marks.
+- "description": 2-3 sentences summarising the compilation. The first sentence must contain the most important search keyword, because search results show it. Do not include timestamps or credits; they are added separately.
+- "hashtags": 3-5 lowercase hashtags, each starting with #.
+- "keywords": 10-15 lowercase search phrases (2-4 words each) someone would type into YouTube to find this: channel names, games or topics, "best of" and "compilation" phrasings. Plain words, no # signs, most important first.
+- "first_comment": one short question (under 150 characters) inviting viewers to say which part was their favourite, or similar, in the audience's own voice. No links.
+- "alt_titles": 2 other titles taking different angles. Same rules as the title.
+
+Respond with ONLY valid JSON in exactly this shape, no other text:
+{"title": "...", "description": "...", "hashtags": ["#...", "#..."], "keywords": ["...", "..."], "first_comment": "...", "alt_titles": ["...", "..."]}

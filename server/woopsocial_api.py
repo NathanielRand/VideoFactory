@@ -58,6 +58,9 @@ class BatchIn(BaseModel):
     # flat every_hours behaviour for anything already calling it.
     per_day: int = 0
     gap_hours: float = 1
+    # Exact times, one per clip in order (RFC 3339 with an offset), from the
+    # best-times planner. Wins over every other spacing field when given.
+    times: list[str] = []
 
 
 class PublishIn(BaseModel):
@@ -209,7 +212,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
         d = db()
         try:
             _guard(d)
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
             if clip is None:
                 raise HTTPException(404, "no such clip")
             if not body.title.strip():
@@ -226,6 +229,9 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
             standing = (settings.get("common_description") or "").strip()
             if standing:
                 text = f"{text}\n\n{standing}".strip()
+            from server import publishing_api
+
+            text = publishing_api.with_source(d, clip, text)
             if body.tags:
                 text = f"{text}\n\n{' '.join('#' + t.lstrip('#') for t in body.tags)}".strip()
 
@@ -240,7 +246,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
                 result = publisher.start(
                     Path(clip["path"]),
                     platforms=body.platforms,
-                    title=body.title.strip(),
+                    title=publishing_api.title_for(d, clip, body.title.strip()),
                     text=text,
                     scheduled_for=when,
                     overrides=body.overrides,
@@ -285,7 +291,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
 
             items, warnings = [], []
             for index, clip_id in enumerate(clip_ids):
-                clip = d.get_clip(clip_id)
+                clip = d.get_publishable(clip_id)
                 if clip is None:
                     warnings.append(f"Clip {clip_id} no longer exists.")
                     continue
@@ -308,6 +314,9 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
                     start_at=body.start_at,
                 )
                 for item, when in zip(items, slots, strict=False):
+                    item["publish_at"] = when
+            if body.times:
+                for item, when in zip(items, body.times, strict=False):
                     item["publish_at"] = when
 
             connected: list[str] = []
@@ -371,6 +380,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
                     exclude=body.exclude,
                     per_day=body.per_day,
                     gap_hours=body.gap_hours,
+                    times=body.times,
                 )
             except PublishError as e:
                 raise _fail(e) from e
@@ -425,7 +435,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
             if not rows:
                 raise HTTPException(404, "no such publish")
             clip_id = int(rows[0]["clip_id"])
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
             client = _client()
             publisher = WoopSocialPublisher(client, _project(d, client))
             try:

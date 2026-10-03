@@ -96,15 +96,17 @@ export default function YouTubeCard(): JSX.Element {
     }
   }
 
-  const connect = async (playlists: boolean, add = false): Promise<void> => {
+  const connect = async (playlists: boolean, add = false, all = false): Promise<void> => {
     setConnecting(true)
     setNotice(
       add
         ? t('A browser window has opened - pick the OTHER channel there, not the one already connected.')
-        : t('A browser window has opened - finish signing in there.')
+        : all
+          ? t('A browser window has opened - sign in and tick every permission, choosing the same channel as now.')
+          : t('A browser window has opened - finish signing in there.')
     )
     try {
-      await api.startYoutubeConnect(playlists, add)
+      await api.startYoutubeConnect(playlists, add, all)
     } catch (e) {
       setConnecting(false)
       setNotice(String(e).replace(/^Error:\s*/, ''))
@@ -119,7 +121,18 @@ export default function YouTubeCard(): JSX.Element {
         if (r.state === 'error') {
           setNotice(r.error || t('Connecting failed.'))
         } else {
-          setNotice(t('Connected.'))
+          const missing = (r.not_granted ?? []).map((s) =>
+            s.endsWith('yt-analytics.readonly')
+              ? t('YouTube Analytics')
+              : s.endsWith('/youtube')
+                ? t('Manage videos and playlists')
+                : s.split('/').pop()
+          )
+          setNotice(
+            missing.length
+              ? `${t('Connected, but Google did not grant')}: ${missing.join(', ')}. ${t('On Google’s screen, tick every box before pressing Continue, then try Update permissions again.')}`
+              : t('Connected.')
+          )
           if (r.status) setStatus(r.status)
           else load()
         }
@@ -254,6 +267,59 @@ export default function YouTubeCard(): JSX.Element {
                   {t('uploads left today')}
                 </p>
               )}
+              {/* What this sign-in lets the app do, and one button to grant the
+                  rest. Each new feature that needs more (playlists, removing a
+                  scheduled video, Analytics) is a permission the first
+                  connection may not have asked for. */}
+              <div className="border border-raised/60 rounded-lg p-3 space-y-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-medium text-sm">{t('Permissions')}</span>
+                  <button
+                    className={`ml-auto !py-1 !px-3 text-xs ${
+                      status.playlists_available && status.analytics_available ? 'btn-ghost' : 'btn-accent'
+                    }`}
+                    disabled={busy || connecting}
+                    onClick={() => connect(true, false, true)}
+                    title={t('Reopens Google sign-in to grant every permission the app can use. Pick the same channel.')}
+                  >
+                    {connecting ? t('Waiting for Google…') : t('Update permissions')}
+                  </button>
+                </div>
+                <ul className="text-xs space-y-1">
+                  {(
+                    [
+                      [true, t('Upload videos'), ''],
+                      [true, t('Read your channel and videos'), t('the On YouTube list, thumbnails')],
+                      [
+                        Boolean(status.playlists_available),
+                        t('Manage videos and playlists'),
+                        t('playlists, remove from schedule, delete, replace')
+                      ],
+                      [
+                        Boolean(status.analytics_available),
+                        t('YouTube Analytics (read-only)'),
+                        t('watch time, subscribers, per-day views')
+                      ]
+                    ] as const
+                  ).map(([ok, name, needed]) => (
+                    <li key={name} className="flex items-start gap-2">
+                      <span className={ok ? 'text-success' : 'text-warn'} aria-hidden>
+                        {ok ? '✓' : '○'}
+                      </span>
+                      <span>
+                        <span className={ok ? '' : 'font-medium'}>{name}</span>
+                        {needed && <span className="text-muted"> - {needed}</span>}
+                        {!ok && <span className="text-warn"> ({t('not granted')})</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[11px] text-muted">
+                  {t(
+                    'Analytics also needs the YouTube Analytics API switched on in the same Google Cloud project as your client ID (APIs & Services → Library).'
+                  )}
+                </p>
+              </div>
               <label className="flex items-start gap-2 text-sm">
                 <input
                   type="checkbox"

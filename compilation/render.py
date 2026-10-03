@@ -13,28 +13,43 @@
     3. An IMAGE banner is overlaid on the joined video (one extra pass, only
        when there is one). A TEXT banner cost nothing: it rode along in step 1.
 
-Cancellation lands between parts, like longform assembly.
+Progress is a fraction of the whole render, read from FFmpeg's own
+`-progress` output as each pass runs, with every part weighted by its length,
+so a long segment moves the bar as it encodes instead of in one jump at the
+end. Cancelling stops the FFmpeg pass that is running.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from compilation import credits as credits_mod
+from compilation import loudness
 from compilation.recipe import Recipe, SegmentSpec
 from core import cancel
 from core.binaries import ffmpeg, ffprobe
 from core.paths import discard
 from formats.profiles import tag
-from video.encoding import LOUDNORM, video_encoder_args
+from video.encoding import video_encoder_args
 
 FPS = 30
 Progress = Callable[[int, int, str], None]
+# The fraction of the whole render done (0..1), and what it is doing.
+Fraction = Callable[[float, str], None]
+
+# Joining with hard cuts copies streams and takes a moment; with transitions
+# it re-encodes the whole video, about as long as all the parts together.
+CONCAT_WEIGHT = 0.02
+XFADE_WEIGHT = 1.0
+# An image banner is one more pass over the whole video.
+BANNER_WEIGHT = 0.5
 
 
 @dataclass
@@ -63,6 +78,46 @@ def probe(path: Path) -> tuple[float, bool]:
     duration = float((info.get("format") or {}).get("duration") or 0)
     has_audio = any(s.get("codec_type") == "audio" for s in info.get("streams") or [])
     return duration, has_audio
+
+
+def run_ffmpeg(
+    cmd: list[str],
+    *,
+    duration: float,
+    on_fraction: Callable[[float], None] | None = None,
+    cancel_key: str = "",
+    cwd: Path | None = None,
+) -> tuple[int, str]:
+    """Run FFmpeg, reporting how far through `duration` seconds of output it
+    is, and stopping it if the render is cancelled. Returns (exit code, the
+    tail of stderr).
+
+    `-progress pipe:1` makes FFmpeg print key=value lines to stdout twice a
+    second; out_time_us is how much output it has written. stderr goes to a
+    temporary file rather than a pipe, so a chatty encoder can never fill the
+    pipe and stall while stdout is being read."""
+    full = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(full, stdout=subprocess.PIPE, stderr=err, text=True, cwd=cwd)
+        try:
+            for line in proc.stdout:  # type: ignore[union-attr]
+                if cancel_key:
+                    cancel.check(cancel_key)
+                key, _, value = line.strip().partition("=")
+                if key == "out_time_us" and on_fraction and duration > 0:
+                    try:
+                        done = int(value) / 1_000_000
+                    except ValueError:
+                        continue  # "N/A" before the first frame
+                    on_fraction(min(1.0, max(0.0, done / duration)))
+            proc.wait()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        err.seek(0)
+        tail = err.read()[-4000:].decode("utf-8", errors="replace")
+    return proc.returncode, tail
 
 
 # ---- filter graph pieces --------------------------------------------------------------
@@ -138,6 +193,9 @@ def render_part(
     ass: Path | None = None,
     plate: credits_mod.Plate | None = None,
     plate_window: tuple[float, float] = (0.0, 0.0),
+    on_fraction: Callable[[float], None] | None = None,
+    cancel_key: str = "",
+    loudness_cache: Path | None = None,
 ) -> Path:
     canvas = recipe.size
     graph = []
@@ -174,9 +232,20 @@ def render_part(
     graph.append(f"[vfit]{tail}[vout]")
 
     if has_audio:
-        level = f",{LOUDNORM}" if recipe.normalize_audio else ""
+        # Measured, then one fixed gain to the target, with the segment's own
+        # volume as a trim on top (compilation/loudness.py). Without evening
+        # out, the volume is applied as it is, limited only if it boosts.
+        if recipe.normalize_audio:
+            m = loudness.measure(source, start, duration, loudness_cache)
+            level = loudness.audio_chain(
+                loudness.gain_db(m, recipe.loudness_target, loudness.trim_db(volume))
+            )
+        elif volume > 1.0:
+            level = loudness.audio_chain(loudness.trim_db(volume))
+        else:
+            level = f"volume={volume:.3f}"
         graph.append(
-            f"[0:a]aresample=48000,aformat=channel_layouts=stereo,volume={volume:.3f}{level},"
+            f"[0:a]aresample=48000,aformat=channel_layouts=stereo,{level},"
             f"aresample=48000[aout]"
         )
         audio_map = "[aout]"
@@ -201,9 +270,10 @@ def render_part(
         "-movflags", "+faststart",
         str(output.resolve()),
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=ass.parent if ass else None)
-    if r.returncode != 0:
-        raise RuntimeError(f"rendering {output.name} failed:\n{r.stderr[-1500:]}")
+    code, stderr = run_ffmpeg(cmd, duration=duration, on_fraction=on_fraction,
+                              cancel_key=cancel_key, cwd=ass.parent if ass else None)
+    if code != 0:
+        raise RuntimeError(f"rendering {output.name} failed:\n{stderr[-1500:]}")
     return output
 
 
@@ -241,7 +311,15 @@ def xfade_graph(durations: list[float], transition: str, t: float) -> str:
     return ";".join(graph)
 
 
-def join_xfade(parts: list[Path], output: Path, transition: str, t: float) -> Path:
+def join_xfade(
+    parts: list[Path],
+    output: Path,
+    transition: str,
+    t: float,
+    *,
+    on_fraction: Callable[[float], None] | None = None,
+    cancel_key: str = "",
+) -> Path:
     durations = [probe(p)[0] for p in parts]
     inputs = []
     for p in parts:
@@ -255,9 +333,10 @@ def join_xfade(parts: list[Path], output: Path, transition: str, t: float) -> Pa
         "-fps_mode", "cfr", "-movflags", "+faststart",
         str(output.resolve()),
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"joining with {transition} transitions failed:\n{r.stderr[-1500:]}")
+    length = sum(durations) - t * (len(durations) - 1)
+    code, stderr = run_ffmpeg(cmd, duration=length, on_fraction=on_fraction, cancel_key=cancel_key)
+    if code != 0:
+        raise RuntimeError(f"joining with {transition} transitions failed:\n{stderr[-1500:]}")
     return output
 
 
@@ -290,7 +369,8 @@ def _segment_ass(
             wrote = True
             shown = plate
     if banner_text:
-        watermark.ensure_text(ass if wrote else None, ass, banner_text, recipe.size, seg.duration)
+        # No CTA here: it would pop up again on every segment.
+        watermark.ensure_text(ass if wrote else None, ass, banner_text, recipe.size, seg.duration, with_cta=False)
         wrote = True
     return (ass if wrote else None), shown
 
@@ -318,9 +398,15 @@ def render(
     banner_assets: Path | None = None,
     cancel_key: str = "",
     on_progress: Progress | None = None,
+    on_fraction: Fraction | None = None,
+    loudness_cache: Path | None = None,
 ) -> Path:
     """Render the recipe to `output`. `banner` is a resolved watermark config
-    (the recipe's {"profile_id"} already looked up by the caller)."""
+    (the recipe's {"profile_id"} already looked up by the caller).
+
+    `on_progress` hears each step as it starts (step, steps, label);
+    `on_fraction` hears the fraction of the whole render done, many times a
+    step, for a progress bar."""
     from video_editor import watermark
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -337,11 +423,40 @@ def render(
         plan.append(("outro", {"path": recipe.outro}))
     total = len(plan) + 1
 
+    # How long each part is, so each moves the bar in proportion. Intro and
+    # outro are probed here once and the result reused below.
+    probed: dict[int, tuple[float, bool]] = {}
+    weights: list[float] = []
+    for i, (kind, item) in enumerate(plan):
+        if kind == "segment":
+            weights.append(max(0.1, item["seg"].duration))
+        else:
+            probed[i] = probe(item["path"])
+            weights.append(max(0.1, probed[i][0]))
+    length = sum(weights)
+    joining = XFADE_WEIGHT if recipe.transition != "none" and len(plan) > 1 else CONCAT_WEIGHT
+    weights.append(length * joining)
+    image_banner = bool(banner and banner_assets is not None and watermark.has_image(banner, banner_assets))
+    if image_banner:
+        weights.append(length * BANNER_WEIGHT)
+    whole = sum(weights)
+    state = {"label": ""}
+
+    def report(i: int, within: float) -> None:
+        if on_fraction:
+            done = sum(weights[:i]) + weights[i] * within
+            on_fraction(min(1.0, done / whole), state["label"])
+
     def step(i: int, label: str) -> None:
         if cancel_key:
             cancel.check(cancel_key)
+        state["label"] = label
         if on_progress:
             on_progress(i, total, label)
+        report(i, 0.0)
+
+    def within(i: int) -> Callable[[float], None]:
+        return lambda f: report(i, f)
 
     try:
         plate = _credit_plate(recipe, banner_assets)
@@ -362,11 +477,14 @@ def render(
                     volume=seg.volume, blur_regions=seg.blur_regions,
                     ass=ass, plate=seg_plate,
                     plate_window=credits_mod.show_window(recipe.credits, seg.duration),
+                    on_fraction=within(i), cancel_key=cancel_key, loudness_cache=loudness_cache,
                 )
             else:
                 step(i, kind.capitalize())
-                duration, has_audio = probe(item["path"])
-                render_part(item["path"], part, start=0.0, duration=duration, recipe=recipe, has_audio=has_audio)
+                duration, has_audio = probed[i]
+                render_part(item["path"], part, start=0.0, duration=duration, recipe=recipe,
+                            has_audio=has_audio, on_fraction=within(i), cancel_key=cancel_key,
+                            loudness_cache=loudness_cache)
             parts.append(part)
 
         step(len(plan), "Joining")
@@ -374,14 +492,19 @@ def render(
         if recipe.transition == "none" or len(parts) == 1:
             join_concat(parts, joined, work)
         else:
-            join_xfade(parts, joined, recipe.transition, recipe.transition_duration)
+            join_xfade(parts, joined, recipe.transition, recipe.transition_duration,
+                       on_fraction=within(len(plan)), cancel_key=cancel_key)
 
-        if banner and banner_assets is not None and watermark.has_image(banner, banner_assets):
+        if image_banner:
+            state["label"] = "Adding the banner"
+            report(len(plan) + 1, 0.0)
             watermark.apply_image(joined, banner, recipe.size, banner_assets)
 
         joined.replace(output)
         if on_progress:
             on_progress(total, total, "Done")
+        if on_fraction:
+            on_fraction(1.0, "Done")
         return output
     finally:
         for f in work.glob("*"):
@@ -402,13 +525,19 @@ def render_all(
     banner_assets: Path | None = None,
     cancel_key: str = "",
     on_progress: Progress | None = None,
+    on_fraction: Fraction | None = None,
     parallel: int = 2,
+    loudness_cache: Path | None = None,
 ) -> dict[str, Path]:
     """Render every format in recipe.outputs. Returns {canvas: path}. Formats
     render in parallel (each is its own chain of GPU encodes); a single
     format is written as '<base>.mp4', several as '<base> 9x16.mp4' etc."""
     canvases = recipe.outputs or [recipe.canvas]
     total = len(canvases)
+    # Formats render side by side; the bar is all of them together, so it
+    # never races ahead with the quickest one.
+    done = dict.fromkeys(canvases, 0.0)
+    lock = threading.Lock()
 
     def one(canvas: str) -> tuple[str, Path]:
         name = f"{base_name}.mp4" if total == 1 else f"{base_name} {tag(canvas)}.mp4"
@@ -417,10 +546,19 @@ def render_all(
             if on_progress:
                 on_progress(i, n, label if total == 1 else f"[{canvas}] {label}")
 
+        def fraction(f: float, label: str) -> None:
+            if not on_fraction:
+                return
+            with lock:
+                done[canvas] = f
+                overall = sum(done.values()) / total
+            on_fraction(overall, label if total == 1 else f"[{canvas}] {label}")
+
         path = render(
             replace(recipe, canvas=canvas), sources, out_dir / name,
             banner=banner, banner_assets=banner_assets,
-            cancel_key=cancel_key, on_progress=progress,
+            cancel_key=cancel_key, on_progress=progress, on_fraction=fraction,
+            loudness_cache=loudness_cache,
         )
         return canvas, path
 

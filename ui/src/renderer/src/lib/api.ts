@@ -1,8 +1,10 @@
 import type {
+  Activity,
   AIModel,
   AIStatus,
   AutomationActivity,
   AutomationStatus,
+  BrandingKind,
   BrandingProfile,
   CaptionLine,
   CaptionStyle,
@@ -13,7 +15,9 @@ import type {
   FilterName,
   Job,
   JobOptions,
+  ModelRuntime,
   ModelsInfo,
+  PerformanceMode,
   Preflight,
   PublishPlanItem,
   QueueSnapshot,
@@ -21,15 +25,20 @@ import type {
   Settings,
   SystemStats,
   Translation,
+  LibraryItem,
   Video,
+  LearningProposal,
   Watch,
   WatchItem,
   WatchPlatform,
   WatchPublish,
+  WatchActions,
+  WatchBackfill,
   WatermarkConfig,
   Word
 } from './types'
 import type {
+  ChannelVideo,
   Playlist,
   PublishJobRow,
   PublishRecord,
@@ -59,6 +68,15 @@ export const api = {
   /** Can this install actually make a clip? FFmpeg, Ollama, model, GPU, disk. */
   preflight: () => request<Preflight>('/health/preflight'),
   systemStats: () => request<SystemStats>('/system/stats'),
+  activity: () => request<Activity>('/system/activity'),
+  setPerformanceMode: (mode: PerformanceMode) =>
+    request<{ mode: PerformanceMode }>('/system/mode', {
+      method: 'POST',
+      body: JSON.stringify({ mode })
+    }),
+  modelRuntime: () => request<ModelRuntime>('/models/runtime'),
+  modelRuntimeAction: (action: 'start' | 'stop' | 'load' | 'unload') =>
+    request<ModelRuntime>(`/models/runtime/${action}`, { method: 'POST' }),
 
   feedbackDiagnostics: (videoId?: string) =>
     request<Record<string, unknown>>(
@@ -108,7 +126,7 @@ export const api = {
   /** Import a file from this computer and queue it. Takes the same options as
    *  a pasted link, so an upload can be set up exactly like a download. */
   addLocalVideo: (opts: { path: string; title?: string; channel?: string; platform?: string } & JobOptions) =>
-    request<{ job_id: number; video_id: string }>('/videos/local', {
+    request<{ job_id: number | null; video_id: string; imported?: boolean }>('/videos/local', {
       method: 'POST',
       body: JSON.stringify({
         path: opts.path,
@@ -121,9 +139,12 @@ export const api = {
         podcast: opts.podcast ?? null,
         longform: opts.longform ?? null,
         watermark_profile_id: opts.watermark_profile_id ?? null,
+        no_watermark: opts.no_watermark ?? null,
         filter: opts.filter ?? null,
         min_score: opts.min_score ?? null,
         max_clips: opts.max_clips ?? null,
+        import_only: opts.import_only ?? null,
+        add_to_compilation: opts.add_to_compilation ?? null,
         force: opts.force ?? false
       })
     }),
@@ -159,7 +180,7 @@ export const api = {
    *  point of staging, so there is no batch-wide option set here. */
   createJobsBatch: (items: ({ url: string } & JobOptions)[]) =>
     request<{
-      created: { url: string; job_id: number; video_id: string }[]
+      created: { url: string; job_id: number | null; video_id: string; already_in_library?: boolean }[]
       skipped: { url: string; reason: string; detail?: string; video_id?: string }[]
     }>('/jobs/batch', {
       method: 'POST',
@@ -200,10 +221,46 @@ export const api = {
     }),
   deleteVideo: (videoId: string) =>
     request<{ deleted: string }>(`/videos/${videoId}`, { method: 'DELETE' }),
+  /** The reasons a clip can be flagged for, grouped for layout. */
+  flagReasons: () =>
+    request<{ reasons: { id: string; label: string; group: 'moment' | 'framing' | 'other' }[] }>(
+      '/flags/reasons'
+    ),
+  /** Flag a clip that came out wrong; the server keeps what it decided for review. */
+  flagClip: (clipId: number, reasons: string[], note: string) =>
+    request<{
+      id: number
+      folder: string
+      /** What this flag has changed for the creator's next clips, what a few more would, and what is only stored. */
+      learning: { applied: string[]; pending: string[]; recorded: string[] }
+      /** Whether Re-cut has anything to change on this clip, and what. */
+      recut: { available: boolean; changes: string[] }
+    }>(`/clips/${clipId}/flag`, {
+      method: 'POST',
+      body: JSON.stringify({ reasons, note })
+    }),
+  /** Fix this clip from its own open flags (edges, framing) and render it again. */
+  recutClip: (clipId: number) =>
+    request<{ job_id: number; changes: string[] }>(`/clips/${clipId}/recut`, { method: 'POST' }),
+  /** Ask the AI to read this creator's flags and notes and propose changes. */
+  reviewFlags: (creatorId: number) =>
+    request<{ created: LearningProposal[]; skipped: number; reason: string }>(
+      `/creators/${creatorId}/review`,
+      { method: 'POST' }
+    ),
+  proposals: (creatorId: number) =>
+    request<{ proposals: LearningProposal[] }>(`/creators/${creatorId}/proposals`),
+  approveProposal: (id: number) =>
+    request<LearningProposal>(`/proposals/${id}/approve`, { method: 'POST' }),
+  /** Dismiss a suggestion, or take back one that was approved. */
+  rejectProposal: (id: number) =>
+    request<LearningProposal>(`/proposals/${id}/reject`, { method: 'POST' }),
   deleteClip: (clipId: number) =>
     request<{ deleted: number; bytes_freed: number }>(`/clips/${clipId}`, { method: 'DELETE' }),
 
   videos: () => request<Video[]>('/videos'),
+  /** Every upload and where it has been used (clips, posts, compilations). */
+  library: () => request<LibraryItem[]>('/library'),
   clips: (videoId: string) => request<Clip[]>(`/videos/${videoId}/clips`),
   patchClip: (
     id: number,
@@ -211,10 +268,20 @@ export const api = {
       title?: string
       description?: string
       hashtags?: string[]
+      keywords?: string[]
+      first_comment?: string
+      /** The YouTube playlist this clip joins when published there; '' clears. */
+      playlist_id?: string
       exported?: boolean
     }
   ) =>
     request<Clip>(`/clips/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  /** Choose (or clear with '') the YouTube playlist for many clips at once. */
+  setClipsPlaylist: (clipIds: number[], playlistId: string) =>
+    request<{ updated: number }>('/clips/playlist', {
+      method: 'POST',
+      body: JSON.stringify({ clip_ids: clipIds, playlist_id: playlistId })
+    }),
   captions: (id: number) => request<{ lines: CaptionLine[] }>(`/clips/${id}/captions`),
   saveCaptions: (id: number, lines: CaptionLine[]) =>
     request<{ job_id: number }>(`/clips/${id}/captions`, {
@@ -279,6 +346,8 @@ export const api = {
       body: JSON.stringify({ clip_ids: clipIds, folder })
     }),
   mediaUrl: (clipId: number) => `${API_BASE}/media/${clipId}`,
+  /** A small still of the clip, made once and kept: what a grid card shows. */
+  posterUrl: (clipId: number) => `${API_BASE}/media/${clipId}/poster`,
   clipWords: (clipId: number) => request<{ words: Word[] }>(`/clips/${clipId}/words`),
   previewClip: (
     clipId: number,
@@ -436,10 +505,10 @@ export const api = {
     request<{ wiped: number }>(`/creators/${creatorId}/memory`, { method: 'DELETE' }),
 
   branding: () => request<BrandingProfile[]>('/branding'),
-  createBranding: (name: string, config: WatermarkConfig) =>
+  createBranding: (name: string, config: WatermarkConfig, kind: BrandingKind = 'clip') =>
     request<{ id: number }>('/branding', {
       method: 'POST',
-      body: JSON.stringify({ name, config })
+      body: JSON.stringify({ name, config, kind })
     }),
   updateBranding: (id: number, name: string, config: WatermarkConfig) =>
     request<{ id: number }>(`/branding/${id}`, {
@@ -481,16 +550,18 @@ export const api = {
   /** Starts the browser consent on a background thread; poll pollYoutubeConnect. */
   /** Each consent ADDS a channel. To publish to a second channel, run this
    *  again and pick the other one on Google's channel chooser. */
-  startYoutubeConnect: (playlists: boolean, add = false) =>
+  startYoutubeConnect: (playlists: boolean, add = false, allPermissions = false) =>
     request<{ state: string }>('/youtube/connect', {
       method: 'POST',
-      body: JSON.stringify({ playlists, add })
+      body: JSON.stringify({ playlists, add, all_permissions: allPermissions })
     }),
   pollYoutubeConnect: () =>
     request<{
       state: string
       channel?: YouTubeChannel | null
       error?: string
+      /** Permissions that were asked for and did not come back from Google. */
+      not_granted?: string[]
       status?: YouTubeStatus
     }>('/youtube/connect'),
   /** Omit channelId to disconnect every channel. */
@@ -508,6 +579,13 @@ export const api = {
   youtubeCategories: (region: string) =>
     request<{ categories: VideoCategory[] }>(`/youtube/categories?region=${region}`),
   youtubePlaylists: () => request<{ playlists: Playlist[] }>('/youtube/playlists'),
+  /** The channel's newest videos and where each stands on YouTube. */
+  youtubeChannelVideos: (opts: { channelId?: string; limit?: number; fresh?: boolean } = {}) => {
+    const q = new URLSearchParams({ limit: String(opts.limit ?? 50) })
+    if (opts.channelId) q.set('channel_id', opts.channelId)
+    if (opts.fresh) q.set('fresh', 'true')
+    return request<{ channel_id: string | null; videos: ChannelVideo[] }>(`/youtube/channel-videos?${q}`)
+  },
   youtubeUploads: (limit = 20) =>
     request<{ uploads: PublishRecord[] }>(`/youtube/uploads?limit=${limit}`),
 
@@ -591,7 +669,7 @@ export const api = {
       tags?: string[]
       first_comment?: string
       thumbnail?: boolean
-      overrides?: Record<string, Record<string, string>>
+      overrides?: Record<string, Record<string, unknown>>
       scheduled_date?: string
       timezone?: string
       add_to_queue?: boolean
@@ -618,6 +696,10 @@ export const api = {
     start_at?: string
     timezone?: string
     add_to_queue?: boolean
+    /** Exact times, one per clip, from best times. Wins over the rest. */
+    times?: string[]
+    /** Per-platform fields, e.g. YouTube's disclosure answers. */
+    overrides?: Record<string, Record<string, unknown>>
   }) =>
     request<{
       started: { clip_id: number; request_id: string }[]
@@ -657,7 +739,7 @@ export const api = {
       title: string
       description?: string
       tags?: string[]
-      overrides?: Record<string, Record<string, string>>
+      overrides?: Record<string, Record<string, unknown>>
       scheduled_date?: string
     }
   ) =>
@@ -682,8 +764,12 @@ export const api = {
     /** Clip id to the platforms it should skip, for the handful a stricter
      *  platform should not get. */
     exclude?: Record<string, string[]>
+    /** Exact times, one per clip, from best times. Wins over the rest. */
+    times?: string[]
     /** Added to every clip in the run, on top of each clip's own. */
     hashtags?: string[]
+    /** Per-platform fields, e.g. {youtube: {madeForKids: false}}. */
+    overrides?: Record<string, Record<string, unknown>>
   }) =>
     request<{
       started: { clip_id: number; request_id: string; scheduled_for: string }[]
@@ -739,7 +825,9 @@ export const api = {
     platform: WatchPlatform,
     channel: string,
     publish?: Partial<WatchPublish>,
-    options?: Partial<JobOptions>
+    options?: Partial<JobOptions>,
+    actions?: WatchActions,
+    backfill?: Partial<WatchBackfill>
   ) =>
     request<Watch & { created: boolean }>('/automation/watches', {
       method: 'POST',
@@ -747,7 +835,9 @@ export const api = {
         platform,
         channel,
         ...(publish ? { publish } : {}),
-        ...(options ? { options } : {})
+        ...(options ? { options } : {}),
+        ...(actions ? { actions } : {}),
+        ...(backfill ? { backfill } : {})
       })
     }),
   patchWatch: (
@@ -757,6 +847,7 @@ export const api = {
       preset?: string
       options?: Partial<JobOptions> & { clear?: string[] }
       publish?: WatchPublish
+      actions?: WatchActions
       backlog?: Watch['backlog']
       min_minutes?: number
     }

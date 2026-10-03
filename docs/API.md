@@ -510,6 +510,33 @@ Supports range requests, so it can be the `src` of a `<video>` element and seek
 properly. `404` if the clip or its file is gone. **`HEAD` returns 405**. Use a
 one-byte range request if you only want the size.
 
+### Thumbnails: made once, from what was said
+
+`POST /thumbnails/{id}/copy` returns up to three text sets, quoted from the
+clip's peak: the most charged line (with the next as its supporting line), a
+two-sided exchange when two nearby lines read as one (`"exchange": true`), and
+another line. The `badge` is one of the always-on hashtags without its `#` (then
+the clip's own hashtag, a keyword, the channel), never a model's genre word. The
+model, when there is one, only ranks the quotes; with none, the same lines are
+ranked by a scorer (`analysis/peaks.py`). `"source"` says `quotes` or `model`
+(the older path, for compilations and clips with no transcript).
+
+A clip gets its first thumbnail automatically, once. `GET /thumbnails/pending?ids=`
+lists the clips that are new and have never had one; a re-rendered clip is never
+in it, its thumbnail moves to its new id, and one deleted on purpose stays gone.
+Regenerating is always something a person asks for.
+
+### `GET /media/{clip_id}/poster`
+
+A small JPEG still of the clip (`?w=` sets the width, 120 to 720, default 360),
+made on first request and kept in `<data_dir>/posters`. It is what a grid card
+shows instead of a live `<video>`. `404` if the clip or its file is gone.
+
+Video responses are read in 1 MB pieces, and playback requests briefly lower
+Python's thread switch interval (a lease that is handed back about 1.5 s after
+the last one), so a clip keeps streaming while the pipeline is busy in the same
+process (see `server/media.py`).
+
 ### `GET /clips/{clip_id}/captions`
 
 ```json
@@ -519,6 +546,50 @@ one-byte range request if you only want the size.
 Clip-relative seconds. `GET /clips/{clip_id}/words` is the same data at word
 granularity as `{"words": [{"start", "end", "word"}]}`, and returns
 `{"words": []}` when the transcript file has been cleaned up.
+
+### Flagging a clip, and what it teaches
+
+`POST /clips/{clip_id}/flag` with `{"reasons": ["starts_late"], "note": "..."}`
+(reasons from `GET /flags/reasons`) stores the flag with a snapshot of what the
+pipeline decided. The reply says what it has done so far:
+
+```json
+{"id": 4, "folder": "...", "learning": {
+  "applied": ["Future clips from this creator now start earlier (0.5s), from 3 flags."],
+  "pending": ["2 more 'Ends too early' flag(s) and future clips will end later."],
+  "recorded": []}}
+```
+
+Flags change **future runs for that creator** once there are enough of them
+(three of a kind; five for `not_a_moment`), never the flagged clip.
+`POST /clips/{clip_id}/recut` fixes the flagged clip itself from its own open
+flags (edges move by 1.5s onto whole sentences; framing follows `needs_wide`,
+`needs_tight`, `crop_jumps`), queues a render, and resolves the flags:
+`{"job_id": 12, "changes": ["starts 1.5s earlier"]}`. `409` when there is
+nothing to act on.
+
+### Reviewing a creator's flags
+
+`POST /creators/{id}/review` asks the model to read that creator's recent flags
+and notes and propose changes from a fixed menu: `pad_lead`, `pad_tail`
+(seconds), `crop` (`letterbox`, `center`, `track`), `min_score_delta` (-10..10)
+and `guidance` (one sentence for the moment-picking prompt). It needs at least
+two flags (`409` otherwise) and returns `{"created": [...], "skipped": 0,
+"reason": ""}`. Proposals are **pending** and change nothing until approved:
+`GET /creators/{id}/proposals[?status=]`, `POST /proposals/{id}/approve`,
+`POST /proposals/{id}/reject` (also takes back an approved one). The creator
+detail (`GET /creators/{id}`) carries `flag_count`, and `preferences` now also
+has `boundary`, `crop` and `overrides`.
+
+### Checking a rater against what you kept
+
+`python main.py eval [--creator ID] [--rubric]` scores how well the stored clip
+score, each signal, and (with `--rubric`) a live rubric grade agree with the
+clips you kept, published with above-median views, or flagged "not a good
+moment". It says so when there are too few labels (under 8 of each) to trust.
+Settings that shape it: `scoring.rubric` (`off` / `shadow` / `on`),
+`llm.stage_models` (a model per job) and `llm.vision_model` (a local model that
+reads images, for thumbnail frame choice).
 
 ## Models
 
@@ -989,29 +1060,53 @@ less than 5 minutes.
  "publish": {"mode": "auto", "platforms": ["youtube", "tiktok"]}}
 ```
 
-`channel` accepts a channel link, an `@handle` or a bare name. `publish` is
-optional and takes the same fields as the watch's `publish` below, so a
-hands-off channel is one request. A YouTube channel
+`channel` accepts a channel link, an `@handle` or a bare name, or, on
+YouTube, a playlist link (anything with `list=`, or a bare `PL...` id), which
+is watched the same way and comes back with `"kind": "playlist"`. Mixes and
+private lists (Watch later, Liked videos) are refused. `publish` and `actions`
+are optional and take the same fields as the watch's below, so a hands-off
+channel is one request. A YouTube channel
 is resolved to its `UC...` id, so the handle and the id name the same watch.
 Returns the watch plus `"created": true`, or `false` if the channel was already
 watched. A channel that can't be found or read returns 400 with a message a
 person can read.
 
 The first look records everything already on the channel with status
-`earlier`. Adding a channel never queues its back catalogue.
+`earlier`. Adding a channel never queues its back catalogue, unless asked to
+catch up with `backfill`:
+
+```json
+{"platform": "youtube", "channel": "https://www.youtube.com/playlist?list=PL...",
+ "backfill": {"count": 25, "since": "", "newest_at": "bottom"}}
+```
+
+| Field | Notes |
+|---|---|
+| `backfill.count` | Take the latest this many (up to 1000). With `since`, the most to look through; without either, nothing is taken. |
+| `backfill.since` | `"YYYY-MM-DD"`: only videos posted on or after that day. Undated videos (a playlist's listing has no dates) are dated by the readiness check each video gets before it is queued, and passed over then if older. |
+| `backfill.newest_at` | Playlists only: `bottom` (YouTube's default) or `top`, the end new videos are added to, since the listing cannot say. |
+
+Each video taken is checked before anything downloads: one another watch
+already has is not taken twice; one already clipped is skipped (or, for a watch
+that adds to a compilation, added from the Library); and for a watch that only
+imports, one already in the Library with its file on disk is not downloaded
+again. Those show as `complete` with `imported: true` and a `reason`.
 
 ### `GET /automation/watches` · `PATCH` / `DELETE /automation/watches/{id}`
 
 ```json
 {
   "id": 1, "platform": "youtube", "channel_key": "UC0123456789abcdefABCDEF",
-  "name": "Some Channel", "enabled": true,
+  "kind": "channel", "name": "Some Channel", "enabled": true,
   "preset": "standard", "options": {"max_clips": 5},
   "publish": {"mode": "auto", "platforms": ["youtube", "tiktok"], "per_day": 5,
               "gap_hours": 1, "day_start": "09:00",
               "hashtags": ["creatorname", "twitch"], "ai_hashtags": true, "footer": "",
               "overrides": {"youtube": {"privacy": "private"},
                             "tiktok": {"privacyLevel": "PUBLIC_TO_EVERYONE", "allowDuet": false}}},
+  "actions": {"clips": true, "compile": true,
+              "compilation": {"compilation_id": 4, "what": "clips", "max_clips": 3,
+                              "title": "Best of the week"}},
   "backlog": "newest", "min_minutes": 3,
   "last_ok_poll_at": 1790190000.0, "next_poll_at": 1790190900.0, "last_error": "",
   "counts": {"baseline": 15, "queued": 2, "skipped": 1},
@@ -1024,7 +1119,9 @@ app's Creators page shows. It is made when the channel is added, so
 it is there before the first video, and every video the watch queues is
 learned into it, whatever the download calls the channel. `videos` counts the
 finished ones and `facts` what has been learned from them (facts and
-storylines). It is `null` for a YouTube channel whose name could not be read.
+storylines). It is `null` for a YouTube channel whose name could not be read,
+and for a playlist, which may hold many creators: each of its videos is
+tagged by its own channel as it is processed.
 Removing the watch keeps the profile and what it learned.
 
 PATCH takes any of the following, and changes only what it is sent:
@@ -1044,8 +1141,12 @@ PATCH takes any of the following, and changes only what it is sent:
 | `publish.ai_hashtags` | `false` leaves out the hashtags the AI chose, so only the ones above are used. |
 | `publish.footer` | Optional text under each caption. Links and "clipped from" wording can get TikTok posts flagged as unoriginal content. |
 | `publish.overrides` | Per platform, the fields WoopSocial takes: `youtube.privacy` (`public`, `unlisted`, `private`); `tiktok.privacyLevel` (`PUBLIC_TO_EVERYONE`, `FOLLOWER_OF_CREATOR`, `MUTUAL_FOLLOW_FRIENDS`, `SELF_ONLY`) and the booleans `allowComment`, `allowDuet`, `allowStitch`, `isYourBrand`, `isBrandedContent`; `instagram.postType` (`REEL`, `STORY`); `facebook.postType` (`REEL`, `VIDEO`, `STORY`); `pinterest.pinterestBoardId`. |
+| `actions.clips` | `true` (the default): make clips of each new video, and publish them as `publish` says. `false`: bring it into the Library without clips, and publish nothing. |
+| `actions.compile` | `true`: once a video is done, add it to `actions.compilation`, once. Only videos that finish while this is on are added. |
+| `actions.compilation.compilation_id` | The compilation to add to. Instead, send `new_title` to make one (an empty `new_title`, or neither field, names it after the watch); the reply carries the new id. `title` in the reply is `null` once the compilation has been deleted. |
+| `actions.compilation.what` | `whole` (the default): each video start to end. `clips`: its best `max_clips` clips (`0` is all), in the order they happen; needs `actions.clips` on, or the request is refused with 400. |
 | `backlog` | What to do when several videos appeared while Video Factory wasn't watching: `newest` (default), `all`, `day` (the last 24 hours) or `none`. Videos that aren't taken are listed as `skipped`, never dropped. |
-| `min_minutes` | Shorter videos (Shorts) are skipped. |
+| `min_minutes` | Shorter videos (Shorts) are skipped, on a watch that only makes clips. One that adds to a compilation or only imports takes them. |
 
 `DELETE` stops watching and forgets the watch's list. Jobs and clips it
 produced stay in the library.

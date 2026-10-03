@@ -69,6 +69,58 @@ def save_ledger(db, ledger) -> None:
     db.set_flag(QUOTA_KEY, json.dumps(ledger.as_dict()))
 
 
+def retire_video(db, video_id: str, reason: str, *, forget_upload: bool) -> None:
+    """Close this app's records of a YouTube video that was taken off the
+    schedule or deleted, so the clip can be published again.
+
+    Rows that point at it become 'skipped' (a skip holds nothing, which is
+    what lets a retry through) and lose their go-live time. A direct upload
+    also marked its clip 'uploaded', which keeps it out of "ready to post":
+    back to rendered. `forget_upload` drops the uploads row too, for a video
+    that no longer exists at all."""
+    from publish.youtube_status import video_id_from
+
+    # First: the clip status hangs off the uploads row this may delete.
+    db.conn.execute(
+        "UPDATE clips SET status = 'rendered' WHERE status = 'uploaded' AND id IN "
+        "(SELECT clip_id FROM uploads WHERE youtube_id = ?)", (video_id,))
+    for r in db.conn.execute(
+        "SELECT clip_id, platform, post_id, post_url FROM clip_publishes WHERE platform = 'youtube'"
+    ).fetchall():
+        if video_id in (video_id_from(r["post_url"] or ""), video_id_from(r["post_id"] or "")):
+            db.record_clip_publish(r["clip_id"], r["platform"], {
+                "state": "skipped", "error": reason, "scheduled_for": ""})
+    if forget_upload:
+        db.conn.execute("DELETE FROM uploads WHERE youtube_id = ?", (video_id,))
+    else:
+        # The video stays on YouTube, private, with no go-live time. Keeping the
+        # old time is what left a cancelled post sitting on the schedule list.
+        # 'unscheduled' keeps the link to the video but means it is not posted:
+        # without it the private leftover counts as published and the clip
+        # drops out of "ready to post".
+        db.conn.execute(
+            "UPDATE uploads SET publish_at = '', state = 'unscheduled', error = '' WHERE youtube_id = ?",
+            (video_id,))
+    db.conn.commit()
+
+
+def spend(db, method: str, count: int = 1) -> int:
+    """Count `count` calls of a YouTube method against today's units. Called
+    where a call is really made (a cache hit spends nothing). Advisory, like
+    the whole ledger: YouTube's own answer is the truth."""
+    ledger = load_ledger(db)
+    cost = ledger.record_call(method, count)
+    save_ledger(db, ledger)
+    return cost
+
+
+def spend_read(db, videos: int) -> int:
+    """Units for reading `videos` of a channel's uploads."""
+    from publish.quota import read_cost
+
+    return sum(spend(db, m, n) for m, n in read_cost(videos).items())
+
+
 # ---- the publisher ---------------------------------------------------------
 
 
@@ -221,7 +273,13 @@ def status_payload(db, config: dict, data_dir: Path) -> dict:
 
     from core import secrets
     from publish.quota import UPLOAD_LIMIT
-    from publish.youtube_shorts import CLIENT_SECRET, SCOPE_FULL, TOKEN_SECRET, token_name_for
+    from publish.youtube_shorts import (
+        ANALYTICS_SCOPE,
+        CLIENT_SECRET,
+        SCOPE_FULL,
+        TOKEN_SECRET,
+        token_name_for,
+    )
 
     data_dir = Path(data_dir)
     has_client = secrets.has(data_dir, CLIENT_SECRET) or bool(
@@ -242,6 +300,14 @@ def status_payload(db, config: dict, data_dir: Path) -> dict:
 
     default = next((a for a in accounts if a.get("default")), None)
     scopes = list((default or {}).get("scopes") or [])
+    # What the token itself holds is the truth; the roster entry is a copy made
+    # at sign-in and can be stale (or from a sign-in that was cut short).
+    if default:
+        held = secrets.load(
+            data_dir, TOKEN_SECRET if default.get("legacy_token") else token_name_for(default["id"])
+        ) or {}
+        if held.get("scopes"):
+            scopes = list(held["scopes"])
     if not scopes:
         # Nothing in the roster yet (or an install predating it): read the
         # scopes off whatever token is in the unqualified slot.
@@ -255,6 +321,7 @@ def status_payload(db, config: dict, data_dir: Path) -> dict:
         "connected": bool(accounts) or secrets.has(data_dir, TOKEN_SECRET),
         "scopes": scopes,
         "playlists_available": SCOPE_FULL in scopes,
+        "analytics_available": ANALYTICS_SCOPE in scopes,
         "accounts": accounts,
         "channel": default or json.loads(db.get_flag("youtube_channel", "") or "null"),
         "settings": settings,

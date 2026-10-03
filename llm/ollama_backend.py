@@ -15,6 +15,10 @@ _SETUP_MODELS = frozenset(tag for _hardware, tag, _note in RECOMMENDATIONS)
 # Both were run on a real stream transcript: with reasoning off (or gpt-oss at
 # "low") they answered an empty clip list in a handful of tokens, on a stretch
 # where gemma:7b found ten clips.
+# Never shrink the context below this; a chunk plus the prompt and the reply
+# would no longer fit.
+_MIN_CTX = 4096
+
 _THINK_TO_ANSWER = {"gpt-oss": "medium", "nemotron": True}
 
 
@@ -36,7 +40,12 @@ class OllamaBackend(LLMBackend):
         self.timeout = timeout
         self._capabilities_cache: list[str] | None = None
 
-    def generate(self, prompt: str, *, json_mode: bool = False) -> str:
+    def can_see(self) -> bool:
+        """Whether this model reads images (Ollama lists 'vision' among its
+        capabilities). Asked once; an unreachable Ollama reads as no."""
+        return "vision" in self._capabilities()
+
+    def generate(self, prompt: str, *, json_mode: bool = False, images: list[bytes] | None = None) -> str:
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -49,13 +58,67 @@ class OllamaBackend(LLMBackend):
         }
         if json_mode:
             payload["format"] = "json"
+        if images:
+            import base64
+
+            payload["images"] = [base64.b64encode(i).decode("ascii") for i in images]
         self._limit_reasoning(payload)
 
-        response = requests.post(
-            f"{self.host}/api/generate", json=payload, timeout=self.timeout
-        )
-        response.raise_for_status()
-        return response.json()["response"]
+        # Between two LLM calls is a safe place for the pipeline to wait out a
+        # machine that is about to run out of memory. Only the pipeline's own
+        # thread waits; the assistant and other interactive callers never do.
+        from core import cancel, governor
+
+        if governor.pipeline_thread():
+            governor.checkpoint(cancel.check_active)
+
+        from llm import runtime
+
+        rt = runtime.get(self.host)
+        rt.begin()
+        try:
+            try:
+                response = requests.post(
+                    f"{self.host}/api/generate", json=payload, timeout=self.timeout
+                )
+            except requests.ConnectionError:
+                # Ollama is not running. Start it and try once more, rather
+                # than failing a job an hour in over something the app can fix.
+                if not rt.start(wait=True):
+                    raise
+                response = requests.post(
+                    f"{self.host}/api/generate", json=payload, timeout=self.timeout
+                )
+            response.raise_for_status()
+            text = response.json()["response"]
+        finally:
+            rt.end()
+        self._shrink_context_if_spilling(rt)
+        return text
+
+    def _shrink_context_if_spilling(self, rt) -> None:
+        """Halve the context window when the model is not fully on the GPU.
+
+        Part of a model in system RAM runs several times slower, and a large
+        context is what pushes it there: on an 8 GB card gemma:7b at 8K loads
+        at 9.9 GB and runs half on the CPU. A chunk of transcript needs far
+        less than 8K, so trade the headroom for speed. The next request
+        reloads the model once at the new size. It only ever shrinks, and
+        stops at _MIN_CTX.
+        """
+        if self.num_ctx <= _MIN_CTX:
+            return
+        try:
+            mine = next((m for m in rt.loaded() if m["name"] == self.model), None)
+        except Exception:
+            return
+        if not mine or not mine.get("size") or not mine.get("size_vram"):
+            return  # CPU-only machine or unknown: nothing to gain by shrinking
+        if mine["size_vram"] < mine["size"] * 0.95:
+            new_ctx = max(_MIN_CTX, self.num_ctx // 2)
+            print(f"  {self.model} is only {mine['size_vram'] / mine['size']:.0%} on the GPU at "
+                  f"num_ctx={self.num_ctx}; dropping to {new_ctx} to keep it there")
+            self.num_ctx = new_ctx
 
     def _limit_reasoning(self, payload: dict) -> None:
         """Give a reasoning model a request it can actually answer.

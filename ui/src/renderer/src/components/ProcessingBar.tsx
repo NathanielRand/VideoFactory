@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { applyEvent, emptyProgress, etaSeconds, formatEta, progressStore } from '../lib/jobProgress'
+import { applyEvent, displayFraction, emptyProgress, etaSeconds, formatEta, progressStore } from '../lib/jobProgress'
 import { api } from '../lib/api'
 import { useEvents } from '../lib/useEvents'
 import { useJobWatch } from '../lib/useJobWatch'
@@ -21,7 +21,7 @@ export default function ProcessingBar(): JSX.Element | null {
   })
 
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000)
+    const id = setInterval(() => setNow(Date.now()), 500)
     return () => clearInterval(id)
   }, [])
 
@@ -40,7 +40,7 @@ export default function ProcessingBar(): JSX.Element | null {
 
   if (!progress.active) return null
   const eta = etaSeconds(progress, now)
-  const pct = Math.round(progress.fraction * 100)
+  const pct = Math.round(displayFraction(progress, now) * 100)
 
   const cancel = async (): Promise<void> => {
     if (!progress.videoId) return

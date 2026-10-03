@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
+import SeoPanel from './SeoPanel'
+import YouTubeQuestions from './YouTubeQuestions'
 import {
   DESCRIPTION_MAX,
   TAGS_BUDGET,
@@ -25,7 +27,10 @@ export interface Metadata {
   category_id: string
   default_language: string | null
   made_for_kids: boolean | null
-  contains_synthetic_media: boolean
+  /** YouTube's "AI use" question. null = not answered yet. */
+  contains_synthetic_media: boolean | null
+  /** YouTube's "Paid promotion" question. null = not answered yet. */
+  paid_promotion: boolean | null
   license: string
   embeddable: boolean
   public_stats_viewable: boolean
@@ -39,6 +44,13 @@ interface Props {
   region: string
   playlistsAvailable: boolean
   disabled?: boolean
+  /** Other generated titles, offered as one-click swaps. */
+  altTitles?: string[]
+  /** Shown in the description on upload (hashtags go there, not in tags). */
+  hashtags?: string[]
+  /** A long video (compilation): chapters, thumbnail and playlist matter. */
+  longForm?: boolean
+  hasThumbnail?: boolean
 }
 
 /** Common caption/audio languages, matching the app's own language support. */
@@ -70,7 +82,11 @@ export default function YouTubeMetadataForm({
   onChange,
   region,
   playlistsAvailable,
-  disabled
+  disabled,
+  altTitles = [],
+  hashtags = [],
+  longForm = false,
+  hasThumbnail = false
 }: Props): JSX.Element {
   const [categories, setCategories] = useState<VideoCategory[]>([])
   const [playlists, setPlaylists] = useState<Playlist[]>([])
@@ -135,6 +151,24 @@ export default function YouTubeMetadataForm({
           onChange={(e) => onChange({ title: e.target.value })}
           placeholder={t('What people see on YouTube')}
         />
+        {altTitles.filter((a) => a !== value.title).length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mt-1.5 text-[11px]">
+            <span className="text-muted">{t('Try instead:')}</span>
+            {altTitles
+              .filter((a) => a !== value.title)
+              .map((alt) => (
+                <button
+                  key={alt}
+                  type="button"
+                  disabled={disabled}
+                  className="px-2 py-0.5 rounded-md bg-raised text-muted hover:text-ink text-left"
+                  onClick={() => onChange({ title: alt.slice(0, TITLE_MAX) })}
+                >
+                  {alt}
+                </button>
+              ))}
+          </div>
+        )}
       </div>
 
       <div>
@@ -181,7 +215,9 @@ export default function YouTubeMetadataForm({
           placeholder={t('gaming, speedrun, highlights')}
         />
         <p className="text-[11px] text-muted mt-1">
-          {t('Separated by commas. YouTube allows 500 characters in total.')}
+          {t(
+            'Search phrases people would type to find this, most important first. Separated by commas; YouTube allows 500 characters in total.'
+          )}
         </p>
       </div>
 
@@ -281,21 +317,26 @@ export default function YouTubeMetadataForm({
         )}
       </fieldset>
 
-      <label className="flex items-start gap-2 text-sm">
-        <input
-          type="checkbox"
-          className="mt-0.5"
-          checked={value.contains_synthetic_media}
-          disabled={disabled}
-          onChange={(e) => onChange({ contains_synthetic_media: e.target.checked })}
-        />
-        <span>
-          {t('Contains altered or synthetic content')}
-          <span className="block text-[11px] text-muted">
-            {t('Tick this if a real-looking person, place or event was digitally made or changed.')}
-          </span>
-        </span>
-      </label>
+      {/* Audience is asked just above, in its own box. */}
+      <YouTubeQuestions
+        via="youtube"
+        showKids={false}
+        disabled={disabled}
+        value={{ ai: value.contains_synthetic_media, paid: value.paid_promotion, kids: value.made_for_kids }}
+        onChange={(a) => onChange({ contains_synthetic_media: a.ai, paid_promotion: a.paid })}
+      />
+
+      <SeoPanel
+        draft={{
+          title: value.title,
+          description: value.description,
+          keywords: value.tags,
+          hashtags,
+          long_form: longForm,
+          has_thumbnail: hasThumbnail,
+          has_playlist: Boolean(value.playlist_id)
+        }}
+      />
 
       <details className="border border-raised/60 rounded-lg">
         <summary className="px-3 py-2 text-xs cursor-pointer hover:bg-raised/40 rounded-lg">

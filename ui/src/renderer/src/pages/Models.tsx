@@ -1,6 +1,41 @@
 import { useEffect, useState } from 'react'
 import { api } from '../lib/api'
-import { speedNote } from '../lib/modelSpeed'
+import AICard from '../components/AICard'
+import ModelGradeBadge from '../components/ModelGradeBadge'
+import GradeRing from '../components/GradeRing'
+import { gradeColor, gradeModel, paramsFromName } from '../lib/modelGrade'
+
+/** A model tag's grade, small, for the download box and the tables. Only
+ *  when the tag names its size: a guess from nothing would be a made-up grade. */
+function TagGrade({ tag, withText = false }: { tag: string; withText?: boolean }): JSX.Element | null {
+  // A row can offer two ("qwen3:8b / qwen3:14b"): a ring for each.
+  if (!withText && tag.includes(' / ')) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        {tag.split(' / ').map((one) => (
+          <TagGrade key={one} tag={one} />
+        ))}
+      </span>
+    )
+  }
+  const name = tag.trim()
+  if (!name || paramsFromName(name) === null) return null
+  const grade = gradeModel({ name, size_gb: 0 })
+  return (
+    <span className="inline-flex items-center gap-2 align-middle">
+      <GradeRing grade={grade} size={withText ? 36 : 26} />
+      {withText && (
+        <span className="text-xs">
+          <span className="text-muted">Would grade </span>
+          <span className="font-bold" style={{ color: gradeColor(grade.score) }}>
+            {grade.grade}
+          </span>
+          <span className="text-muted"> for clip picking. {grade.why}</span>
+        </span>
+      )}
+    </span>
+  )
+}
 import { useEvents } from '../lib/useEvents'
 import type { ModelsInfo } from '../lib/types'
 
@@ -98,6 +133,9 @@ export default function Models(): JSX.Element {
     return (
       <div className="p-6">
         <h2 className="text-2xl font-bold mb-4">Models</h2>
+        <div className="mb-4 max-w-3xl">
+          <AICard />
+        </div>
         {cloudNote || (
           <div className="card text-warn">
             Ollama isn’t reachable. Make sure it’s installed and running, then reopen this page.
@@ -113,6 +151,10 @@ export default function Models(): JSX.Element {
       <h2 className="text-2xl font-bold">Models</h2>
       {cloudNote}
 
+      {/* Cloud models on your own key (Gemini, OpenRouter, ...). Same card as
+          Settings → AI, here because this is where people look for models. */}
+      <AICard />
+
       <section className="card space-y-3">
         <h3 className="font-semibold">Installed</h3>
         {info.installed.map((m) => {
@@ -124,25 +166,12 @@ export default function Models(): JSX.Element {
                   {m.name}
                   {isActive && <span className="ml-2 text-xs bg-accent/15 text-accent px-2 py-0.5 rounded">active</span>}
                 </p>
-                <p className="text-xs text-muted">{m.size_gb.toFixed(1)} GB on disk</p>
-                {(() => {
-                  const note = speedNote(m, info.installed, vram)
-                  if (!note) return null
-                  return (
-                    <p
-                      className={`text-xs mt-0.5 ${
-                        note.tone === 'warn'
-                          ? 'text-red-400'
-                          : note.tone === 'slow'
-                            ? 'text-amber-400'
-                            : 'text-muted'
-                      }`}
-                    >
-                      {note.tone !== 'ok' && <span aria-hidden="true">⚠ </span>}
-                      {note.text}
-                    </p>
-                  )
-                })()}
+                <p className="text-xs text-muted">
+                  {m.cloud ? "Runs on Ollama's cloud" : `${m.size_gb.toFixed(1)} GB on disk`}
+                </p>
+                <div className="mt-2">
+                  <ModelGradeBadge model={m} installed={info.installed} vram={vram} />
+                </div>
               </div>
               {!isActive && (
                 <>
@@ -173,6 +202,7 @@ export default function Models(): JSX.Element {
             Download
           </button>
         </div>
+        <TagGrade tag={pullTag} withText />
         {pullStatus && <p className="text-sm text-accent">{pullStatus}</p>}
         {/* Two tables, because there are two different questions. This one
             answers "what will my machine run"; every row is a VRAM tier. */}
@@ -196,7 +226,10 @@ export default function Models(): JSX.Element {
               <tr key={r.hardware} className="border-t border-raised/50">
                 <td className="py-2 pr-6 align-top text-muted">{r.hardware}</td>
                 <td className="py-2 pr-6 align-top font-mono text-xs whitespace-nowrap">
-                  {r.model}
+                  <span className="inline-flex items-center gap-2">
+                    <TagGrade tag={r.model} />
+                    {r.model}
+                  </span>
                 </td>
                 <td className="py-2 align-top text-muted">{r.note}</td>
               </tr>
@@ -232,7 +265,10 @@ export default function Models(): JSX.Element {
                   <tr key={r.purpose} className="border-t border-raised/50">
                     <td className="py-2 pr-6 align-top text-muted">{r.purpose}</td>
                     <td className="py-2 pr-6 align-top font-mono text-xs whitespace-nowrap">
-                      {r.model}
+                      <span className="inline-flex items-center gap-2">
+                        <TagGrade tag={r.model} />
+                        {r.model}
+                      </span>
                     </td>
                     <td className="py-2 align-top text-muted">{r.note}</td>
                   </tr>

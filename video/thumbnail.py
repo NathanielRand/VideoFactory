@@ -23,6 +23,7 @@ The pure geometry and text fitting live in functions that touch neither
 OpenCV nor Pillow, so they are tested on a CI runner that has neither.
 """
 
+from functools import lru_cache
 from pathlib import Path
 
 # YouTube's own recommendation, and what Studio displays: 1280x720, 16:9.
@@ -144,21 +145,31 @@ def _font(size: int):
         return None
 
 
+@lru_cache(maxsize=8)
+def _cascade(name: str):
+    """A loaded cascade, or None. Loaded once: building the classifier is a
+    third of the cost of looking at a frame, and a scan looks at dozens."""
+    import cv2
+
+    from core.binaries import haar_cascade
+
+    path = haar_cascade(name)
+    if not path:
+        return None
+    classifier = cv2.CascadeClassifier(path)
+    return None if classifier.empty() else classifier
+
+
 def _faces(frame):
     """Face boxes in a frame, biggest first, or [] when detection is not
     available. Never raises: see core/binaries.haar_cascade for why a missing
     cascade is a normal condition rather than a fault."""
     import cv2
 
-    from core.binaries import haar_cascade
-
-    path = haar_cascade("haarcascade_frontalface_default.xml")
-    if not path:
+    classifier = _cascade("haarcascade_frontalface_default.xml")
+    if classifier is None:
         return []
     try:
-        classifier = cv2.CascadeClassifier(path)
-        if classifier.empty():
-            return []
         grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         found = classifier.detectMultiScale(grey, scaleFactor=1.1, minNeighbors=6,
                                             minSize=(60, 60))
@@ -176,16 +187,233 @@ def _sharpness(frame) -> float:
     return float(cv2.Laplacian(grey, cv2.CV_64F).var())
 
 
-def score_frame(sharpness: float, face_area_fraction: float, brightness: float) -> float:
+def _blockiness(grey) -> float:
+    """How visibly the picture is built of 8x8 compression blocks, 0 for none.
+
+    Heavily compressed or upscaled sources step at block edges: the change
+    across a multiple-of-8 column is larger than the change inside a block.
+    Measured on columns only, which is enough to tell and cheap."""
+    import numpy as np
+
+    g = grey.astype("float32")
+    if g.shape[1] < 32:
+        return 0.0
+    d = np.abs(np.diff(g, axis=1)).mean(axis=0)
+    edge = d[7::8].mean()
+    inner = np.delete(d, np.arange(7, len(d), 8)).mean()
+    return float(max(0.0, edge / max(inner, 1e-3) - 1.0))
+
+
+
+
+def _has_eyes(grey, face) -> bool | None:
+    """Two eyes visible in the upper half of the face, so not a blink or a
+    turned head. None when the cascade is unavailable (no opinion)."""
+    import cv2
+
+    classifier = _cascade("haarcascade_eye.xml")
+    if classifier is None:
+        return None
+    x, y, w, h = face
+    roi = grey[y: y + int(h * 0.6), x: x + w]
+    if roi.size == 0:
+        return None
+    try:
+        eyes = classifier.detectMultiScale(roi, scaleFactor=1.1, minNeighbors=6,
+                                           minSize=(max(12, w // 10), max(12, w // 10)))
+    except cv2.error:
+        return None
+    return len(eyes) >= 2
+
+
+def _expression(grey, face) -> float:
+    """0..1, how animated the face looks: a smile or an open mouth. Haar's
+    smile cascade is noisy, so it is a small bonus and never a gate."""
+    import cv2
+
+    classifier = _cascade("haarcascade_smile.xml")
+    if classifier is None:
+        return 0.0
+    x, y, w, h = face
+    roi = grey[y + int(h * 0.55): y + h, x: x + w]
+    if roi.size == 0:
+        return 0.0
+    try:
+        found = classifier.detectMultiScale(roi, scaleFactor=1.5, minNeighbors=18,
+                                            minSize=(max(20, w // 4), max(10, w // 8)))
+    except cv2.error:
+        return 0.0
+    return 1.0 if len(found) else 0.0
+
+
+CRISP_REF = 150.0   # Laplacian variance of a face crop that is plainly sharp
+
+
+def _face_size_score(area: float) -> float:
+    """0..1. A face that fills a few percent of the frame is a face in a scene;
+    it has to be big to carry a thumbnail read at phone size. Past about a
+    third of the frame it is a nose."""
+    if area <= 0:
+        return 0.0
+    if area < 0.08:
+        return area / 0.08
+    if area <= 0.35:
+        return 1.0
+    return max(0.4, 1.0 - (area - 0.35) * 2.0)
+
+
+def score_frame(
+    sharpness: float,
+    face_area_fraction: float,
+    brightness: float,
+    *,
+    face_sharpness: float | None = None,
+    eyes_open: bool | None = None,
+    expression: float = 0.0,
+    blockiness: float = 0.0,
+    relative_sharpness: float = 1.0,
+) -> float:
     """How good a thumbnail this frame would make.
 
-    A visible face dominates, because a face is what gets clicked; detail and
-    a sane exposure break the ties. Pure arithmetic so the weighting is
+    A visible, well-sized face dominates because a face is what gets clicked.
+    Sharpness is measured on the face when there is one, and it VETOES: a
+    blurry or pixelated frame is scaled down whatever else it has going for it
+    (`relative_sharpness` is this frame against the clip's median, so a soft
+    source is not marked down for being soft everywhere). Open eyes and an
+    animated expression are bonuses. Pure arithmetic, so the weighting is
     testable without decoding a video.
     """
     if brightness < 18 or brightness > 242:   # near black or blown out
         return 0.0
-    return (face_area_fraction * 1000.0) + min(sharpness, 500.0) / 10.0
+    face = _face_size_score(face_area_fraction)
+    detail = face_sharpness if (face_sharpness is not None and face_area_fraction > 0) else sharpness
+    crisp = min(max(detail, 0.0) / CRISP_REF, 1.0)
+    base = face * 55.0 + crisp * 30.0 + min(max(sharpness, 0.0), 500.0) / 500.0 * 10.0
+    if face_area_fraction > 0:
+        if eyes_open is True:
+            base += 8.0
+        elif eyes_open is False:
+            base *= 0.6
+        base += 7.0 * min(max(expression, 0.0), 1.0)
+    base *= 1.0 - min(max(blockiness, 0.0), 0.6)
+    return base * min(1.0, max(0.25, relative_sharpness))
+
+
+def analyse_frame(frame) -> dict:
+    """Everything score_frame needs for one BGR frame. `face` is (x, y, w, h)
+    on a copy scaled by `scale`."""
+    import cv2
+
+    h, w = frame.shape[:2]
+    scale = min(1.0, ANALYSE_WIDTH / max(w, 1))
+    small = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale)))) if scale < 1 else frame
+    grey = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    faces = _faces(small)
+    face = faces[0] if faces else None
+    sh, sw = small.shape[:2]
+    out = {
+        "sharp": float(cv2.Laplacian(grey, cv2.CV_64F).var()),
+        "brightness": float(small.mean()),
+        "blockiness": _blockiness(grey),
+        "area": (face[2] * face[3]) / float(sw * sh) if face else 0.0,
+        "face": face,
+        "face_sharp": None,
+        "eyes": None,
+        "expression": 0.0,
+        "scale": scale,
+    }
+    if face:
+        x, y, fw, fh = face
+        roi = grey[y: y + fh, x: x + fw]
+        if roi.size:
+            out["face_sharp"] = float(cv2.Laplacian(roi, cv2.CV_64F).var())
+        out["eyes"] = _has_eyes(grey, face)
+        out["expression"] = _expression(grey, face)
+    return out
+
+
+def rank_frames(rows: list[dict], min_gap: float = 1.0) -> list[dict]:
+    """rows: analyse_frame dicts plus 't'. Scores each against the clip's own
+    median sharpness and returns the usable ones, best first, no two closer
+    than `min_gap` seconds (six near-identical frames from one moment are one
+    choice, not six)."""
+    if not rows:
+        return []
+    ordered = sorted(r["sharp"] for r in rows)
+    median = ordered[len(ordered) // 2] or 1.0
+    for r in rows:
+        r["score"] = score_frame(
+            r["sharp"], r["area"], r["brightness"],
+            face_sharpness=r.get("face_sharp"), eyes_open=r.get("eyes"),
+            expression=r.get("expression", 0.0), blockiness=r.get("blockiness", 0.0),
+            relative_sharpness=r["sharp"] / median,
+        )
+    out: list[dict] = []
+    for r in sorted(rows, key=lambda r: (r["score"], r["sharp"]), reverse=True):
+        if r["score"] <= 0:
+            continue
+        if all(abs(r["t"] - o["t"]) >= min_gap for o in out):
+            out.append(r)
+    return out
+
+
+SAMPLE_STEP = 0.5    # seconds between looked-at frames, at most
+MAX_SAMPLES = 28
+REFINE_SPAN = 0.3    # seconds either side of each leader, looked at for a crisper frame
+ANALYSE_WIDTH = 960
+
+
+def pick_frames(video: Path, count: int = 6, start: float = 0.0, duration: float | None = None) -> list[dict]:
+    """The best frames of `duration` seconds of `video` from `start`, as
+    analyse_frame dicts with `t` relative to `start`, best first.
+
+    One seek, then the clip is decoded straight through and only every Nth
+    frame is looked at: seeking to each sample costs a decode from the nearest
+    keyframe every time, which on a long source made this take half a minute.
+    The leaders are then re-checked frame by frame beside where they were
+    found, because a decoder's frame beside a great one is often the sharper."""
+    import cv2
+
+    from video.capture import video_capture
+
+    with video_capture(Path(video), required=False) as cap:
+        if cap is None:
+            return []
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / fps if fps else 0.0
+        length = duration if duration else max(0.0, total - start)
+        if length <= 0:
+            return []
+        lo, hi = length * 0.1, length * 0.9      # clips open mid-turn and end on the end card
+        if hi <= lo:
+            lo, hi = 0.0, length
+        step = max(SAMPLE_STEP, (hi - lo) / MAX_SAMPLES)
+        rows: dict[float, dict] = {}
+
+        def scan(from_t: float, to_t: float, every: float) -> None:
+            cap.set(cv2.CAP_PROP_POS_MSEC, (start + max(0.0, from_t)) * 1000.0)
+            gap = max(1, round(fps * every))
+            n = 0
+            t = from_t
+            while t <= to_t:
+                if n % gap == 0:
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        break
+                    key = round(t, 2)
+                    if key not in rows:
+                        r = analyse_frame(frame)
+                        r["t"] = key
+                        rows[key] = r
+                elif not cap.grab():
+                    break
+                n += 1
+                t = from_t + n / fps
+
+        scan(lo, hi, step)
+        for lead in rank_frames(list(rows.values()))[:3]:
+            scan(max(0.0, lead["t"] - REFINE_SPAN), min(length, lead["t"] + REFINE_SPAN), 0.15)
+        return rank_frames(list(rows.values()))[:count]
 
 
 def generate(video_path: Path, hook: str, targets: list[Path]) -> list[Path]:
@@ -206,23 +434,22 @@ def generate(video_path: Path, hook: str, targets: list[Path]) -> list[Path]:
 
     from video.capture import video_capture
 
+    picks = pick_frames(Path(video_path), count=len(targets))
+    if not picks:
+        return []
     scored: list[tuple[float, object, tuple | None]] = []
-    with video_capture(Path(video_path)) as cap:
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
-        duration = frames / fps if fps else 0.0
-        for at in candidate_times(duration, count=max(6, len(targets) * 2)):
-            cap.set(cv2.CAP_PROP_POS_MSEC, at * 1000.0)
+    with video_capture(Path(video_path), required=False) as cap:
+        if cap is None:
+            return []
+        for r in picks:
+            cap.set(cv2.CAP_PROP_POS_MSEC, r["t"] * 1000.0)
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            height, width = frame.shape[:2]
-            faces = _faces(frame)
-            face = faces[0] if faces else None
-            area = (face[2] * face[3]) / float(width * height) if face else 0.0
-            brightness = float(frame.mean())
-            scored.append((score_frame(_sharpness(frame), area, brightness), frame.copy(), face))
-
+            face = r["face"]
+            if face and r["scale"] < 1:      # the box was found on a smaller copy
+                face = tuple(int(v / r["scale"]) for v in face)
+            scored.append((r["score"], frame.copy(), face))
     if not scored:
         return []
     scored.sort(key=lambda row: row[0], reverse=True)

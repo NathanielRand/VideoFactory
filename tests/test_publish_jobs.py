@@ -366,3 +366,47 @@ def test_two_channels_tokens_do_not_collide_in_the_store(tmp_path):
     secrets.wipe(tmp_path, token_name_for("UC_A"))
     assert secrets.load(tmp_path, token_name_for("UC_A")) is None
     assert secrets.load(tmp_path, token_name_for("UC_B")) is not None
+
+
+def _run_upload(db, tmp_path, monkeypatch, *, delete_fails):
+    from publish.base import PublishResult
+    from publish.errors import PublishError
+    from server.publisher import PublishWorker
+
+    clip_path = tmp_path / "c.mp4"
+    clip_path.write_bytes(b"x")
+    _video(db)
+    clip = _clip(db, path=str(clip_path))
+    log = {"deleted": []}
+
+    class Pub:
+        def publish(self, request, on_progress=None, should_cancel=None):
+            return PublishResult(video_id="newvideo1234", url="u", requested_privacy="public",
+                                 actual_privacy="public")
+
+        def delete_video(self, video_id):
+            if delete_fails:
+                raise PublishError("YouTube said no")
+            log["deleted"].append(video_id)
+
+    monkeypatch.setattr(service, "make_publisher", lambda *a, **k: Pub())
+    request = {"title": "T", "replace_video_id": "oldvideo1234"}
+    job_id = db.add_publish_job(clip, json.dumps(request), video_id="v1", start_s=1.0, end_s=5.0)
+    worker = PublishWorker({}, tmp_path / "state.db", tmp_path)
+    events = []
+    monkeypatch.setattr(worker, "_emit", lambda *a, **k: events.append(k))
+    worker._publish(db, db.get_publish_job(job_id))
+    return log, events, job_id
+
+
+def test_a_replacement_deletes_the_old_video_only_after_the_new_one_is_up(db, tmp_path, monkeypatch):
+    log, events, job_id = _run_upload(db, tmp_path, monkeypatch, delete_fails=False)
+    assert log["deleted"] == ["oldvideo1234"]
+    assert db.get_publish_job(job_id)["status"] == "done"
+    assert any("replaces it" in " ".join(e.get("warnings") or []) for e in events)
+
+
+def test_if_the_old_video_cannot_be_deleted_the_new_upload_still_stands(db, tmp_path, monkeypatch):
+    log, events, job_id = _run_upload(db, tmp_path, monkeypatch, delete_fails=True)
+    assert db.get_publish_job(job_id)["status"] == "done"
+    assert any("Delete it in YouTube Studio" in " ".join(e.get("warnings") or []) for e in events)

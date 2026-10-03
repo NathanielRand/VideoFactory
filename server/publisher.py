@@ -167,9 +167,34 @@ class PublishWorker(threading.Thread):
         # channel_id selects which connected channel's token to publish with;
         # it is not part of the video's metadata, so it comes out here.
         channel_id = request_data.pop("channel_id", None)
+        # A replacement: the old video to delete once THIS upload has succeeded
+        # (never before, so a failed render or upload loses nothing).
+        replace_id = request_data.pop("replace_video_id", None)
         publisher = service.make_publisher(
             self.config, self.data_dir, channel_id=channel_id
         )
+        # Like channel_id, a routing instruction rather than metadata.
+        playlist_auto = request_data.pop("playlist_auto", None)
+        # The clip's own choice (its page, or Select all) beats the creator's
+        # rule; a playlist named in this very upload beats both.
+        if not request_data.get("playlist_id") and clip["id"] >= 0 and "playlist_id" in clip.keys() and clip["playlist_id"]:
+            from server import publishing_api as _pl
+
+            # Like a rule, a clip's playlist is a nice-to-have: a channel
+            # connected without the playlist permission would fail the WHOLE
+            # upload over it, so without the permission it is left out.
+            if _pl.can_use_playlists(publisher):
+                request_data["playlist_id"] = clip["playlist_id"]
+                playlist_auto = None
+        if playlist_auto and not request_data.get("playlist_id"):
+            from server import publishing_api
+
+            request_data["playlist_id"] = publishing_api.resolve_playlist(db, publisher, playlist_auto)
+            # A rule is a nice-to-have. publish() asks for the playlist scope
+            # whenever a playlist is set, and a channel connected without it
+            # would fail the WHOLE upload over a playlist nobody picked here.
+            if request_data["playlist_id"] and not publishing_api.can_use_playlists(publisher):
+                request_data["playlist_id"] = None
         # Hashtags belong in the DESCRIPTION, which is where viewers see them
         # and where the creator's own tag has to appear. Until now the clip's
         # hashtags were only ever sent as `tags`, YouTube's invisible keyword
@@ -177,7 +202,16 @@ class PublishWorker(threading.Thread):
         # in the editor because this is the one point both the editor and an
         # agent pass through, so neither can skip it, and because it applies to
         # clips that were generated long before any of this existed.
-        request_data["description"] = _describe(db, clip, request_data.get("description", ""))
+        request_data["description"] = _describe(
+            db, clip, request_data.get("description", ""), request_data.get("playlist_id") or ""
+        )
+
+        # A routing-time decision like the playlist: the clip's own comment,
+        # else the Publish page's standing one, as on the other providers.
+        if not request_data.get("first_comment"):
+            from server import publishing_api as _fc
+
+            request_data["first_comment"] = _fc.first_comment_for(db, clip)
 
         request = PublishRequest(
             video_path=path,
@@ -208,10 +242,40 @@ class PublishWorker(threading.Thread):
             raise e
 
         ledger.record_upload()
+        # The uploads bucket is separate; these two ride the shared pool.
+        if result.thumbnail_set:
+            ledger.record_call("thumbnails.set")
+        if result.playlist_added:
+            ledger.record_call("playlistItems.insert")
+        if result.comment_posted:
+            ledger.record_call("commentThreads.insert")
         service.save_ledger(db, ledger)
 
         self._emit(job_id, clip_id, phase="metadata", fraction=0.95,
                    message="Applying metadata")
+
+        if clip_id < 0:
+            # A compilation (see StateDB.get_publishable). `uploads` keys on a
+            # real clip row through a foreign key, so its record goes where
+            # the other providers' posts go instead, which has no such key.
+            db.record_clip_publish(clip_id, "youtube", {
+                "provider": "youtube",
+                "video_id": clip["video_id"],
+                "state": "queued" if result.publish_at else "published",
+                "post_id": result.video_id,
+                "post_url": result.url,
+                "error": "",
+                "request_id": result.video_id,
+                "scheduled_for": result.publish_at or "",
+            })
+            db.finish_publish_job(job_id, "done", youtube_id=result.video_id)
+            self._emit(
+                job_id, clip_id, phase="done", fraction=1.0,
+                message="Scheduled on YouTube" if result.publish_at else "Published on YouTube",
+                terminal="done", youtube_id=result.video_id, url=result.url,
+                warnings=result.warnings, locked_private=result.locked_private,
+            )
+            return
 
         db.record_publish(clip_id, {
             "youtube_id": result.video_id,
@@ -231,6 +295,22 @@ class PublishWorker(threading.Thread):
         })
         db.finish_publish_job(job_id, "done", youtube_id=result.video_id)
 
+        if replace_id and replace_id != result.video_id:
+            try:
+                publisher.delete_video(replace_id)
+                service.spend(db, "videos.delete")
+                service.retire_video(db, replace_id, "Replaced by a re-render.", forget_upload=True)
+                result.warnings.append("The old video was deleted and this one replaces it.")
+            except Exception as e:
+                from publish.errors import PublishError as _PE
+                from server.feedback import redact
+
+                why = e.message if isinstance(e, _PE) else str(e)
+                result.warnings.append(
+                    f"The new video is up, but the old one could not be deleted ({redact(why)[:200]}). "
+                    "Delete it in YouTube Studio."
+                )
+
         self._emit(
             job_id, clip_id,
             phase="done",
@@ -246,7 +326,7 @@ class PublishWorker(threading.Thread):
 
     def _resolve_clip(self, db: StateDB, job):
         """Find the clip, following a re-render that gave it a new id."""
-        clip = db.get_clip(job["clip_id"])
+        clip = db.get_publishable(job["clip_id"])
         if clip is not None:
             return clip
         if not job["video_id"]:
@@ -364,7 +444,7 @@ def seconds_until(iso: str) -> float:
     return max(0.0, (moment - datetime.now(timezone.utc)) / timedelta(seconds=1))
 
 
-def _describe(db: StateDB, clip, description: str) -> str:
+def _describe(db: StateDB, clip, description: str, playlist_id: str = "") -> str:
     """The description as it will appear on YouTube, hashtags included.
 
     The creator's tag comes from the video's channel name rather than from
@@ -401,6 +481,24 @@ def _describe(db: StateDB, clip, description: str) -> str:
     except Exception:
         common = ""
 
+    # Always-on hashtags (Publish page) lead, as they do on every provider;
+    # the creator's own tag still goes first of all.
+    try:
+        from server import publishing_api
+
+        hashtags = publishing_api.hashtags_for(db, clip, hashtags)
+    except Exception:
+        pass
+
+    # Under the standing block: where the footage came from, and the playlist
+    # this went into. Each is switched off in the publishing defaults.
+    from publish.metadata import with_links
+    from server import publishing_api
+
+    try:
+        links = [publishing_api.source_line(db, clip), publishing_api.playlist_line(db, playlist_id)]
+    except Exception:
+        links = []
     return description_with_hashtags(
-        with_common_block(description, common), hashtags, creator=creator
+        with_links(with_common_block(description, common), links), hashtags, creator=creator
     )

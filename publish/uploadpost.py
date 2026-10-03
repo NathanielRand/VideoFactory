@@ -95,6 +95,8 @@ PLATFORM_FIELDS: dict[str, dict] = {
             "privacy": "privacyStatus",       # public | unlisted | private
             "category": "categoryId",
             "made_for_kids": "selfDeclaredMadeForKids",
+            # YouTube's "Paid promotion" question.
+            "paid_promotion": "hasPaidProductPlacement",
         },
     },
     "tiktok": {

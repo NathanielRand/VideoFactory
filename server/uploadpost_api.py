@@ -64,6 +64,9 @@ class BatchIn(BaseModel):
     start_at: str = ""
     timezone: str = ""
     add_to_queue: bool = False
+    # Exact times, one per clip in order (RFC 3339 with an offset), from the
+    # best-times planner. Wins over every other spacing field when given.
+    times: list[str] = []
 
 
 class ConnectIn(BaseModel):
@@ -244,7 +247,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
         d = db()
         try:
             _guard(d)
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
             if clip is None:
                 raise HTTPException(404, "no such clip")
             if not body.title.strip():
@@ -252,7 +255,17 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
             if not body.platforms:
                 raise HTTPException(400, "Pick at least one platform.")
 
-            overrides = platform_overrides(body.overrides)
+            from server import publishing_api
+
+            title = publishing_api.title_for(d, clip, body.title)
+
+            # Caption-only platforms (TikTok, Instagram, X...) get a caption
+            # fitted to them; anything the caller set for a platform wins.
+            overrides = platform_overrides(publishing_api.caption_overrides(
+                d, platforms=body.platforms, title=title, description=body.description,
+                hashtags=publishing_api.hashtags_for(d, clip, body.tags or None),
+                given=body.overrides,
+            ))
 
             # Facebook needs a page id, Pinterest a board id. Checked before
             # the upload, because their end reports it only after the video
@@ -292,14 +305,21 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
             standing = (settings.get("common_description") or "").strip()
             if standing:
                 description = f"{description}\n\n{standing}".strip()
+            description = publishing_api.with_source(d, clip, description)
 
             publisher = UploadPostPublisher(_client(), settings.get("profile") or "")
             fields = (
                 build_fields(
-                    title=body.title,
+                    title=title,
                     description=description,
-                    tags=body.tags,
-                    first_comment=body.first_comment or settings.get("first_comment") or "",
+                    # Always-on hashtags, then the ones in this clip's box.
+                    tags=[
+                        t.lstrip("#")
+                        for t in publishing_api.hashtags_for(d, clip, body.tags or None)
+                    ],
+                    first_comment=body.first_comment or publishing_api.first_comment_for(
+                        d, clip, settings.get("first_comment") or ""
+                    ),
                 )
                 + overrides
                 + timing
@@ -318,7 +338,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
             except PublishError as e:
                 raise _fail(e) from e
 
-            _record(d, clip_id, clip, result)
+            _record(d, clip_id, clip, result, when or "")
             service.save_settings(d, {"platforms": body.platforms})
             return _publish_payload(d, clip_id, result.request_id)
         finally:
@@ -355,6 +375,8 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
         if not body.platforms:
             raise HTTPException(400, "Pick at least one platform.")
 
+        from server import publishing_api
+
         d = db()
         try:
             _guard(d)
@@ -385,7 +407,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
 
             started, skipped = [], []
             for index, clip_id in enumerate(body.clip_ids):
-                clip = d.get_clip(clip_id)
+                clip = d.get_publishable(clip_id)
                 if clip is None:
                     skipped.append({"clip_id": clip_id, "reason": "no such clip"})
                     continue
@@ -393,37 +415,57 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
                     skipped.append({"clip_id": clip_id, "reason": "no rendered file yet"})
                     continue
 
-                title = (clip["title"] or clip["hook"] or f"Clip {clip_id}").strip()
+                title = publishing_api.title_for(
+                    d, clip, (clip["title"] or clip["hook"] or f"Clip {clip_id}").strip()
+                )
                 description = (clip["description"] or "").strip()
                 if standing:
                     description = f"{description}\n\n{standing}".strip()
+                description = publishing_api.with_source(d, clip, description)
 
                 timing: list = []
-                if body.add_to_queue:
+                sched_at = ""
+                if body.times:
+                    at_time = body.times[min(index, len(body.times) - 1)]
+                    try:
+                        sched_at = validate_schedule(at_time)
+                        timing = schedule_fields(scheduled_date=sched_at, timezone=body.timezone)
+                    except PublishError as e:
+                        skipped.append({"clip_id": clip_id, "reason": e.message})
+                        continue
+                elif body.add_to_queue:
                     timing = schedule_fields(add_to_queue=True)
                 elif body.every_hours or body.start_at:
                     at = start + timedelta(hours=body.every_hours * index)
-                    timing = schedule_fields(
-                        scheduled_date=at.isoformat(), timezone=body.timezone
-                    )
+                    sched_at = at.isoformat()
+                    timing = schedule_fields(scheduled_date=sched_at, timezone=body.timezone)
 
+                tags = [t.lstrip("#") for t in publishing_api.hashtags_for(d, clip)]
                 fields = (
                     build_fields(
                         title=title,
                         description=description,
-                        # Stored as a JSON list, not a space-separated string.
-                        tags=_tags_of(clip),
-                        first_comment=settings.get("first_comment") or "",
+                        tags=tags,
+                        first_comment=publishing_api.first_comment_for(
+                            d, clip, settings.get("first_comment") or ""
+                        ),
                     )
-                    + overrides
+                    + platform_overrides(publishing_api.caption_overrides(
+                        d, platforms=body.platforms, title=title, description=description,
+                        hashtags=tags, given=body.overrides,
+                    ))
                     + timing
                 )
 
+                # A designed or chosen thumbnail goes with it, as it does
+                # from the single-clip panel.
+                chosen = Path(data_dir) / "thumbnails" / f"clip_{int(clip_id)}_chosen.jpg"
                 try:
                     result = publisher.start(
                         Path(clip["path"]),
                         platforms=body.platforms,
                         fields=fields,
+                        thumbnail=chosen if chosen.exists() else None,
                         idempotency_key=f"video-factory-{clip_id}-{clip['created_at']}",
                     )
                 except PublishError as e:
@@ -432,7 +474,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
                     skipped.append({"clip_id": clip_id, "reason": e.message})
                     continue
 
-                _record(d, clip_id, clip, result)
+                _record(d, clip_id, clip, result, sched_at)
                 started.append({"clip_id": clip_id, "request_id": result.request_id})
 
             service.save_settings(d, {"platforms": body.platforms})
@@ -452,7 +494,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
             if not rows:
                 raise HTTPException(404, "no such publish")
             clip_id = int(rows[0]["clip_id"])
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
 
             settings = service.load_settings(d)
             publisher = UploadPostPublisher(_client(), settings.get("profile") or "")
@@ -487,7 +529,7 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
                 raise HTTPException(400, "Nothing failed on that publish.")
 
             clip_id = int(rows[0]["clip_id"])
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
             settings = service.load_settings(d)
             publisher = UploadPostPublisher(_client(), settings.get("profile") or "")
             try:
@@ -546,13 +588,16 @@ def install(app, *, config, db, data_dir, publish_worker=None) -> None:
             return []
         return [str(t).lstrip("#") for t in parsed if str(t).strip()] if isinstance(parsed, list) else []
 
-    def _record(d, clip_id: int, clip, result) -> None:
-        """Write one row per destination, keeping each platform's own state."""
+    def _record(d, clip_id: int, clip, result, scheduled_for: str = "") -> None:
+        """Write one row per destination, keeping each platform's own state.
+        `scheduled_for` is when the post is due, so the schedule can list it:
+        without it a scheduled Upload-Post post never appeared there."""
         for outcome in result.outcomes:
             d.record_clip_publish(
                 clip_id,
                 outcome.platform,
                 {
+                    **({"scheduled_for": scheduled_for} if scheduled_for else {}),
                     "provider": "upload_post",
                     "video_id": (clip["video_id"] if clip is not None else "") or "",
                     "start_s": (clip["start_s"] if clip is not None else 0) or 0,

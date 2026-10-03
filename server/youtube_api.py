@@ -79,6 +79,9 @@ class CredentialsIn(BaseModel):
 
 class ConnectIn(BaseModel):
     playlists: bool = False
+    # Ask for every permission the app can use (uploads, reading the channel,
+    # playlists and managing videos, Analytics): "Update permissions".
+    all_permissions: bool = False
     # Connecting normally REPLACES nothing — each consent adds a channel. This
     # exists so the UI can be explicit about which it meant.
     add: bool = False
@@ -106,7 +109,10 @@ class PublishIn(BaseModel):
     privacy: str = "public"
     publish_at: str | None = None
     made_for_kids: bool = False
-    contains_synthetic_media: bool = False
+    # YouTube's "AI use" and "Paid promotion" questions. None leaves them for
+    # Studio to ask; the app's forms always send an answer.
+    contains_synthetic_media: bool | None = None
+    paid_promotion: bool | None = None
     embeddable: bool = True
     public_stats_viewable: bool = True
     license: str = "youtube"
@@ -120,6 +126,48 @@ class PublishIn(BaseModel):
     thumbnail: bool = False
     channel_id: str | None = None
     render_first: RenderFirst | None = None
+    # A video already on the channel that this upload replaces: deleted once
+    # the new one is up.
+    replace_video_id: str | None = None
+
+
+class ReplaceIn(BaseModel):
+    channel_id: str | None = None
+
+
+class DeleteVideoIn(BaseModel):
+    channel_id: str | None = None
+    # Must be true: a delete cannot be undone, so a body that forgot to say so
+    # is refused rather than read as a yes.
+    confirm: bool = False
+
+
+class PushThumbnailIn(BaseModel):
+    """Which of this app's saved thumbnails to put on a video already on the
+    channel. Never image data or a path: what goes to the channel is always a
+    thumbnail this app made (thumbnails_api), for a clip or compilation."""
+
+    # Omitted: the clip or compilation this app posted as that video.
+    publish_id: int | None = None
+    channel_id: str | None = None
+
+
+def ours_by_video(d) -> dict[str, int]:
+    """YouTube video id -> the clip (or, negative, compilation) this app made
+    it from: direct uploads, and posts that went out through WoopSocial or
+    Upload-Post with a YouTube link."""
+    from publish.youtube_status import video_id_from
+
+    ours: dict[str, int] = {}
+    for r in d.conn.execute("SELECT clip_id, youtube_id FROM uploads").fetchall():
+        ours[r["youtube_id"]] = r["clip_id"]
+    for r in d.conn.execute(
+        "SELECT clip_id, post_id, post_url FROM clip_publishes WHERE platform = 'youtube'"
+    ).fetchall():
+        vid = video_id_from(r["post_url"] or "") or video_id_from(r["post_id"] or "")
+        if vid:
+            ours.setdefault(vid, r["clip_id"])
+    return ours
 
 
 class ThumbnailIn(BaseModel):
@@ -257,7 +305,9 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         except Exception as e:
             raise _fail(e) from e
 
-        thread = ConnectFlow(client, scopes_for(body.playlists))
+        thread = ConnectFlow(
+            client, scopes_for(body.playlists or body.all_permissions, analytics=body.all_permissions)
+        )
         _flow["thread"] = thread
         thread.start()
         return {"state": "waiting"}
@@ -297,10 +347,16 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
                 secrets.save(Path(data_dir), token_name_for(channel["id"]), token)
                 service.add_account(d, channel, list(getattr(creds, "scopes", []) or []))
             secrets.wipe(Path(data_dir), token_name_for(PENDING))
+            # Checked, not assumed: Google lets a person untick a permission on
+            # its consent screen, and the sign-in still "succeeds" without it.
+            # Say which of the asked-for permissions did not come back.
+            asked = set(getattr(thread, "_scopes", []) or [])
+            got = set(getattr(creds, "scopes", []) or [])
             return {
                 "state": "done",
                 "channel": channel,
                 "error": error,
+                "not_granted": sorted(asked - got) if got else [],
                 "status": service.status_payload(d, config, data_dir),
             }
         finally:
@@ -361,9 +417,15 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         finally:
             d.close()
         try:
-            return {"categories": _publisher(channel_id=channel_id).categories(region)}
+            got = {"categories": _publisher(channel_id=channel_id).categories(region)}
         except Exception as e:
             raise _fail(e) from e
+        d = db()
+        try:
+            service.spend(d, "videoCategories.list")
+        finally:
+            d.close()
+        return got
 
     @app.get("/youtube/playlists")
     def playlists():
@@ -374,9 +436,15 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         finally:
             d.close()
         try:
-            return {"playlists": _publisher(channel_id=channel_id).playlists()}
+            got = {"playlists": _publisher(channel_id=channel_id).playlists()}
         except Exception as e:
             raise _fail(e) from e
+        d = db()
+        try:
+            service.spend(d, "playlists.list")
+        finally:
+            d.close()
+        return got
 
     # ---- publishing ------------------------------------------------------
 
@@ -401,7 +469,7 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         d = db()
         try:
             _guard(d)
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
             if clip is None:
                 raise HTTPException(404, "no such clip")
             if d.active_publish_job_for_clip(clip_id):
@@ -455,15 +523,20 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
                     400, "This clip has no rendered file yet. Apply your edits first."
                 )
 
+            from server import publishing_api
+
             request = {
-                "title": body.title,
+                "title": publishing_api.title_for(d, clip, body.title),
                 "description": body.description,
-                "tags": body.tags,
+                # Search keywords, the creator and the channel's standing
+                # keywords when nothing was typed (publish/seo.py).
+                "tags": publishing_api.youtube_tags(d, clip, body.tags),
                 "category_id": body.category_id,
                 "privacy": body.privacy,
                 "publish_at": publish_at,
                 "made_for_kids": body.made_for_kids,
                 "contains_synthetic_media": body.contains_synthetic_media,
+                "has_paid_product_placement": body.paid_promotion,
                 "embeddable": body.embeddable,
                 "public_stats_viewable": body.public_stats_viewable,
                 "license": body.license,
@@ -475,6 +548,24 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
             # Not part of PublishRequest — it selects which token to publish
             # with, rather than describing the video.
             request["channel_id"] = channel_id
+            if body.replace_video_id:
+                import re
+
+                from publish.youtube_shorts import PLAYLIST_SCOPES
+
+                if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", body.replace_video_id):
+                    raise HTTPException(400, "That is not a YouTube video id.")
+                try:
+                    # Deleting needs the full permission: find out now, not
+                    # after the render and the upload.
+                    _publisher(channel_id=channel_id).credentials(PLAYLIST_SCOPES)
+                except Exception as e:
+                    raise _fail(e) from e
+                request["replace_video_id"] = body.replace_video_id
+            # No playlist picked: the worker applies the playlist rule for
+            # this creator (or for compilations), creating one if allowed.
+            if not body.playlist_id and service.load_settings(d).get("playlists_enabled"):
+                request["playlist_auto"] = publishing_api.playlist_key(d, clip)
             job_id = d.add_publish_job(
                 clip_id,
                 json.dumps(request),
@@ -507,6 +598,52 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         publish_worker.cancel(job_id)
         return {"cancelling": True}
 
+    # A few minutes of memory per channel: the page opens often, and the
+    # numbers do not move by the second.
+    _channel_cache: dict[str, tuple[float, list[dict]]] = {}
+
+    @app.get("/youtube/channel-videos")
+    def channel_videos(channel_id: str | None = None, limit: int = 50, fresh: bool = False):
+        """The channel's newest videos and where each one stands on YouTube:
+        processing, scheduled, live, rejected... with views, likes and
+        comments. Everything on the channel, however it was posted; the ones
+        this app made are marked with their clip or compilation."""
+        import time as _time
+
+        from publish.youtube_status import summarize
+        from server import publishing_api
+
+        d = db()
+        try:
+            _guard(d)
+            channel = channel_id or service.default_channel_id(d)
+            if channel_id and channel_id not in {a["id"] for a in service.load_accounts(d)}:
+                raise HTTPException(400, "That YouTube channel is not connected.")
+            key = f"{channel or ''}:{limit}"
+            cached = _channel_cache.get(key)
+            if cached and not fresh and _time.monotonic() - cached[0] < 120:
+                videos = cached[1]
+            else:
+                try:
+                    items = _publisher(channel_id=channel).channel_videos(max(1, min(limit, 200)))
+                except Exception as e:
+                    raise _fail(e) from e
+                videos = [summarize(i) for i in items]
+                _channel_cache[key] = (_time.monotonic(), videos)
+                service.spend_read(d, len(items))
+                try:
+                    publishing_api.record_stats(d, videos)  # best times learn from these
+                except Exception:
+                    pass
+
+            ours = ours_by_video(d)
+            return {
+                "channel_id": channel,
+                "videos": [{**v, "publish_id": ours.get(v["video_id"])} for v in videos],
+            }
+        finally:
+            d.close()
+
     @app.get("/youtube/uploads")
     def uploads(limit: int = 50):
         d = db()
@@ -515,6 +652,219 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
             return {"uploads": [dict(r) for r in d.recent_uploads(max(1, min(limit, 200)))]}
         finally:
             d.close()
+
+    @app.post("/youtube/videos/{video_id}/unschedule")
+    def unschedule_video(video_id: str, body: PushThumbnailIn):
+        """Take a scheduled video off YouTube's schedule (it stays, private).
+        Works for any scheduled video on the channel, however it was posted,
+        and marks this app's own record of it as cancelled so the schedule
+        list stops showing it. About 51 quota units."""
+        import re
+
+        from publish.youtube_status import video_id_from
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", video_id):
+            raise HTTPException(400, "That is not a YouTube video id.")
+        d = db()
+        try:
+            _guard(d)
+            channel = body.channel_id or _default(d)
+            if body.channel_id and body.channel_id not in {a["id"] for a in service.load_accounts(d)}:
+                raise HTTPException(400, "That YouTube channel is not connected.")
+        finally:
+            d.close()
+        # YouTube already agrees with what was asked: not scheduled any more (an
+        # earlier cancel got through, or it was done in Studio) or gone. That is
+        # a success for this button; only our own records still need closing.
+        settled = None
+        try:
+            _publisher(channel_id=channel).unschedule(video_id)
+        except PublishError as e:
+            if e.message == "That video is not scheduled.":
+                settled = False
+            elif e.message == "YouTube has no such video on this channel.":
+                settled = True
+            else:
+                raise _fail(e) from e
+        except Exception as e:
+            raise _fail(e) from e
+        d = db()
+        try:
+            service.spend(d, "videos.list")
+            if settled is None:
+                service.spend(d, "videos.update")
+            service.retire_video(d, video_id, "Taken off YouTube's schedule.", forget_upload=bool(settled))
+        finally:
+            d.close()
+        for key in [k for k in _channel_cache if k.startswith(f"{channel or ''}:")]:
+            _channel_cache.pop(key, None)
+        return {"unscheduled": True, "video_id": video_id}
+
+    @app.post("/youtube/videos/{video_id}/replace")
+    def replace_video(video_id: str, body: ReplaceIn):
+        """Re-render the clip a video came from and put the result up in its
+        place, in one step: re-render, upload a new copy with the same title,
+        description, tags and settings (and the same go-live time when it was
+        scheduled), and only once that upload has succeeded delete the old
+        video. Nothing is lost if the render or upload fails. Subscribers are
+        not notified a second time. Clips only: a compilation is re-rendered
+        in the Editor. Needs the full YouTube permission (for the delete)."""
+        import re
+
+        from publish.schedule import validate_publish_at
+        from publish.youtube_shorts import PLAYLIST_SCOPES
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", video_id):
+            raise HTTPException(400, "That is not a YouTube video id.")
+        d = db()
+        try:
+            _guard(d)
+            channel = body.channel_id or _default(d)
+            if body.channel_id and body.channel_id not in {a["id"] for a in service.load_accounts(d)}:
+                raise HTTPException(400, "That YouTube channel is not connected.")
+            pid = ours_by_video(d).get(video_id)
+            if pid is None:
+                raise HTTPException(400, "This video was not made in this app, so there is no clip to re-render.")
+            if pid < 0:
+                raise HTTPException(
+                    400,
+                    "This is a compilation. Re-render it in the Editor's Compilations tab, then "
+                    "publish it and delete this one.",
+                )
+            clip = d.get_publishable(pid)
+            if clip is None:
+                # A re-render gave the clip a new id: find it by what it is.
+                up = d.conn.execute("SELECT * FROM uploads WHERE youtube_id = ?", (video_id,)).fetchone()
+                if up is not None and up["video_id"]:
+                    clip = d.conn.execute(
+                        "SELECT * FROM clips WHERE video_id = ? AND start_s = ? AND end_s = ?",
+                        (up["video_id"], up["start_s"], up["end_s"]),
+                    ).fetchone()
+            if clip is None:
+                raise HTTPException(404, "The clip this came from no longer exists.")
+        finally:
+            d.close()
+        publisher = _publisher(channel_id=channel)
+        try:
+            publisher.credentials(PLAYLIST_SCOPES)
+            item = publisher.video_details(video_id)
+        except Exception as e:
+            raise _fail(e) from e
+        snippet, status = item.get("snippet") or {}, item.get("status") or {}
+        d = db()
+        try:
+            service.spend(d, "videos.list")
+        finally:
+            d.close()
+        publish_at = None
+        if status.get("publishAt"):
+            try:
+                publish_at = validate_publish_at(status["publishAt"])
+            except Exception as e:
+                raise HTTPException(
+                    400,
+                    "The old video goes live too soon to re-render and replace on the same schedule. "
+                    "Remove it from the schedule first, then publish the clip again. "
+                    + str(getattr(e, "message", e)),
+                ) from e
+        has_thumb = (Path(data_dir) / "thumbnails" / f"clip_{int(clip['id'])}_chosen.jpg").exists()
+        payload = PublishIn(
+            title=snippet.get("title") or clip["title"] or "Untitled",
+            description=snippet.get("description") or "",
+            tags=list(snippet.get("tags") or []),
+            category_id=snippet.get("categoryId") or "22",
+            privacy="private" if publish_at else (status.get("privacyStatus") or "public"),
+            publish_at=publish_at,
+            made_for_kids=bool(status.get("selfDeclaredMadeForKids")),
+            contains_synthetic_media=status.get("containsSyntheticMedia"),
+            embeddable=status.get("embeddable", True),
+            public_stats_viewable=status.get("publicStatsViewable", True),
+            license=status.get("license") or "youtube",
+            default_language=snippet.get("defaultLanguage"),
+            notify_subscribers=False,
+            thumbnail=has_thumb,
+            channel_id=body.channel_id,
+            render_first=RenderFirst(),
+            replace_video_id=video_id,
+        )
+        return publish_clip(int(clip["id"]), payload)
+
+    @app.post("/youtube/videos/{video_id}/delete")
+    def delete_video(video_id: str, body: DeleteVideoIn):
+        """Delete a video from the channel, for good. The way to replace one
+        with a re-rendered clip: YouTube cannot swap the file of an existing
+        upload. This app's record of it is closed (state 'skipped'), which is
+        what lets the clip be published again. About 50 quota units."""
+        import re
+
+        from publish.youtube_status import video_id_from
+
+        if not body.confirm:
+            raise HTTPException(400, "Deleting a video cannot be undone: confirm it.")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", video_id):
+            raise HTTPException(400, "That is not a YouTube video id.")
+        d = db()
+        try:
+            _guard(d)
+            channel = body.channel_id or _default(d)
+            if body.channel_id and body.channel_id not in {a["id"] for a in service.load_accounts(d)}:
+                raise HTTPException(400, "That YouTube channel is not connected.")
+        finally:
+            d.close()
+        try:
+            _publisher(channel_id=channel).delete_video(video_id)
+        except Exception as e:
+            raise _fail(e) from e
+        d = db()
+        try:
+            service.spend(d, "videos.delete")
+            service.retire_video(d, video_id, "Deleted from YouTube.", forget_upload=True)
+        finally:
+            d.close()
+        for key in [k for k in _channel_cache if k.startswith(f"{channel or ''}:")]:
+            _channel_cache.pop(key, None)
+        return {"deleted": True, "video_id": video_id}
+
+    @app.post("/youtube/videos/{video_id}/thumbnail")
+    def push_thumbnail(video_id: str, body: PushThumbnailIn):
+        """Put this app's saved thumbnail on a video that is already on the
+        channel, however it was posted (direct, WoopSocial, Upload-Post: it is
+        the same channel and the same YouTube API). About 50 quota units.
+        YouTube's own refusal comes back as the message; custom thumbnails need
+        a verified channel."""
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", video_id):
+            raise HTTPException(400, "That is not a YouTube video id.")
+        d = db()
+        try:
+            _guard(d)
+            channel = body.channel_id or _default(d)
+            if body.channel_id and body.channel_id not in {a["id"] for a in service.load_accounts(d)}:
+                raise HTTPException(400, "That YouTube channel is not connected.")
+            pid = body.publish_id if body.publish_id is not None else ours_by_video(d).get(video_id)
+        finally:
+            d.close()
+        if pid is None:
+            raise HTTPException(
+                400, "This video was not made in this app, so there is no thumbnail here to send."
+            )
+        image = (Path(data_dir) / "thumbnails" / f"clip_{int(pid)}_chosen.jpg").resolve()
+        if not within((Path(data_dir) / "thumbnails").resolve(), image) or not image.exists():
+            raise HTTPException(404, "No thumbnail is saved for that clip yet. Design one first.")
+        try:
+            _publisher(channel_id=channel).set_thumbnail(video_id, str(image))
+        except Exception as e:
+            raise _fail(e) from e
+        d = db()
+        try:
+            service.spend(d, "thumbnails.set")
+        finally:
+            d.close()
+        # The list still holds the old picture until YouTube has re-cut it.
+        for key in [k for k in _channel_cache if k.startswith(f"{channel or ''}:")]:
+            _channel_cache.pop(key, None)
+        return {"pushed": True, "video_id": video_id, "publish_id": pid}
 
     # ---- thumbnails ------------------------------------------------------
 
@@ -541,7 +891,7 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         d = db()
         try:
             _guard(d)
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
         finally:
             d.close()
         if clip is None or not clip["path"]:
@@ -596,7 +946,7 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
             _guard(d)
             items, warnings = [], []
             for clip_id, when in zip(body.clip_ids, times):
-                clip = d.get_clip(clip_id)
+                clip = d.get_publishable(clip_id)
                 if clip is None:
                     warnings.append(f"Clip {clip_id} no longer exists.")
                     continue
@@ -608,7 +958,10 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
                     "title": clip["title"] or clip["hook"] or f"Clip {clip_id}",
                     # Resolved exactly as the worker will build it, standing
                     # block and hashtags included, so the preview is the truth.
-                    "description": _describe(d, clip, clip["description"] or ""),
+                    "description": _describe(
+                        d, clip, clip["description"] or "",
+                        (clip["playlist_id"] if "playlist_id" in clip.keys() else "") or "",
+                    ),
                     # YouTube rejects publishAt on anything but a private video,
                     # so a scheduled item is private until its moment arrives.
                     "privacy": "private" if when else body.privacy,
@@ -621,6 +974,15 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
                 warnings.append(
                     f"{len(items)} clips, but only {room} uploads left on today's quota. "
                     "The rest will fail until it resets at midnight Pacific."
+                )
+            # Each upload can also spend up to ~100 units from the shared pool
+            # (a thumbnail and a playlist, 50 each), which runs out about as
+            # soon as the upload bucket does once other calls are counted.
+            worst = len(items) * 100
+            if worst > ledger.units_remaining():
+                warnings.append(
+                    f"These could spend up to {worst} of the {ledger.units_remaining()} quota units "
+                    "left today (thumbnails and playlists cost 50 each). Some steps may be refused."
                 )
             return {"items": items, "warnings": warnings}
         finally:
@@ -650,7 +1012,7 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         try:
             _guard(d)
             for item in body.items:
-                clip = d.get_clip(item.clip_id)
+                clip = d.get_publishable(item.clip_id)
                 if clip is None:
                     continue
                 if not item.title:
@@ -694,7 +1056,7 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         d = db()
         try:
             _guard(d)
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
         finally:
             d.close()
         if clip is None or not clip["path"]:
@@ -727,7 +1089,7 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         d = db()
         try:
             _guard(d)
-            clip = d.get_clip(clip_id)
+            clip = d.get_publishable(clip_id)
         finally:
             d.close()
         if clip is None:

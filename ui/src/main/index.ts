@@ -11,7 +11,7 @@ import {
   shell
 } from 'electron'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { setupUpdater } from './updater'
 
@@ -118,6 +118,15 @@ ipcMain.handle('tray:set', (_event, on: unknown) => {
  *  default port, and the engine falls back to that because startBackend only
  *  overrides the host when packaged.
  */
+function bundledModelsDir(): string {
+  // Models are gigabytes, so they live with the creator's other big files
+  // rather than in their user profile. This must match how data_dir resolves
+  // in core/paths.py, or the engine and the runtime disagree about what is
+  // downloaded.
+  const localAppData = process.env.LOCALAPPDATA ?? join(app.getPath('home'), 'AppData', 'Local')
+  return join(localAppData, 'Video Factory', 'data', 'models')
+}
+
 function startOllama(): void {
   if (!app.isPackaged) return
 
@@ -125,16 +134,17 @@ function startOllama(): void {
   // places the runtime — the same shape as _internal/ffmpeg.
   const exe = join(process.resourcesPath, 'backend', '_internal', 'ollama', 'ollama.exe')
 
-  // Models are gigabytes, so they live with the creator's other big files
-  // rather than in their user profile. This must match how data_dir resolves
-  // in core/paths.py, or the engine and the runtime disagree about what is
-  // downloaded.
-  const localAppData = process.env.LOCALAPPDATA ?? join(app.getPath('home'), 'AppData', 'Local')
-  const models = join(localAppData, 'Video Factory', 'data', 'models')
-
   ollama = spawn(exe, ['serve'], {
     stdio: 'ignore',
-    env: { ...process.env, OLLAMA_HOST, OLLAMA_MODELS: models },
+    // One model resident and one request at a time, the same limits the
+    // engine sets when it starts Ollama itself (llm/runtime.py).
+    env: {
+      ...process.env,
+      OLLAMA_HOST,
+      OLLAMA_MODELS: bundledModelsDir(),
+      OLLAMA_MAX_LOADED_MODELS: '1',
+      OLLAMA_NUM_PARALLEL: '1'
+    },
     windowsHide: true
   })
   ollama.on('error', (e) => console.error(`bundled Ollama could not start: ${e.message}`))
@@ -190,7 +200,12 @@ function startBackend(): void {
   // Packaged builds run their own Ollama on a private port, so the engine has
   // to be told where it is — settings.yaml's default 11434 would send it to a
   // system install the creator may not have.
-  if (app.isPackaged) backendEnv.VIDEO_FACTORY_OLLAMA_HOST = `http://${OLLAMA_HOST}`
+  if (app.isPackaged) {
+    backendEnv.VIDEO_FACTORY_OLLAMA_HOST = `http://${OLLAMA_HOST}`
+    // The engine can restart Ollama from the app (Start in the sidebar), and
+    // it has to point the new server at the same models folder.
+    backendEnv.VIDEO_FACTORY_OLLAMA_MODELS = bundledModelsDir()
+  }
 
   // Dev: run the repo's Python directly (repo root is one level up from ui/).
   // Packaged: run the frozen backend exe shipped in resources/backend/.
@@ -454,6 +469,14 @@ const EXTERNAL_ALLOWED = [
   // on that domain, so it is allowed too — otherwise the button is dead.
   /^https:\/\/([a-z0-9-]+\.)?woopsocial\.com(\/|$|\?)/,
   /^https:\/\/([a-z0-9-]+\.)?endorsely\.com(\/|$|\?)/,
+  // Cloud page: where to get each sync client, and rclone. Exact pages, not
+  // whole hosts: nothing else on these domains is linked from the app.
+  /^https:\/\/www\.microsoft\.com\/microsoft-365\/onedrive\/download$/,
+  /^https:\/\/www\.google\.com\/drive\/download\/$/,
+  /^https:\/\/www\.dropbox\.com\/install$/,
+  /^https:\/\/support\.apple\.com\/icloud$/,
+  /^https:\/\/www\.box\.com\/drive$/,
+  /^https:\/\/rclone\.org\/(install|overview)\/$/,
   // Where a published clip actually ended up. Upload-Post returns one URL per
   // platform and the publish panel turns each into an "Open" button; without
   // these the buttons are silently inert. Host-restricted, since the path
@@ -500,6 +523,19 @@ ipcMain.handle('read-clipboard-key', async () => {
 ipcMain.handle('get-downloads-path', () => app.getPath('downloads'))
 
 // Folder picker for choosing where exported clips are saved.
+// After a native alert/confirm/prompt closes, Chromium on Windows leaves the
+// window without keyboard focus: the caret still blinks in a text field but
+// nothing typed reaches it, until the window is clicked away from and back to.
+// The renderer asks for exactly that (see renderer/src/lib/nativeDialogs.ts).
+ipcMain.handle('refocus', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (!win || win.isDestroyed()) return false
+  win.blur()
+  win.focus()
+  win.webContents.focus()
+  return true
+})
+
 ipcMain.handle('pick-folder', async () => {
   const result = await dialog.showOpenDialog({
     title: 'Choose where to save exported clips',
@@ -507,6 +543,24 @@ ipcMain.handle('pick-folder', async () => {
     properties: ['openDirectory', 'createDirectory']
   })
   return result.canceled ? null : result.filePaths[0]
+})
+
+// Local page: reveal a finished file, or open a destination folder. Only a
+// file that exists is revealed, and only a directory is opened: openPath on
+// a file would run it, which a path from the renderer must never do.
+ipcMain.handle('show-in-folder', (_e, path: unknown) => {
+  if (typeof path !== 'string' || !existsSync(path)) return false
+  shell.showItemInFolder(path)
+  return true
+})
+ipcMain.handle('open-folder', async (_e, path: unknown) => {
+  if (typeof path !== 'string') return false
+  try {
+    if (!statSync(path).isDirectory()) return false
+  } catch {
+    return false
+  }
+  return (await shell.openPath(path)) === ''
 })
 
 // One Video Factory at a time. A second launch used to start a second engine

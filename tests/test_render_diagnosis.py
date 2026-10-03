@@ -78,7 +78,7 @@ def test_falling_back_to_cpu_changes_only_the_encoder():
     retry would silently lose the seek, the subtitles or the audio settings."""
     hw = _CANDIDATES["nvenc"]
     cmd = ["ffmpeg", "-y", "-hwaccel", "auto", "-ss", "674.00", "-i", "in.mp4",
-           "-t", "66.00", "-vsync", "cfr", *hw,
+           "-t", "66.00", "-fps_mode", "cfr", *hw,
            "-c:a", "aac", "-b:a", "128k", "-vf", "subtitles=x.ass", "out.mp4"]
 
     swapped = _swap_encoder(cmd, hw, CPU_ARGS)
@@ -107,3 +107,18 @@ def test_the_app_version_survives_freezing(monkeypatch, tmp_path):
     from server.feedback import _app_version
 
     assert _app_version()["app"] == "9.9.9"
+
+
+def test_no_ffmpeg_options_removed_in_ffmpeg_8():
+    """-vsync was removed from FFmpeg; the bundled 9.x rejects the whole command
+    line, so every clip in a job failed to render. -fps_mode replaces it."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    offenders = [
+        str(p.relative_to(root))
+        for folder in ("video", "core", "compilation", "longform", "analysis")
+        for p in (root / folder).rglob("*.py")
+        if '"-vsync"' in p.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"-vsync is gone from FFmpeg; use -fps_mode in {offenders}"

@@ -45,6 +45,7 @@ def survey(db, data_dir: Path) -> dict:
         "render_leftovers": [],
         "orphan_clips": [],
         "previews": [],
+        "posters": [],
     }
 
     downloads = data_dir / "downloads"
@@ -75,6 +76,12 @@ def survey(db, data_dir: Path) -> dict:
     previews = data_dir / "previews"
     if previews.is_dir():
         groups["previews"] = [f for f in previews.iterdir() if f.is_file()]
+
+    posters = data_dir / "posters"
+    if posters.is_dir():
+        # Small stills of clips (video/poster.py); the ones the app still needs
+        # are simply made again on the next view, so all of them are scratch.
+        groups["posters"] = [f for f in posters.iterdir() if f.is_file()]
 
     reclaimable = {k: {"files": len(v), "bytes": _size(v)} for k, v in groups.items()}
 

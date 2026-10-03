@@ -8,6 +8,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
+
+from server.media import video_response
 from pydantic import BaseModel
 
 from core import queue
@@ -85,4 +87,4 @@ def install(app, *, db, data_dir: Path, worker, broadcaster) -> None:
         path = Path(row["path"]).resolve()
         if not path.exists() or root not in path.parents:
             raise HTTPException(404, "variant file missing")
-        return FileResponse(path, media_type="video/mp4")
+        return video_response(path)

@@ -30,6 +30,9 @@ from datetime import date, datetime, timedelta, timezone
 # never hit the local guard first.
 UPLOAD_LIMIT = 100
 
+# The shared pool everything except uploads and search draws from, per day.
+DAILY_UNITS = 10_000
+
 # Cost in units against the shared 10,000/day pool. videos.insert and
 # search.list are absent on purpose — they bill to their own buckets now.
 COSTS = {
@@ -37,7 +40,11 @@ COSTS = {
     "videos.list": 1,
     "thumbnails.set": 50,
     "playlistItems.insert": 50,
+    "playlistItems.list": 1,
+    "commentThreads.insert": 50,
+    "videos.delete": 50,
     "playlists.list": 1,
+    "playlists.insert": 50,
     "channels.list": 1,
     "videoCategories.list": 1,
     "i18nLanguages.list": 1,
@@ -106,9 +113,21 @@ class Ledger:
         self.day: str = state.get("day", "")
         self.uploads: int = int(state.get("uploads", 0))
         self.blocked_until: str = state.get("blocked_until", "")
+        # Units spent from the shared pool today, and by which call: so the
+        # meter can say where they went, not only how many.
+        self.units: int = int(state.get("units", 0))
+        self.calls: dict[str, int] = {
+            str(k): int(v) for k, v in (state.get("calls") or {}).items()
+        }
 
     def as_dict(self) -> dict:
-        return {"day": self.day, "uploads": self.uploads, "blocked_until": self.blocked_until}
+        return {
+            "day": self.day,
+            "uploads": self.uploads,
+            "blocked_until": self.blocked_until,
+            "units": self.units,
+            "calls": self.calls,
+        }
 
     def _roll(self, now: datetime | None = None) -> None:
         today = pacific_day(now)
@@ -116,6 +135,8 @@ class Ledger:
             self.day = today
             self.uploads = 0
             self.blocked_until = ""
+            self.units = 0
+            self.calls = {}
 
     def remaining(self, now: datetime | None = None) -> int:
         self._roll(now)
@@ -123,6 +144,20 @@ class Ledger:
 
     def exhausted(self, now: datetime | None = None) -> bool:
         return self.remaining(now) <= 0
+
+    def units_remaining(self, now: datetime | None = None) -> int:
+        self._roll(now)
+        return max(0, DAILY_UNITS - self.units)
+
+    def record_call(self, method: str, count: int = 1, now: datetime | None = None) -> int:
+        """Spend the units `count` calls of `method` cost. Returns the cost;
+        a method with no listed cost (uploads, search) spends none."""
+        self._roll(now)
+        cost = COSTS.get(method, 0) * max(0, int(count))
+        if cost:
+            self.units += cost
+            self.calls[method] = self.calls.get(method, 0) + int(count)
+        return cost
 
     def record_upload(self, now: datetime | None = None) -> None:
         self._roll(now)
@@ -133,3 +168,23 @@ class Ledger:
         self._roll(now)
         self.uploads = max(self.uploads, UPLOAD_LIMIT)
         self.blocked_until = next_reset(now).isoformat().replace("+00:00", "Z")
+
+
+def read_cost(videos: int) -> dict[str, int]:
+    """The calls it takes to read `videos` of the channel's uploads
+    (publish/youtube_shorts.channel_videos): the channel, then one page of the
+    uploads playlist and one videos.list per 50."""
+    pages = max(1, -(-int(videos) // 50))
+    return {"channels.list": 1, "playlistItems.list": pages, "videos.list": pages}
+
+
+# What other providers publish as their own daily limits, per connected
+# account. Only limits their documentation states are listed; a platform with
+# none here is shown as "no published limit", never a guessed number.
+#   (provider, platform) -> (posts per day, where that comes from)
+PROVIDER_LIMITS: dict[tuple[str, str], tuple[int, str]] = {
+    ("woopsocial", "youtube"): (
+        5, "WoopSocial rations YouTube to five posts a day to protect the Google Cloud quota it shares."),
+    ("uploadpost", "tiktok"): (15, "Upload-Post FAQ: 15 posts per day per TikTok account."),
+    ("uploadpost", "instagram"): (50, "Upload-Post FAQ: 50 posts per rolling 24 hours per Instagram account."),
+}

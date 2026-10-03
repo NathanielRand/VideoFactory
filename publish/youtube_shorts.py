@@ -57,6 +57,12 @@ AUTH_SCOPES = [*UPLOAD_SCOPES, ANALYTICS_SCOPE]
 # trade worth making.
 CONNECT_SCOPES = [SCOPE_UPLOAD, SCOPE_READONLY]
 PLAYLIST_SCOPES = [SCOPE_UPLOAD, SCOPE_READONLY, SCOPE_FULL]
+# commentThreads.insert asks for this one specifically. It is requested
+# alongside the playlist permission on new connections; a channel connected
+# before that simply skips the first comment with a warning, and is not
+# broken by it (PLAYLIST_SCOPES itself is unchanged, so no one is re-prompted).
+SCOPE_COMMENT = "https://www.googleapis.com/auth/youtube.force-ssl"
+COMMENT_SCOPES = [SCOPE_UPLOAD, SCOPE_READONLY, SCOPE_COMMENT]
 
 # Multiple of 256 KB, as the resumable protocol requires. The old code passed
 # chunksize=-1, which uploads the whole file in one request and makes progress
@@ -193,7 +199,7 @@ class YouTubeShortsPublisher(Publisher):
         if not creds.has_scopes(scopes):
             raise AuthRequired(
                 "This needs a permission you have not granted yet. "
-                "Reconnect your YouTube account in Settings."
+                "Press Update permissions on the YouTube connection in Settings."
             )
         if creds.expired and creds.refresh_token:
             try:
@@ -313,6 +319,255 @@ class YouTubeShortsPublisher(Publisher):
         except Exception as e:
             raise _wrap(e) from e
 
+    def create_playlist(self, title: str, description: str = "", privacy: str = "public") -> str:
+        """Make a playlist and return its id. 50 units; needs the playlist scope."""
+        try:
+            response = (
+                self.service(PLAYLIST_SCOPES)
+                .playlists()
+                .insert(
+                    part="snippet,status",
+                    body={
+                        "snippet": {"title": title[:150], "description": description[:5000]},
+                        "status": {"privacyStatus": privacy},
+                    },
+                )
+                .execute()
+            )
+        except Exception as e:
+            raise _wrap(e) from e
+        return str(response.get("id") or "")
+
+    def video_stats(self, video_ids: list[str]) -> dict[str, dict]:
+        """Views, likes, comments and go-live time for up to 50 videos. 1 unit.
+
+        Feeds publish/timing.py: which hours this channel's audience turns up.
+        """
+        ids = [v for v in video_ids if v][:50]
+        if not ids:
+            return {}
+        try:
+            response = (
+                self.service()
+                .videos()
+                .list(part="statistics,snippet,status", id=",".join(ids))
+                .execute()
+            )
+        except Exception as e:
+            raise _wrap(e) from e
+        out: dict[str, dict] = {}
+        for item in response.get("items") or []:
+            stats = item.get("statistics", {})
+            out[item["id"]] = {
+                "views": int(stats.get("viewCount") or 0),
+                "likes": int(stats.get("likeCount") or 0),
+                "comments": int(stats.get("commentCount") or 0),
+                "published_at": item.get("snippet", {}).get("publishedAt", ""),
+                "privacy": item.get("status", {}).get("privacyStatus", ""),
+            }
+        return out
+
+    def daily_report(self, days: int = 30) -> list[dict]:
+        """Per-day channel numbers from YouTube Analytics: views, minutes
+        watched, average view duration, likes, comments and subscribers
+        gained. Needs the analytics permission, which connections made before
+        it was asked for lack: that raises AuthRequired ("Reconnect")."""
+        from datetime import date, timedelta
+
+        from googleapiclient.discovery import build
+
+        creds = self.credentials([ANALYTICS_SCOPE])
+        try:
+            report = (
+                build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
+                .reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=(date.today() - timedelta(days=max(1, days) - 1)).isoformat(),
+                    endDate=date.today().isoformat(),
+                    metrics="views,estimatedMinutesWatched,averageViewDuration,likes,comments,subscribersGained,subscribersLost",
+                    dimensions="day",
+                    sort="day",
+                )
+                .execute()
+            )
+        except Exception as e:
+            raise _wrap(e) from e
+        names = [h["name"] for h in report.get("columnHeaders") or []]
+        return [dict(zip(names, row)) for row in report.get("rows") or []]
+
+    def audience_report(self, days: int = 90) -> dict:
+        """Who watches the channel, from YouTube Analytics: viewer share by
+        age group and gender, and views by country (top five). Small channels
+        come back with no rows (YouTube withholds what could identify a
+        viewer), which is an empty answer, not an error. Needs the analytics
+        permission (raises AuthRequired)."""
+        from datetime import date, timedelta
+
+        from googleapiclient.discovery import build
+
+        creds = self.credentials([ANALYTICS_SCOPE])
+        window = {
+            "ids": "channel==MINE",
+            "startDate": (date.today() - timedelta(days=max(1, days) - 1)).isoformat(),
+            "endDate": date.today().isoformat(),
+        }
+        try:
+            reports = build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False).reports()
+            demo = reports.query(metrics="viewerPercentage", dimensions="ageGroup,gender", **window).execute()
+            geo = reports.query(metrics="views", dimensions="country", sort="-views", maxResults=5, **window).execute()
+        except Exception as e:
+            raise _wrap(e) from e
+
+        def rows(report: dict) -> list[dict]:
+            names = [h["name"] for h in report.get("columnHeaders") or []]
+            return [dict(zip(names, row)) for row in report.get("rows") or []]
+
+        return {"age_gender": rows(demo), "countries": rows(geo)}
+
+    def video_subscribers(self, days: int = 90, limit: int = 25) -> list[dict]:
+        """The videos that brought the most subscribers, from YouTube
+        Analytics: per video, subscribers gained and lost over the last `days`
+        (with views, for context), best first. "Gained" is what YouTube credits
+        to that video (people who subscribed while watching it or from its
+        page), the closest thing there is to "the video that caused the
+        subscription". Needs the analytics permission (raises AuthRequired)."""
+        from datetime import date, timedelta
+
+        from googleapiclient.discovery import build
+
+        creds = self.credentials([ANALYTICS_SCOPE])
+        try:
+            report = (
+                build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
+                .reports()
+                .query(
+                    ids="channel==MINE",
+                    startDate=(date.today() - timedelta(days=max(1, days) - 1)).isoformat(),
+                    endDate=date.today().isoformat(),
+                    metrics="views,subscribersGained,subscribersLost",
+                    dimensions="video",
+                    sort="-subscribersGained",
+                    maxResults=max(1, min(int(limit), 200)),
+                )
+                .execute()
+            )
+        except Exception as e:
+            raise _wrap(e) from e
+        names = [h["name"] for h in report.get("columnHeaders") or []]
+        return [dict(zip(names, row)) for row in report.get("rows") or []]
+
+    def subscriber_count(self) -> dict:
+        """The channel's subscriber total (1 unit). YouTube rounds it to three
+        significant figures, and a channel can hide it: `count` is then None."""
+        try:
+            got = self.service().channels().list(part="statistics", mine=True).execute().get("items") or []
+        except Exception as e:
+            raise _wrap(e) from e
+        stats = (got[0].get("statistics") if got else None) or {}
+        hidden = bool(stats.get("hiddenSubscriberCount"))
+        raw = stats.get("subscriberCount")
+        return {"count": None if hidden or raw is None else int(raw), "hidden": hidden}
+
+    def unschedule(self, video_id: str) -> None:
+        """Take a scheduled video off the schedule: it stays on the channel,
+        private, with no go-live time. Nothing is deleted.
+
+        videos.update replaces the whole status part, so the current status
+        is read first and sent back with only publishAt removed; anything
+        omitted (license, embeddable, made-for-kids) would reset. Costs 51
+        units. Needs the full YouTube permission, the one playlists use, which
+        the default connection does not include: that raises AuthRequired with
+        a "Reconnect" message."""
+        svc = self.service(PLAYLIST_SCOPES)
+        try:
+            got = svc.videos().list(part="status", id=video_id).execute().get("items") or []
+            if not got:
+                raise PublishError("YouTube has no such video on this channel.")
+            status = dict(got[0].get("status") or {})
+            if not status.get("publishAt"):
+                raise PublishError("That video is not scheduled.")
+            status.pop("publishAt")
+            status["privacyStatus"] = "private"
+            svc.videos().update(part="status", body={"id": video_id, "status": status}).execute()
+        except PublishError:
+            raise
+        except Exception as e:
+            raise _wrap(e) from e
+
+    def video_details(self, video_id: str) -> dict:
+        """The snippet and status of one video on the channel (1 unit), so a
+        replacement can carry the same title, description, tags and settings."""
+        try:
+            got = self.service().videos().list(part="snippet,status", id=video_id).execute().get("items") or []
+        except Exception as e:
+            raise _wrap(e) from e
+        if not got:
+            raise PublishError("YouTube has no such video on this channel.")
+        return got[0]
+
+    def delete_video(self, video_id: str) -> None:
+        """Delete a video from the channel. Permanent: its views, likes and
+        comments go with it. 50 units; needs the full YouTube permission
+        (see unschedule)."""
+        svc = self.service(PLAYLIST_SCOPES)
+        try:
+            svc.videos().delete(id=video_id).execute()
+        except Exception as e:
+            raise _wrap(e) from e
+
+    def set_thumbnail(self, video_id: str, image: str) -> None:
+        """Replace the custom thumbnail of a video already on the channel.
+        50 quota units. YouTube's own refusal (an unverified channel, a file
+        over 2 MB) comes back as the PublishError message."""
+        try:
+            self.service().thumbnails().set(videoId=video_id, media_body=str(image)).execute()
+        except Exception as e:
+            raise _wrap(e) from e
+
+    def channel_videos(self, limit: int = 50) -> list[dict]:
+        """The channel's newest uploads, however they were posted (this app,
+        WoopSocial, Upload-Post or by hand), as full videos.list items.
+
+        Read from the channel's own uploads playlist, which as the owner
+        includes private and scheduled videos. About 2 quota units per 50.
+        """
+        limit = max(1, min(int(limit), 200))
+        try:
+            svc = self.service()
+            channels = svc.channels().list(part="contentDetails", mine=True).execute()
+            items = channels.get("items") or []
+            if not items:
+                return []
+            uploads = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+            ids: list[str] = []
+            page = None
+            while len(ids) < limit:
+                got = (
+                    svc.playlistItems()
+                    .list(part="contentDetails", playlistId=uploads,
+                          maxResults=min(50, limit - len(ids)), pageToken=page)
+                    .execute()
+                )
+                ids += [i["contentDetails"]["videoId"] for i in got.get("items") or []]
+                page = got.get("nextPageToken")
+                if not page:
+                    break
+            videos: list[dict] = []
+            for i in range(0, len(ids), 50):
+                got = (
+                    svc.videos()
+                    .list(part="snippet,status,statistics,processingDetails,contentDetails",
+                          id=",".join(ids[i : i + 50]))
+                    .execute()
+                )
+                videos += got.get("items") or []
+        except Exception as e:
+            raise _wrap(e) from e
+        # videos.list does not promise the order asked for.
+        order = {vid: n for n, vid in enumerate(ids)}
+        return sorted(videos, key=lambda v: order.get(v.get("id"), len(order)))
+
     def categories(self, region: str = "US") -> list[dict]:
         """Assignable video categories for a region. 1 unit."""
         try:
@@ -377,17 +632,37 @@ class YouTubeShortsPublisher(Publisher):
         scopes = PLAYLIST_SCOPES if request.playlist_id else CONNECT_SCOPES
         service = self.service(scopes)
 
-        media = MediaFileUpload(
-            str(path), chunksize=CHUNK_BYTES, resumable=True, mimetype="video/*"
-        )
-        insert = service.videos().insert(
-            part=parts_for(request),
-            body=build_insert_body(request),
-            media_body=media,
-            notifySubscribers=bool(request.notify_subscribers),
-        )
+        def start(req: PublishRequest):
+            media = MediaFileUpload(
+                str(path), chunksize=CHUNK_BYTES, resumable=True, mimetype="video/*"
+            )
+            return service.videos().insert(
+                part=parts_for(req),
+                body=build_insert_body(req),
+                media_body=media,
+                notifySubscribers=bool(req.notify_subscribers),
+            )
 
-        response = self._run_upload(insert, on_progress, should_cancel)
+        warnings: list[str] = []
+        try:
+            response = self._run_upload(start(request), on_progress, should_cancel)
+        except PublishError as e:
+            # The paid-promotion answer is a documented upload part but not
+            # on YouTube's list of settable fields. Should it be refused, it
+            # is refused when the upload session opens, before any video
+            # exists, so going again without it cannot make a duplicate.
+            said = f"{e.message} {getattr(e, 'detail', '')}".lower()
+            if request.has_paid_product_placement is None or "paidproductplacement" not in said:
+                raise
+            from dataclasses import replace
+
+            response = self._run_upload(
+                start(replace(request, has_paid_product_placement=None)), on_progress, should_cancel
+            )
+            warnings.append(
+                "YouTube did not take the paid-promotion answer through the API. "
+                "Answer it in YouTube Studio."
+            )
 
         video_id = response["id"]
         status = response.get("status", {})
@@ -400,6 +675,7 @@ class YouTubeShortsPublisher(Publisher):
             publish_at=status.get("publishAt") or request.publish_at,
             channel_id=snippet.get("channelId", ""),
             channel_title=snippet.get("channelTitle", ""),
+            warnings=warnings,
         )
 
         if result.locked_private:
@@ -442,6 +718,28 @@ class YouTubeShortsPublisher(Publisher):
                 result.warnings.append(
                     f"Uploaded, but adding it to the playlist failed: {_wrap(e).message}"
                 )
+
+        comment = (request.first_comment or "").strip()
+        if comment:
+            _emit(on_progress, "Posting the first comment", 0, 0)
+            try:
+                self.service(COMMENT_SCOPES).commentThreads().insert(
+                    part="snippet",
+                    body={
+                        "snippet": {
+                            "videoId": video_id,
+                            "topLevelComment": {"snippet": {"textOriginal": comment[:10000]}},
+                        }
+                    },
+                ).execute()
+                result.comment_posted = True
+            except Exception as e:
+                why = (
+                    "reconnect the channel in Settings to allow comments"
+                    if isinstance(e, (AuthRequired, NotConnected))
+                    else _wrap(e).message
+                )
+                result.warnings.append(f"Uploaded, but the first comment was not posted: {why}")
 
         return result
 

@@ -43,6 +43,11 @@ interface Window {
     readClipboardKey: () => Promise<string>
     getDownloadsPath: () => Promise<string>
     pickFolder: () => Promise<string | null>
+    refocus: () => Promise<boolean>
+    /** Reveal a file in Explorer / Finder. False when it is not there. */
+    showInFolder?: (path: string) => Promise<boolean>
+    /** Open a folder (never a file) in Explorer / Finder. */
+    openFolder?: (path: string) => Promise<boolean>
     /** Desktop notification. Resolves false if the OS refused it. */
     notify: (title: string, body: string) => Promise<boolean>
     /** Opens an allow-listed URL in the user's browser. Resolves false if

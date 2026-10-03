@@ -56,6 +56,9 @@ class ClipCandidate:
     engagement: int | None = None
     trending: bool = False  # names a creator/celebrity or discusses drama/trending
     subscores: dict | None = None
+    # The span the model (or signal peak) originally proposed, before fitting
+    # moved it onto sentence edges. Lets us see how far the fit shifted a clip.
+    proposed: tuple[float, float] | None = None
 
     @property
     def duration(self) -> float:

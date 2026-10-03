@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, errorText } from '../../lib/api'
-import type { AutomationStatus, Watch, WatchCreator, WatchItem } from '../../lib/types'
+import type { AutomationStatus, Watch, WatchActions, WatchCreator, WatchItem } from '../../lib/types'
 import { platformLabel } from '../../lib/uploadpost'
 import QueueItemSettings from '../queue/QueueItemSettings'
 import WatchPublishSettings from './WatchPublishSettings'
+import WatchActionsPicker from './WatchActionsPicker'
+import WatchCatchUp from './WatchCatchUp'
+import Switch from '../Switch'
+import { Film, Folder, Scissors } from '../icons'
 import { t } from '../../lib/i18n'
 
 export const WATCH_PLATFORM_LABEL: Record<string, string> = {
@@ -74,7 +78,106 @@ function CreatorLine({
   )
 }
 
-/** One watched channel: its settings, and what became of each video it saw.
+/** One line per thing the watch does with a new video, readable at a glance
+ *  with the settings closed. */
+function ActionChips({ watch }: { watch: Watch }): JSX.Element {
+  const { clips, compile, compilation } = watch.actions
+  const chip = 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs'
+  if (!clips && !compile) {
+    return (
+      <div className="flex flex-wrap gap-2">
+        <span className={`${chip} bg-raised text-muted`}>
+          <Folder size={12} /> {t('Into your Library only')}
+        </span>
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-wrap gap-2">
+      {clips && (
+        <span className={`${chip} bg-accent/10 text-accent`}>
+          <Scissors size={12} /> {t('Clips')}
+          <span className="text-muted">·</span>
+          <span className="text-ink/80">{t(publishModeLabel(watch.publish.mode))}</span>
+        </span>
+      )}
+      {compile && (
+        <button
+          type="button"
+          className={`${chip} bg-success/10 text-success hover:bg-success/20 disabled:cursor-default`}
+          disabled={!compilation.compilation_id || compilation.title === null}
+          title={t('Open the compilation')}
+          onClick={() =>
+            window.dispatchEvent(
+              new CustomEvent('open-compilation', { detail: compilation.compilation_id })
+            )
+          }
+        >
+          <Film size={12} />
+          {compilation.title === null ? (
+            <span className="text-warn">{t('Its compilation was deleted')}</span>
+          ) : (
+            <>
+              {t('Into')} “{compilation.title ?? '…'}”
+              <span className="text-muted">·</span>
+              <span className="text-ink/80">
+                {compilation.what === 'whole'
+                  ? t('whole videos')
+                  : compilation.max_clips
+                    ? `${t('best')} ${compilation.max_clips} ${t(compilation.max_clips === 1 ? 'clip' : 'clips')}`
+                    : t('all clips')}
+              </span>
+            </>
+          )}
+        </button>
+      )}
+    </div>
+  )
+}
+
+/** A titled part of the settings panel. */
+function Part({ title, children }: { title: string; children: ReactNode }): JSX.Element {
+  return (
+    <div className="space-y-3">
+      <p className="text-sm font-semibold">{title}</p>
+      {children}
+    </div>
+  )
+}
+
+/** A disclosure inside the clips panel, so the long clip and publish forms
+ *  stay one click away instead of always open. */
+function Fold({
+  label,
+  open,
+  onToggle,
+  children
+}: {
+  label: ReactNode
+  open: boolean
+  onToggle: () => void
+  children: ReactNode
+}): JSX.Element {
+  return (
+    <div className="rounded-lg bg-raised/30">
+      <button
+        type="button"
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm font-medium hover:text-accent"
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span>{label}</span>
+        <span className="text-muted" aria-hidden>
+          {open ? '▾' : '▸'}
+        </span>
+      </button>
+      {open && <div className="px-3 pb-3">{children}</div>}
+    </div>
+  )
+}
+
+/** One watched channel or playlist: what it does with new videos, and what
+ *  became of each video it saw.
  *
  *  Everything shown is read from the server, which reads a video's state live
  *  from its job and its delivery rows. Nothing is applied optimistically; an
@@ -100,7 +203,8 @@ export default function WatchCard({
   openSetup?: boolean
 }): JSX.Element {
   const [items, setItems] = useState<WatchItem[] | null>(null)
-  const [openClips, setOpenClips] = useState(openSetup)
+  const [openSettings, setOpenSettings] = useState(openSetup)
+  const [openClips, setOpenClips] = useState(false)
   const [openPublish, setOpenPublish] = useState(openSetup)
   const cardRef = useRef<HTMLElement>(null)
   useEffect(() => {
@@ -111,6 +215,14 @@ export default function WatchCard({
   const [confirmRemove, setConfirmRemove] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // The actions as last chosen here, so the tiles answer at once; replaced
+  // by the server's whenever it sends the watch again.
+  const [actions, setActions] = useState<WatchActions>(watch.actions)
+  const serverActions = JSON.stringify(watch.actions)
+  useEffect(() => {
+    setActions(watch.actions)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverActions])
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -138,7 +250,14 @@ export default function WatchCard({
     }
   }
 
+  const saveActions = (next: WatchActions): void => {
+    setActions(next)
+    void act(() => api.patchWatch(watch.id, { actions: next }))
+  }
+
+  const isPlaylist = watch.kind === 'playlist'
   const now = Date.now() / 1000
+  const live = automation.enabled && watch.enabled
   const status = !automation.enabled
     ? t('Watching is switched off.')
     : !watch.enabled
@@ -146,23 +265,37 @@ export default function WatchCard({
       : watch.last_ok_poll_at
         ? `${t('Checked')} ${relative(watch.last_ok_poll_at, now)}` +
           (watch.next_poll_at > now ? ` · ${t('next check')} ${relative(watch.next_poll_at, now)}` : '')
-        : t('Looking at the channel for the first time…')
+        : isPlaylist
+          ? t('Looking at the playlist for the first time…')
+          : t('Looking at the channel for the first time…')
 
   const visible = (items ?? []).filter((i) => showEarlier || i.status !== 'earlier')
   const earlier = (items ?? []).filter((i) => i.status === 'earlier').length
   const shown = showAll ? visible : visible.slice(0, SHOWN)
+  const small = 'btn-ghost !px-2.5 !py-1 text-xs'
 
   return (
-    <section ref={cardRef} className="card space-y-3" aria-label={watch.name}>
+    <section
+      ref={cardRef}
+      className={`card space-y-4 transition-colors ${live ? '' : 'opacity-90'}`}
+      aria-label={watch.name}
+    >
       <div className="flex items-start gap-3 flex-wrap">
-        <span className="text-xs font-semibold uppercase tracking-wide bg-raised rounded px-2 py-1 shrink-0">
-          {WATCH_PLATFORM_LABEL[watch.platform] ?? watch.platform}
-        </span>
-        <div className="min-w-0">
+        <div className="flex flex-col gap-1 shrink-0">
+          <span className="text-[11px] font-semibold uppercase tracking-wide bg-raised rounded px-2 py-1 text-center">
+            {WATCH_PLATFORM_LABEL[watch.platform] ?? watch.platform}
+          </span>
+          {isPlaylist && (
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-accent bg-accent/10 rounded px-2 py-0.5 text-center">
+              {t('Playlist')}
+            </span>
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
           <h3 className="font-semibold truncate flex items-center gap-2">
-            {watch.name || watch.channel_key}
-            {automation.enabled && watch.enabled && (
-              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-success bg-success/10 rounded-full px-2 py-0.5">
+            <span className="truncate">{watch.name || watch.channel_key}</span>
+            {live && (
+              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-success bg-success/10 rounded-full px-2 py-0.5 shrink-0">
                 <span className="size-1.5 rounded-full bg-success animate-pulse" aria-hidden />
                 {t('Watching')}
               </span>
@@ -170,49 +303,37 @@ export default function WatchCard({
           </h3>
           <p className="text-xs text-muted">{status}</p>
         </div>
-        <div className="ml-auto flex items-center gap-2 flex-wrap">
-          <label className="inline-flex items-center gap-2 text-sm" title={t('Watch this channel')}>
-            <input
-              type="checkbox"
-              className="size-4 accent-[#38BDF8]"
-              checked={watch.enabled}
-              disabled={busy}
-              onChange={(e) => void act(() => api.patchWatch(watch.id, { enabled: e.target.checked }))}
-            />
-            {watch.enabled ? t('On') : t('Off')}
-          </label>
+        <div className="flex items-center gap-2 flex-wrap">
           <button
-            className="btn-ghost !px-2 !py-1 text-xs"
-            disabled={busy || !watch.enabled || !automation.enabled}
+            className={small}
+            disabled={busy || !live}
             onClick={() => void act(() => api.checkWatch(watch.id))}
           >
             {t('Check now')}
           </button>
-          {confirmRemove ? (
-            <span className="flex items-center gap-1.5">
-              <span className="text-xs text-muted">{t('Stop watching?')}</span>
-              <button
-                className="btn-ghost !px-2 !py-1 text-xs text-error"
-                disabled={busy}
-                onClick={() => void act(() => api.deleteWatch(watch.id))}
-              >
-                {t('Remove')}
-              </button>
-              <button className="btn-ghost !px-2 !py-1 text-xs" onClick={() => setConfirmRemove(false)}>
-                {t('Cancel')}
-              </button>
-            </span>
-          ) : (
-            <button className="btn-ghost !px-2 !py-1 text-xs" onClick={() => setConfirmRemove(true)}>
-              {t('Remove')}
-            </button>
-          )}
+          <button
+            className={`${small} ${openSettings ? '!bg-accent/20 !text-accent' : ''}`}
+            aria-expanded={openSettings}
+            onClick={() => setOpenSettings(!openSettings)}
+          >
+            {t('Settings')} {openSettings ? '▾' : '▸'}
+          </button>
+          <Switch
+            size="sm"
+            checked={watch.enabled}
+            disabled={busy}
+            label={isPlaylist ? t('Watch this playlist') : t('Watch this channel')}
+            onChange={(on) => void act(() => api.patchWatch(watch.id, { enabled: on }))}
+          />
         </div>
       </div>
 
+      <ActionChips watch={watch} />
+
       {watch.last_error && (
         <p className="text-sm text-error">
-          {t('Could not check this channel:')} {watch.last_error}
+          {isPlaylist ? t('Could not check this playlist:') : t('Could not check this channel:')}{' '}
+          {watch.last_error}
           {watch.platform === 'kick' &&
             ` ${t('Kick has no official way to list videos, so this can stop working without notice.')}`}
         </p>
@@ -220,57 +341,99 @@ export default function WatchCard({
 
       {watch.creator && <CreatorLine creator={watch.creator} onOpen={onOpenCreator} />}
 
-      {openSetup && (
-        <p className="text-sm text-accent">
-          {t('Set it up now. Nothing is clipped until the channel posts something new.')}
-        </p>
-      )}
-      <div className="flex gap-2 flex-wrap">
-        <button
-          className="btn-ghost !px-2 !py-1 text-xs"
-          aria-expanded={openClips}
-          onClick={() => setOpenClips(!openClips)}
-        >
-          {t('Clip settings')} {openClips ? '▾' : '▸'}
-        </button>
-        <button
-          className="btn-ghost !px-2 !py-1 text-xs"
-          aria-expanded={openPublish}
-          onClick={() => setOpenPublish(!openPublish)}
-        >
-          {t('Publishing')}: {t(publishModeLabel(watch.publish.mode))}{' '}
-          {openPublish ? '▾' : '▸'}
-        </button>
-      </div>
-
-      {openClips && (
-        <div className="space-y-2">
-          <label className="text-sm flex items-center gap-3 flex-wrap mt-3">
-            <span className="label">{t('Preset')}</span>
-            <select
-              className="input !w-56"
-              value={watch.preset}
+      {openSettings && (
+        <div className="rounded-xl border border-raised/80 bg-base/40 p-4 space-y-5">
+          {openSetup && (
+            <p className="text-sm text-accent">
+              {t('Set it up now. Nothing is taken until something new is posted.')}
+            </p>
+          )}
+          <Part title={t('What happens to each new video')}>
+            <WatchActionsPicker
+              live
+              value={actions}
+              onChange={saveActions}
+              name={watch.name}
               disabled={busy}
-              onChange={(e) => void act(() => api.patchWatch(watch.id, { preset: e.target.value }))}
-            >
-              {automation.presets.map((p) => (
-                <option key={p.id} value={p.id} title={p.description}>
-                  {t(p.name)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <QueueItemSettings
-            key={`watch-${watch.id}`}
-            job={{ id: watch.id, settings: watch.options }}
-            heading="Settings for every video from this channel"
-            autoSave
-            save={(patch) => api.patchWatch(watch.id, { options: patch })}
-            onSaved={onChanged}
-          />
+              clipsPanel={
+                <div className="space-y-2">
+                  <Fold
+                    label={t('How the clips are made')}
+                    open={openClips}
+                    onToggle={() => setOpenClips(!openClips)}
+                  >
+                    <div className="space-y-2">
+                      <label className="text-sm flex items-center gap-3 flex-wrap">
+                        <span className="label">{t('Preset')}</span>
+                        <select
+                          className="input !w-56"
+                          value={watch.preset}
+                          disabled={busy}
+                          onChange={(e) =>
+                            void act(() => api.patchWatch(watch.id, { preset: e.target.value }))
+                          }
+                        >
+                          {automation.presets.map((p) => (
+                            <option key={p.id} value={p.id} title={p.description}>
+                              {t(p.name)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <QueueItemSettings
+                        key={`watch-${watch.id}`}
+                        job={{ id: watch.id, settings: watch.options }}
+                        heading={isPlaylist ? 'Settings for every video from this playlist' : 'Settings for every video from this channel'}
+                        autoSave
+                        save={(patch) => api.patchWatch(watch.id, { options: patch })}
+                        onSaved={onChanged}
+                      />
+                    </div>
+                  </Fold>
+                  <Fold
+                    label={
+                      <>
+                        {t('When the clips are made')}:{' '}
+                        <span className="text-accent">{t(publishModeLabel(watch.publish.mode))}</span>
+                      </>
+                    }
+                    open={openPublish}
+                    onToggle={() => setOpenPublish(!openPublish)}
+                  >
+                    <WatchPublishSettings watch={watch} onSaved={onChanged} />
+                  </Fold>
+                </div>
+              }
+            />
+          </Part>
+          <Part title={t('Catching up')}>
+            <WatchCatchUp watch={watch} onSaved={onChanged} />
+          </Part>
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-raised/60">
+            {confirmRemove ? (
+              <>
+                <span className="text-xs text-muted mr-auto">
+                  {t('Stop watching? What it already made stays in your Library.')}
+                </span>
+                <button className={small} onClick={() => setConfirmRemove(false)}>
+                  {t('Cancel')}
+                </button>
+                <button
+                  className={`${small} !text-error`}
+                  disabled={busy}
+                  onClick={() => void act(() => api.deleteWatch(watch.id))}
+                >
+                  {t('Stop watching')}
+                </button>
+              </>
+            ) : (
+              <button className={`${small} hover:!text-error`} onClick={() => setConfirmRemove(true)}>
+                {t('Stop watching…')}
+              </button>
+            )}
+          </div>
         </div>
       )}
-      {openPublish && <WatchPublishSettings watch={watch} onSaved={onChanged} />}
 
       {error && <p className="text-sm text-error">{error}</p>}
 
@@ -278,9 +441,9 @@ export default function WatchCard({
         {items === null ? (
           <p className="text-sm text-muted">{t('Loading…')}</p>
         ) : visible.length === 0 ? (
-          <p className="text-sm text-muted">
+          <p className="text-sm text-muted rounded-lg border border-dashed border-raised px-3 py-4 text-center">
             {earlier > 0
-              ? t('Nothing new yet. New videos from this channel will show up here.')
+              ? t('Nothing new yet. New videos will show up here.')
               : t('Nothing found yet.')}
           </p>
         ) : (
@@ -288,6 +451,7 @@ export default function WatchCard({
             <ItemRow
               key={item.id}
               item={item}
+              clipsOn={watch.actions.clips}
               busy={busy}
               act={act}
               onOpenInStudio={onOpenInStudio}
@@ -296,15 +460,15 @@ export default function WatchCard({
         )}
         <div className="flex gap-3 flex-wrap">
           {visible.length > SHOWN && (
-            <button className="btn-ghost !px-2 !py-1 text-xs" onClick={() => setShowAll(!showAll)}>
+            <button className={small} onClick={() => setShowAll(!showAll)}>
               {showAll ? t('Show fewer') : `${t('Show all')} (${visible.length})`}
             </button>
           )}
           {earlier > 0 && (
             <button
-              className="btn-ghost !px-2 !py-1 text-xs"
+              className={small}
               onClick={() => setShowEarlier(!showEarlier)}
-              title={t('Videos that were already on the channel when you started watching it.')}
+              title={t('Videos that were already there when you started watching.')}
             >
               {showEarlier
                 ? t('Hide earlier videos')
@@ -318,10 +482,12 @@ export default function WatchCard({
 }
 
 function publishModeLabel(mode: Watch['publish']['mode']): string {
-  return mode === 'auto' ? 'Automatic' : mode === 'ask' ? 'Ask first' : 'Off'
+  return mode === 'auto' ? 'Auto-publish' : mode === 'ask' ? 'Ask before publishing' : 'Not published'
 }
 
 function statusText(item: WatchItem): { text: string; tone: string } {
+  if (item.imported && item.status === 'processing') return { text: 'Downloading', tone: 'text-accent' }
+  if (item.imported && item.status === 'complete') return { text: 'In your Library', tone: 'text-accent' }
   switch (item.status) {
     case 'earlier':
       return { text: 'Before you started watching', tone: 'text-muted' }
@@ -378,11 +544,14 @@ function deliverySummary(item: WatchItem): {
 
 function ItemRow({
   item,
+  clipsOn,
   busy,
   act,
   onOpenInStudio
 }: {
   item: WatchItem
+  /** The watch makes clips, so taking a set-aside video means clipping it. */
+  clipsOn: boolean
   busy: boolean
   act: (fn: () => Promise<unknown>) => Promise<void>
   onOpenInStudio?: (videoId: string) => void
@@ -408,12 +577,12 @@ function ItemRow({
       ? `${t('Trying again at')} ${clockTime(item.retry_at)} (${t('retry')} ${item.retries + 1} ${t('of')} 2)`
       : item.details || ''
   } else if (item.status === 'complete') {
-    detail = `${item.clips ?? 0} ${item.clips === 1 ? t('clip') : t('clips')}`
+    detail = item.imported ? item.reason : `${item.clips ?? 0} ${item.clips === 1 ? t('clip') : t('clips')}`
   }
 
   const small = 'btn-ghost !px-2 !py-1 text-xs'
   return (
-    <div className="rounded-lg bg-raised/40 px-3 py-2 space-y-1.5">
+    <div className="rounded-lg bg-raised/40 hover:bg-raised/60 transition-colors px-3 py-2 space-y-1.5">
       <div className="flex items-start gap-3 flex-wrap">
         <div className="min-w-0 flex-1">
           <button
@@ -436,7 +605,7 @@ function ItemRow({
               disabled={busy}
               onClick={() => void act(() => api.clipWatchItem(item.id))}
             >
-              {t('Clip this')}
+              {clipsOn ? t('Clip this') : t('Take this')}
             </button>
           )}
           {(item.status === 'waiting_for_video' || item.status === 'waiting_for_queue') && (
@@ -456,9 +625,17 @@ function ItemRow({
               {t('Open queue')}
             </button>
           )}
-          {item.status === 'complete' && onOpenInStudio && (
+          {item.status === 'complete' && !item.imported && onOpenInStudio && (
             <button className={small} onClick={() => onOpenInStudio(item.video_id)}>
               {t('Open in editor')}
+            </button>
+          )}
+          {item.status === 'complete' && item.imported && (
+            <button
+              className={small}
+              onClick={() => window.dispatchEvent(new CustomEvent('open-library'))}
+            >
+              {t('Open Library')}
             </button>
           )}
         </div>
@@ -466,6 +643,16 @@ function ItemRow({
 
       {item.status === 'complete' && (
         <div className="text-xs space-y-1">
+          {item.compiled === 1 && (
+            <span className="text-success flex items-center gap-1.5">
+              <Film size={12} /> {t('Added to the compilation')}
+            </span>
+          )}
+          {item.compiled === 2 && item.compile_note && (
+            <span className="text-warn flex items-center gap-1.5">
+              <Film size={12} /> {t(item.compile_note)}
+            </span>
+          )}
           {item.publish_state === 'ask' && (
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-warn">{t('Ready to publish.')}</span>
@@ -503,7 +690,7 @@ function ItemRow({
           {item.source_freed === 1 && (
             <span className="text-muted block">{t('Download deleted to save space.')}</span>
           )}
-          {item.publish_state === 'off' && deliveries.length === 0 && (
+          {item.publish_state === 'off' && !item.imported && deliveries.length === 0 && (
             <span className="text-muted">{t('Not published.')}</span>
           )}
           {item.publish_error && <p className="text-warn">{item.publish_error}</p>}

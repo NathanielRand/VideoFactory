@@ -270,7 +270,7 @@ export default function MultilingualExport({
         setWaiting(false)
         setBusy(false)
         setRun(null)
-        setNotice(`${kind === 'export' ? 'Export' : 'Translation'} is taking unusually long — check the Dashboard activity feed.`)
+        setNotice(`${kind === 'export' ? 'Export' : 'Translation'} is taking unusually long — check the activity feed on Home.`)
         return
       }
       try {
@@ -632,7 +632,7 @@ export default function MultilingualExport({
                 autoPlay
                 className="h-8 flex-1 min-w-0"
                 onError={() =>
-                  setNotice('That voice could not be played — check the Dashboard activity feed.')
+                  setNotice('That voice could not be played — check the activity feed on Home.')
                 }
               />
               <button

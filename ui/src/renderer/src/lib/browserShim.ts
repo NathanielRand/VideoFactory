@@ -51,9 +51,18 @@ export function installBrowserShim(): void {
       unavailable('Choosing an image')
       return null
     },
+    refocus: async () => true,
     pickFolder: async () => {
       unavailable('Choosing a folder')
       return null
+    },
+    showInFolder: async () => {
+      unavailable('Showing a file in its folder')
+      return false
+    },
+    openFolder: async () => {
+      unavailable('Opening a folder')
+      return false
     },
     // Somewhere plausible, so export flows can be walked through end to end.
     getDownloadsPath: async () => '/downloads',

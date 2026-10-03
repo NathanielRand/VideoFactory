@@ -213,12 +213,10 @@ def test_spec_bundles_the_prebuilt_cards():
 
 
 # ---------------------------------------------------------------- the setting
-def test_absent_setting_means_on():
-    """Existing users have no `outro:` line. They must get it on upgrade, and
-    anyone who turned it off must keep it off."""
-    assert outro.enabled({}) is True
-    assert outro.enabled({"clips": {}}) is True
-    assert outro.enabled({"clips": {"outro": True}}) is True
+def test_end_card_is_never_on():
+    """The end card is off for everyone, whatever settings.yaml says."""
+    assert outro.enabled({}) is False
+    assert outro.enabled({"clips": {}}) is False
     assert outro.enabled({"clips": {"outro": False}}) is False
 
 

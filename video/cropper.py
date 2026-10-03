@@ -22,6 +22,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from core import progress
 from core.binaries import ffmpeg
 from video.capture import video_capture
 from video.encoding import audio_filter_args, video_encoder_args
@@ -185,8 +186,10 @@ def _render_tracked(
             from video.encoding import sampled_frames
 
             written = 0
+            total_frames = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0))
 
             def emit(frame, frame_idx: int) -> None:
+                progress.sub(frame_idx / total_frames)
                 t = frame_idx / fps
                 center_x = _interpolate(crop_path, t) * src_w
                 x0 = int(round(center_x - crop_w / 2))

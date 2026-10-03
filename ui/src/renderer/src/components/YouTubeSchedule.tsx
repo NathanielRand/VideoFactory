@@ -1,4 +1,7 @@
+import { useState } from 'react'
 import { t } from '../lib/i18n'
+import { publishingApi, slotToLocalInput } from '../lib/publishing'
+import { isoToLocalInput, scheduleApi } from '../lib/schedule'
 import { describeInstant, earliestSchedule, localInputToUtc, localTimeZone } from '../lib/youtube'
 
 /** Visibility, and the scheduling that YouTube itself owns.
@@ -26,6 +29,51 @@ export default function YouTubeSchedule({
   const scheduling = scheduledAt !== ''
   const utc = scheduling ? localInputToUtc(scheduledAt) : null
   const zone = localTimeZone()
+  const [suggesting, setSuggesting] = useState(false)
+  const [basis, setBasis] = useState('')
+
+  // The next best hour for this audience: YouTube's usual peaks, shifted
+  // toward the hours this channel's own videos did best (publish/timing.py).
+  // The next open slot of the posting schedule: after everything already
+  // scheduled, within its days and times.
+  const nextOpen = async (): Promise<void> => {
+    setSuggesting(true)
+    try {
+      const got = await scheduleApi.nextSlots(1, ['youtube'], 'youtube')
+      if (got.slots[0]) {
+        onChange({ scheduledAt: isoToLocalInput(got.slots[0]) })
+        setBasis(t('The next open slot in your posting schedule.'))
+      } else {
+        setBasis(t('No open slot in the next 60 days. Add days or times under Edit schedule on the Publish page.'))
+      }
+    } catch {
+      setBasis('')
+    } finally {
+      setSuggesting(false)
+    }
+  }
+
+  const suggest = async (): Promise<void> => {
+    setSuggesting(true)
+    try {
+      const got = await publishingApi.bestTimes('youtube', 1)
+      if (got.slots[0]) onChange({ scheduledAt: slotToLocalInput(got.slots[0]) })
+      setBasis(
+        got.learned_from
+          ? t("Picked from your last {n} videos and YouTube's usual peaks.").replace(
+              '{n}',
+              String(got.learned_from)
+            )
+          : t(
+              "Picked from YouTube's usual peak hours. It learns from your videos as they get views."
+            )
+      )
+    } catch {
+      setBasis('')
+    } finally {
+      setSuggesting(false)
+    }
+  }
 
   return (
     <fieldset className="border border-raised/60 rounded-lg p-3 space-y-3">
@@ -67,6 +115,25 @@ export default function YouTubeSchedule({
             aria-label={t('Publish date and time')}
             onChange={(e) => onChange({ scheduledAt: e.target.value })}
           />
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              className="btn-ghost !py-1 text-xs"
+              disabled={disabled || suggesting}
+              onClick={suggest}
+            >
+              {suggesting ? t('Finding…') : t('Suggest best time')}
+            </button>
+            <button
+              type="button"
+              className="btn-accent !py-1 text-xs"
+              disabled={disabled || suggesting}
+              onClick={nextOpen}
+            >
+              {t('Next open slot')}
+            </button>
+            {basis && <span className="text-[11px] text-muted">{basis}</span>}
+          </div>
 
           <p className="text-[11px] text-muted">
             {t('Times are in your timezone')} ({zone}).

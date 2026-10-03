@@ -166,6 +166,13 @@ def main() -> int:
     p_ch_rm = ch_sub.add_parser("remove", help="Stop monitoring a channel")
     p_ch_rm.add_argument("channel", help="Channel ID, @handle, or URL")
 
+    p_eval = sub.add_parser(
+        "eval",
+        help="Score how well the clip rating agrees with the clips you kept, published and flagged")
+    p_eval.add_argument("--creator", type=int, help="Only this creator id")
+    p_eval.add_argument("--rubric", action="store_true",
+                        help="Also grade those clips with the rubric (uses the model)")
+
     p_models = sub.add_parser("models", help="Show installed LLMs and switch between them")
     p_models.add_argument("action", nargs="?", choices=["use"], help="'use' to switch models")
     p_models.add_argument("model", nargs="?", help="Ollama model tag, e.g. gemma3:12b")
@@ -244,6 +251,11 @@ def main() -> int:
             from server.api import create_app
 
             db.close()  # the server manages its own connections
+            # FFmpeg and Ollama end with this process even if it is killed
+            # outright (core/lifetime.py).
+            from core.lifetime import bind_children_to_this_process
+
+            bind_children_to_this_process()
             if args.host != "127.0.0.1":
                 print(f"  WARNING: binding {args.host} — this API has no authentication.")
             uvicorn.run(create_app(config, args.config), host=args.host, port=args.port)
@@ -258,6 +270,12 @@ def main() -> int:
             if sys.stdout and hasattr(sys.stdout, "reconfigure"):
                 sys.stdout.reconfigure(encoding="utf-8")
             return serve_mcp()
+
+        if args.command == "eval":
+            from analysis import evaluation
+
+            print(evaluation.report(evaluation.run(config, db, args.creator, args.rubric)))
+            return 0
 
         if args.command == "channels":
             return _handle_channels(args, db)

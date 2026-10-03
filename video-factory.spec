@@ -110,7 +110,8 @@ except Exception:
 
 # YOLO weights. Ultralytics would otherwise download them on first use, which
 # means a creator's first video stalls on a silent network fetch.
-for weights in ("yolov8n-pose.pt", "yolov8n.pt"):
+# yolov8n-seg.pt: the thumbnail designer's subject cut-out (video/cutout.py).
+for weights in ("yolov8n-pose.pt", "yolov8n.pt", "yolov8n-seg.pt"):
     if (ROOT / weights).exists():
         datas += [(str(ROOT / weights), ".")]
 

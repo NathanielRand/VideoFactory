@@ -6,7 +6,9 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import type { CreditStyle } from '../lib/compilations'
-import { CAPTION_FONTS } from './CaptionStyleControls'
+import { CAPTION_FONTS, CaptionLayer, assFontSize } from './CaptionStyleControls'
+import type { CaptionStyle, CtaConfig, WatermarkConfig } from '../lib/types'
+import { BrandingLayer } from './WatermarkControls'
 
 // Same constants as compilation/credits.py.
 const MARGIN = 0.045
@@ -36,7 +38,7 @@ export interface CreditSample {
 }
 
 /** The credit's text for one source, as credits.credit_text builds it. */
-function creditText(template: string, s: CreditSample): string {
+export function creditText(template: string, s: CreditSample): string {
   const name = s.channel.trim() || s.title.trim()
   if (!name) return ''
   return template.replaceAll('{channel}', name).replaceAll('{title}', s.title).replaceAll('{url}', s.url)
@@ -60,20 +62,24 @@ function cssFont(c: CreditStyle): { family: string; weight: number; style: strin
 
 interface Layout {
   basePx: number
-  margin: number
+  /** Distance from the left/right and top/bottom edges, in canvas pixels. */
+  mx: number
+  my: number
   /** The image in canvas pixels, and the text size fitted onto it. */
   plate: { w: number; h: number; px: number } | null
 }
 
-/** Canvas-pixel layout: credits.font_px / plate_for / fit_px. */
+/** Canvas-pixel layout: credits.font_px / _margins / plate_for / fit_px. */
 function layoutCredit(c: CreditStyle, [cw, ch]: [number, number], aspect: number | null, text: string): Layout {
   const basePx = Math.max(14, Math.round(((c.font_size ?? 44) * Math.min(cw, ch)) / 1080))
-  const margin = Math.round(MARGIN * Math.min(cw, ch))
-  if (!c.bg_image || !aspect) return { basePx, margin, plate: null }
+  const legacy = Math.round(MARGIN * Math.min(cw, ch))
+  const mx = c.inset_x == null ? legacy : Math.round(c.inset_x * cw)
+  const my = c.inset_y == null ? legacy : Math.round(c.inset_y * ch)
+  if (!c.bg_image || !aspect) return { basePx, mx, my, plate: null }
   let h = Math.round(basePx * (c.bg_scale ?? 2.4))
   let w = Math.round(h * aspect)
-  if (w > cw - 2 * margin) {
-    w = cw - 2 * margin
+  if (w > cw - 2 * mx) {
+    w = cw - 2 * mx
     h = Math.round(w / aspect)
   }
   w = Math.max(2, Math.floor(w / 2) * 2)
@@ -85,11 +91,26 @@ function layoutCredit(c: CreditStyle, [cw, ch]: [number, number], aspect: number
   const tx = c.bg_text_x ?? 0.5
   const room = w * PLATE_TEXT_WIDTH * 2 * Math.min(tx, 1 - tx)
   if (width > room) px = Math.floor((px * room) / width)
-  return { basePx, margin, plate: { w, h, px: Math.max(10, px) } }
+  return { basePx, mx, my, plate: { w, h, px: Math.max(10, px) } }
+}
+
+/** Roughly where YouTube's own Shorts interface covers a 9:16 frame on a
+ *  phone: the search bar along the top, the title and channel along the
+ *  bottom, the buttons down the right. It varies by device and app version,
+ *  so this is a guide, not a guarantee. */
+const SHORTS_UI = { top: 0.12, bottom: 0.24, right: 0.15, rightFrom: 0.4 }
+
+/** Edge distances that clear that guide for a corner position. */
+export function shortsSafeInsets(position: string): { inset_x: number; inset_y: number | null } {
+  const vert = position.split('_')[0]
+  return {
+    inset_x: position.endsWith('right') ? SHORTS_UI.right + 0.02 : 0.06,
+    inset_y: vert === 'top' ? SHORTS_UI.top + 0.02 : vert === 'bottom' ? SHORTS_UI.bottom + 0.02 : null
+  }
 }
 
 /** [width / height once loaded, whether it failed to load]. */
-function useImageAspect(url: string | null): [number | null, boolean] {
+export function useImageAspect(url: string | null): [number | null, boolean] {
   const [aspect, setAspect] = useState<number | null>(null)
   const [failed, setFailed] = useState(false)
   useEffect(() => {
@@ -104,35 +125,66 @@ function useImageAspect(url: string | null): [number | null, boolean] {
   return [aspect, failed]
 }
 
-function CreditPreview({
+export function CreditPreview({
   c,
   size,
   text,
   aspect,
-  width
+  width,
+  banner,
+  showCredit = true,
+  captions = null,
+  cta = null,
+  overlay = false,
+  guide = false
 }: {
   c: CreditStyle
   size: [number, number]
   text: string
   aspect: number | null
   width: number
+  /** The compilation's branding, drawn where the render puts it. */
+  banner?: WatermarkConfig | null
+  /** False when credits are off: the frame then shows only the branding. */
+  showCredit?: boolean
+  /** Every other active layer is drawn too, so the preview shows the whole
+   *  picture rather than the one layer being edited. */
+  captions?: Required<CaptionStyle> | null
+  cta?: CtaConfig | null
+  /** Drawn over a real video: no backdrop of its own. */
+  overlay?: boolean
+  /** Shade where YouTube's Shorts interface covers the frame (SHORTS_UI). */
+  guide?: boolean
 }): JSX.Element {
   const [cw, ch] = size
   const k = width / cw
   const image = c.bg_image ? api.brandingAssetUrl(c.bg_image) : null
-  const { basePx, margin, plate } = layoutCredit(c, size, aspect, text)
-  const [vert, horiz] = (c.position ?? 'bottom_left').split('_')
+  const { basePx, mx, my, plate } = layoutCredit(c, size, aspect, text)
+  const position = c.position ?? 'bottom_left'
+  const [vert, horiz] = position.split('_')
   const f = cssFont(c)
 
-  const place: React.CSSProperties = {
-    position: 'absolute',
-    [vert === 'top' ? 'top' : 'bottom']: margin * k,
-    ...(horiz === 'left'
-      ? { left: margin * k }
-      : horiz === 'right'
-        ? { right: margin * k }
-        : { left: '50%', transform: 'translateX(-50%)' })
-  }
+  const place: React.CSSProperties =
+    position === 'custom'
+      ? {
+          position: 'absolute',
+          left: `${(c.x ?? 0.5) * 100}%`,
+          top: `${(c.y ?? 0.5) * 100}%`,
+          transform: 'translate(-50%, -50%)'
+        }
+      : {
+          position: 'absolute',
+          ...(vert === 'middle' ? { top: '50%' } : { [vert === 'top' ? 'top' : 'bottom']: my * k }),
+          ...(horiz === 'left'
+            ? { left: mx * k }
+            : horiz === 'right'
+              ? { right: mx * k }
+              : { left: '50%' }),
+          transform:
+            [horiz === 'center' ? 'translateX(-50%)' : '', vert === 'middle' ? 'translateY(-50%)' : '']
+              .filter(Boolean)
+              .join(' ') || undefined
+        }
   const textStyle: React.CSSProperties = {
     fontFamily: f.family,
     fontWeight: f.weight,
@@ -145,11 +197,13 @@ function CreditPreview({
 
   return (
     <div
-      className="relative overflow-hidden rounded-lg bg-gradient-to-br from-slate-600 via-slate-800 to-slate-900 shrink-0"
+      className={`relative overflow-hidden shrink-0 ${
+        overlay ? 'pointer-events-none' : 'rounded-lg bg-gradient-to-br from-slate-600 via-slate-800 to-slate-900'
+      }`}
       style={{ width, height: (width * ch) / cw }}
       aria-label={t('Credit preview')}
     >
-      {plate ? (
+      {!showCredit ? null : plate ? (
         <div
           style={{
             ...place,
@@ -166,7 +220,8 @@ function CreditPreview({
               left: `${(c.bg_text_x ?? 0.5) * 100}%`,
               top: `${(c.bg_text_y ?? 0.5) * 100}%`,
               transform: 'translate(-50%, -50%)',
-              fontSize: plate.px * k,
+              fontSize: assFontSize(c.font, plate.px) * k,
+              lineHeight: `${plate.px * k}px`,
               textShadow: '0 1px 2px rgba(0,0,0,.5)'
             }}
           >
@@ -179,7 +234,7 @@ function CreditPreview({
             style={{
               ...place,
               ...textStyle,
-              fontSize: basePx * k,
+              fontSize: assFontSize(c.font, basePx) * k,
               ...(backing === 'box'
                 ? { background: 'rgba(10,26,40,.65)', padding: `${basePx * 0.35 * k}px` }
                 : backing === 'outline'
@@ -190,6 +245,45 @@ function CreditPreview({
             {text}
           </span>
         )
+      )}
+      {/* After the credit: the logo is overlaid on the finished video, so
+          it sits on top of everything the segments burned in. */}
+      {banner && <BrandingLayer config={banner} size={size} scale={k} />}
+      {captions && <CaptionLayer style={captions} size={size} scale={k} />}
+      {guide && ch > cw && (
+        <div className="absolute inset-0 pointer-events-none" aria-hidden="true">
+          <div
+            className="absolute inset-x-0 top-0 bg-red-500/25 border-b border-dashed border-red-300/70"
+            style={{ height: `${SHORTS_UI.top * 100}%` }}
+          />
+          <div
+            className="absolute inset-x-0 bottom-0 bg-red-500/25 border-t border-dashed border-red-300/70"
+            style={{ height: `${SHORTS_UI.bottom * 100}%` }}
+          />
+          <div
+            className="absolute right-0 bg-red-500/25 border-l border-dashed border-red-300/70"
+            style={{
+              width: `${SHORTS_UI.right * 100}%`,
+              top: `${SHORTS_UI.rightFrom * 100}%`,
+              bottom: `${SHORTS_UI.bottom * 100}%`
+            }}
+          />
+        </div>
+      )}
+      {cta?.enabled && cta.text && (
+        <div
+          className="absolute left-1/2 -translate-x-1/2 -translate-y-1/2 text-center font-black leading-tight pointer-events-none"
+          style={{
+            top: { top: '17%', middle: '50%', bottom: '62%' }[cta.position] ?? '17%',
+            background: cta.bg,
+            color: cta.color,
+            fontSize: Math.max(8, ch * 0.024) * k,
+            padding: `${ch * 0.008 * k}px ${ch * 0.014 * k}px`,
+            maxWidth: '84%'
+          }}
+        >
+          {cta.text}
+        </div>
       )}
     </div>
   )
@@ -254,7 +348,9 @@ export default function CreditControls({
   formats,
   sizes,
   samples,
-  onChange
+  banner,
+  onChange,
+  hidePreview = false
 }: {
   credits: CreditStyle
   positions: string[]
@@ -263,12 +359,17 @@ export default function CreditControls({
   sizes: Record<string, { width: number; height: number }>
   /** The sources in this compilation, to preview their real credits. */
   samples: CreditSample[]
+  /** The branding profile this compilation burns in, if any. */
+  banner?: WatermarkConfig | null
   onChange: (patch: Partial<CreditStyle>) => void
+  /** When a shared preview above already shows this layer with the others. */
+  hidePreview?: boolean
 }): JSX.Element {
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState(false)
   const [format, setFormat] = useState(formats[0])
   const [sample, setSample] = useState(0)
+  const [guide, setGuide] = useState(false)
   const on = c.enabled ?? true
   const template = c.template ?? 'Clip: {channel}'
 
@@ -344,7 +445,7 @@ export default function CreditControls({
   )
 
   return (
-    <div className="col-span-2 lg:col-span-4 space-y-3 border-y border-raised/60 py-3">
+    <div className="@container col-span-2 lg:col-span-4 space-y-4 border-y border-raised/60 py-4">
       <div className="flex items-center justify-between gap-2">
         <label className="flex items-center gap-2">
           <input type="checkbox" checked={on} onChange={(e) => onChange({ enabled: e.target.checked })} />
@@ -361,16 +462,25 @@ export default function CreditControls({
         </button>
       </div>
 
-      <fieldset disabled={!on} className="flex flex-col md:flex-row gap-4 items-start disabled:opacity-50">
-        <div className="flex-1 min-w-0 grid grid-cols-2 lg:grid-cols-3 gap-3 w-full">
-          <div className="space-y-1 col-span-2 lg:col-span-3">
+      {/* Container queries, not viewport breakpoints: this sits in panes of
+          very different widths (the Branding editor, the Compilations grid),
+          and the window being wide says nothing about the room here. */}
+      <div className="flex flex-col @3xl:flex-row gap-5 items-start">
+        {/* Only the controls dim when credits are off: the preview still
+            shows the branding, which does not depend on them. */}
+        <div className="@container flex-1 min-w-0 w-full">
+        <fieldset
+          disabled={!on}
+          className="min-w-0 grid grid-cols-1 @md:grid-cols-2 @2xl:grid-cols-3 gap-x-4 gap-y-4 w-full disabled:opacity-50"
+        >
+          <div className="space-y-1 col-span-full">
             <label htmlFor="credit-template" className="label">
               {t('Credit text')}
             </label>
-            <div className="flex gap-1">
+            <div className="flex flex-wrap gap-1">
               <input
                 id="credit-template"
-                className="input flex-1"
+                className="input flex-1 min-w-48"
                 value={template}
                 onChange={(e) => onChange({ template: e.target.value })}
               />
@@ -455,11 +565,88 @@ export default function CreditControls({
             >
               {positions.map((p) => (
                 <option key={p} value={p}>
-                  {p.replace('_', ' ')}
+                  {p === 'custom' ? t('custom point') : p.replace('_', ' ')}
                 </option>
               ))}
             </select>
           </label>
+
+          <div className="col-span-full grid grid-cols-1 @md:grid-cols-2 gap-x-4 gap-y-3">
+            {(c.position ?? 'bottom_left') === 'custom'
+              ? (
+                  [
+                    ['x', t('Across the frame'), '←', '→'],
+                    ['y', t('Down the frame'), '↑', '↓']
+                  ] as const
+                ).map(([key, label, lo, hi]) => (
+                  <label key={key} className="space-y-1">
+                    <span className="label flex justify-between gap-2">
+                      <span>{label}</span>
+                      <span className="normal-case tracking-normal text-ink tabular-nums">
+                        {Math.round((c[key] ?? 0.5) * 100)}%
+                      </span>
+                    </span>
+                    <span className="flex items-center gap-2 text-muted text-xs">
+                      {lo}
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        className="flex-1"
+                        value={c[key] ?? 0.5}
+                        onChange={(e) => onChange({ [key]: Number(e.target.value) })}
+                      />
+                      {hi}
+                    </span>
+                  </label>
+                ))
+              : (
+                  [
+                    ['inset_x', t('Distance from the side'), 'width'],
+                    ['inset_y', t('Distance from the top / bottom'), 'height']
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} className="space-y-1">
+                    <span className="label flex justify-between gap-2">
+                      <span>{label}</span>
+                      <button
+                        type="button"
+                        className="normal-case tracking-normal text-muted hover:text-ink tabular-nums"
+                        onClick={() => onChange({ [key]: null })}
+                        title={t('Back to the default distance')}
+                      >
+                        {c[key] == null ? t('default') : `${Math.round(c[key]! * 100)}%`}
+                      </button>
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={0.4}
+                      step={0.005}
+                      className="w-full"
+                      value={c[key] ?? 0.045}
+                      onChange={(e) => onChange({ [key]: Number(e.target.value) })}
+                    />
+                  </label>
+                ))}
+            <div className="col-span-full flex flex-wrap items-center gap-x-4 gap-y-2">
+              {(c.position ?? 'bottom_left') !== 'custom' && (
+                <button
+                  type="button"
+                  className="btn-ghost !py-1 text-xs"
+                  onClick={() => onChange(shortsSafeInsets(c.position ?? 'bottom_left'))}
+                  title={t("Sets the distances so the credit sits clear of YouTube's top bar, title and buttons on a Short")}
+                >
+                  {t('Clear YouTube Shorts overlays')}
+                </button>
+              )}
+              <label className="flex items-center gap-2 text-xs text-muted">
+                <input type="checkbox" checked={guide} onChange={(e) => setGuide(e.target.checked)} />
+                {t("Show where YouTube's interface covers a Short (approximate)")}
+              </label>
+            </div>
+          </div>
           <label className="space-y-1">
             <span className="label">{t('Credit seconds')}</span>
             <input
@@ -473,7 +660,7 @@ export default function CreditControls({
               onChange={(e) => onChange({ seconds: Number(e.target.value) })}
             />
           </label>
-          <label className="flex items-center gap-2 self-end pb-2.5">
+          <label className="flex items-center gap-2 @md:self-end @md:pb-2.5">
             <input
               type="checkbox"
               checked={c.whole_clip ?? false}
@@ -482,7 +669,7 @@ export default function CreditControls({
             <span className="text-sm">{t('Keep up for the whole clip')}</span>
           </label>
 
-          <div className="space-y-1 col-span-2">
+          <div className="space-y-1 col-span-full @2xl:col-span-2">
             <span className="label">{t('Background image')}</span>
             <div className="flex gap-1">
               {imageUrl && (
@@ -549,7 +736,7 @@ export default function CreditControls({
             </label>
           )}
           {c.bg_image && (
-            <div className="col-span-2 lg:col-span-3 grid grid-cols-2 gap-3">
+            <div className="col-span-full grid grid-cols-1 @md:grid-cols-2 gap-x-4 gap-y-4">
               {(
                 [
                   ['bg_text_x', t('Text across the image'), '←', '→'],
@@ -586,17 +773,28 @@ export default function CreditControls({
             </div>
           )}
           {worstFit && worstFit.share < SHRINK_WARN && (
-            <p className="col-span-2 lg:col-span-3 text-xs text-amber-400">
+            <p className="col-span-full text-xs text-amber-400">
               ⚠ {t('Long names are shrunk to fit the image')}: “{worstFit.text}” →{' '}
               {worstFit.px} px. {t('A larger or wider image gives them more room.')}
             </p>
           )}
-          {error && <p className="col-span-2 lg:col-span-3 text-xs text-red-400">{error}</p>}
+          {error && <p className="col-span-full text-xs text-red-400">{error}</p>}
+        </fieldset>
         </div>
 
-        <div className="space-y-2 shrink-0" style={{ width: PREVIEW_W }}>
+        {!hidePreview && (
+        <div className="space-y-2 shrink-0 max-w-full" style={{ width: PREVIEW_W }}>
           <div className="relative">
-            <CreditPreview c={c} size={sizeOf(format)} text={text} aspect={aspect} width={PREVIEW_W} />
+            <CreditPreview
+              c={c}
+              size={sizeOf(format)}
+              text={text}
+              aspect={aspect}
+              width={PREVIEW_W}
+              banner={banner}
+              showCredit={on}
+              guide={guide}
+            />
             <button
               type="button"
               className="absolute top-1.5 right-1.5 rounded bg-black/50 hover:bg-black/70 text-white text-xs px-2 py-1"
@@ -608,10 +806,14 @@ export default function CreditControls({
             </button>
           </div>
           {pickers}
+          {!on && banner && (
+            <p className="text-[11px] text-muted">{t('Credits are off: showing the branding only.')}</p>
+          )}
         </div>
-      </fieldset>
+        )}
+      </div>
 
-      {expanded && (
+      {!hidePreview && expanded && (
         <div
           className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-6"
           onClick={() => setExpanded(false)}
@@ -626,7 +828,16 @@ export default function CreditControls({
                 {t('Close')} (Esc)
               </button>
             </div>
-            <CreditPreview c={c} size={sizeOf(format)} text={text} aspect={aspect} width={bigW} />
+            <CreditPreview
+              c={c}
+              size={sizeOf(format)}
+              text={text}
+              aspect={aspect}
+              width={bigW}
+              banner={banner}
+              showCredit={on}
+              guide={guide}
+            />
             <p className="text-xs text-muted">
               {cw}×{ch} · {t('shown at')} {Math.round((bigW / cw) * 100)}%
             </p>

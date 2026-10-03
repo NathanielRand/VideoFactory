@@ -21,15 +21,25 @@ import subprocess
 from core.binaries import ffmpeg, ffprobe
 from core.paths import discard
 
-CPU_ARGS = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+# Every encode ends in these two, whatever the encoder, because a browser
+# has to play the result back:
+#  - 4:2:0. A filter graph that ends in RGB or 4:4:4 (an overlay, a blend)
+#    makes NVENC quietly write "High 4:4:4 Predictive", which Chromium
+#    software-decodes at best and stutters or refuses at worst.
+#  - a keyframe every second or two. NVENC's default is 250 frames — 4 to 8
+#    seconds — and a <video> can only seek to a keyframe, so scrubbing and
+#    the first frame after a seek crawled.
+_PLAYBACK = ["-pix_fmt", "yuv420p", "-g", "60"]
+
+CPU_ARGS = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", *_PLAYBACK]
 
 # Bitrate-led settings for the hardware encoders: constant-quality flags
 # vary wildly between driver generations (especially AMF), while plain
 # bitrate control works everywhere. 8 Mbps looks clean for 1080x1920 Shorts.
 _CANDIDATES: dict[str, list[str]] = {
-    "nvenc": ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0"],
-    "amf": ["-c:v", "h264_amf", "-quality", "quality", "-b:v", "8M", "-maxrate", "12M"],
-    "qsv": ["-c:v", "h264_qsv", "-global_quality", "23", "-preset", "medium"],
+    "nvenc": ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0", *_PLAYBACK],
+    "amf": ["-c:v", "h264_amf", "-quality", "quality", "-b:v", "8M", "-maxrate", "12M", *_PLAYBACK],
+    "qsv": ["-c:v", "h264_qsv", "-global_quality", "23", "-preset", "medium", *_PLAYBACK],
 }
 
 _selected: tuple[str, list[str]] | None = None  # cached (name, args)
@@ -148,7 +158,7 @@ def sampled_frames(clip_path, every: int, width: int, height: int, hwaccel: bool
         "-i", str(clip_path),
         # Escape the comma: it separates filter arguments otherwise.
         "-vf", f"select='not(mod(n\\,{step}))'",
-        "-vsync", "0",              # keep the selected frames, do not resample
+        "-fps_mode", "passthrough",  # keep the selected frames, do not resample
         "-pix_fmt", "bgr24",        # what OpenCV and the models expect
         "-f", "rawvideo", "-",
     ]

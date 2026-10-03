@@ -1,3 +1,4 @@
+import type { CreditStyle } from './compilations'
 /** Why a finished run produced the clips it did. Absent on videos processed
  *  before runs were summarised, so every reader must cope with null. */
 export interface RunOutcome {
@@ -9,7 +10,10 @@ export interface RunOutcome {
   measured: number
   nothing_detected: number
   /** Only set when no clips came out, and only when the evidence earns it. */
-  cause: 'no_people' | 'duplicates' | 'below_threshold' | 'no_candidates' | null
+  cause: 'no_people' | 'duplicates' | 'below_threshold' | 'no_candidates' | 'render_failed' | null
+  /** Clips that were selected but failed to render, and the last reason. */
+  render_failed?: number
+  render_error?: string | null
 }
 
 export interface Video {
@@ -35,6 +39,11 @@ export interface SubScores {
   engagement?: number
   source?: string
   rerank_position?: number
+  /** Rubric grade 0-100 and its parts (0-10), when scoring.rubric is on or shadow. */
+  rubric?: number
+  rubric_detail?: Record<string, number>
+  /** Seconds added before / after by what flags taught this creator. */
+  learned_pad?: [number, number]
 }
 
 export interface CaptionLine {
@@ -123,7 +132,7 @@ export interface Adjust {
 }
 
 export interface WatermarkConfig {
-  type: 'text' | 'image' | 'both'
+  type: 'none' | 'text' | 'image' | 'both'
   text?: string
   font?: string
   font_size?: number
@@ -137,11 +146,36 @@ export interface WatermarkConfig {
   rotation?: number
   shadow?: boolean
   image_asset?: string
+  frame?: 'free' | 'square' | 'circle' // logo crop; free = the image as drawn
+  cta?: CtaConfig
+  /** Credit the source channel on the clip (video_editor/credit.py). */
+  credit?: CreditStyle
+  /** Caption look for the clips this profile brands (clip profiles only). */
+  captions?: CaptionStyle
 }
+
+/** A timed call to action burned over the clip (video_editor/watermark.py). */
+export interface CtaConfig {
+  enabled: boolean
+  kind: 'discord' | 'subscribe' | 'vote' | 'follow' | 'custom'
+  text: string
+  anchor: 'start' | 'end' // `at` counts from the clip's start, or back from its end
+  at: number // seconds
+  duration: number // seconds on screen
+  repeat: number // show again every N seconds; 0 = once
+  position: 'top' | 'middle' | 'bottom'
+  color: string
+  bg: string
+}
+
+/** What a profile brands: single clips, or whole compilations (their own
+ *  formats, so their own watermark and credit). */
+export type BrandingKind = 'clip' | 'compilation'
 
 export interface BrandingProfile {
   id: number
   name: string
+  kind: BrandingKind
   config: WatermarkConfig
 }
 
@@ -182,6 +216,17 @@ export interface RenderOpts {
   edit?: EditData | null
   profile?: string // longform rendering profile (16:9); absent = vertical Short
   watermark?: WatermarkConfig | null
+  /** Which branding profile this clip follows. Each custom part is the
+   *  clip's own (kept in `watermark`); the rest tracks the profile. Absent:
+   *  branding as it was processed. */
+  branding?: ClipBranding
+}
+
+export interface ClipBranding {
+  profile_id: number | null
+  custom_watermark?: boolean
+  custom_credit?: boolean
+  custom_captions?: boolean
 }
 
 export interface Clip {
@@ -197,6 +242,17 @@ export interface Clip {
   title: string
   description: string
   hashtags: string[]
+  /** Search phrases for YouTube's tags (analysis/metadata.py). */
+  keywords?: string[]
+  /** This clip's own first comment; empty means the standing one is used. */
+  first_comment?: string
+  /** The YouTube playlist this clip joins when published there; empty means
+   *  the creator's rule (or none) applies. */
+  playlist_id?: string
+  /** The AI's comment for this clip, offered but only used when picked. */
+  suggested_comment?: string
+  /** Other generated titles, offered in the editor. */
+  alt_titles?: string[]
   scores: SubScores
   render_opts: RenderOpts
   created_at: string
@@ -226,9 +282,45 @@ export interface JobOptions {
   podcast?: boolean
   longform?: { mode: string } | null
   watermark_profile_id?: number | null
+  /** Explicitly no branding — not even the creator's default. */
+  no_watermark?: boolean
   filter?: FilterName
   min_score?: number
   max_clips?: number
+  /** Into the library without making clips — for a compilation, or to
+   *  decide later. Absent means make clips, as always. */
+  import_only?: boolean
+  /** Once it is in the library, append the whole video to this compilation. */
+  add_to_compilation?: number
+}
+
+/** A compilation that uses a library video, and in how many segments. */
+export interface LibraryUse {
+  id: number
+  title: string
+  status: 'draft' | 'queued' | 'rendering' | 'done' | 'failed'
+  segments: number
+}
+
+/** One upload in the Library, with everywhere it has been used. */
+export interface LibraryItem {
+  video_id: string
+  title: string
+  channel_name: string
+  /** 'imported' = in the library, never clipped. */
+  status: string
+  duration: number
+  source_url: string
+  created_at: string
+  creator_id: number | null
+  creator_name: string | null
+  clip_count: number
+  published_clips: number
+  local: boolean
+  has_source: boolean
+  compilations: LibraryUse[]
+  /** 'queued' | 'running' while a job for it is in the queue, else ''. */
+  in_queue: string
 }
 
 /** A queue row: the job, plus the video it is about. `display_title` comes
@@ -279,6 +371,13 @@ export interface QueueSnapshot {
 export interface InstalledModel {
   name: string
   size_gb: number
+  /** An Ollama cloud model: runs on ollama.com, and size_gb is only the
+   *  size of its manifest. */
+  cloud?: boolean
+  /** Billions of parameters and the family, as Ollama read them from the
+   *  model file; null / '' when it did not say. */
+  params_b?: number | null
+  family?: string
 }
 
 /** One thing an install needs, and whether it has it. `fix` is written for
@@ -347,6 +446,52 @@ export interface GpuStats {
   vram_used: number
   vram_total: number
   gpu_percent: number
+  temp_c?: number | null
+}
+
+/** How hard the resource governor (core/governor.py) is holding the job back. */
+export type PerformanceMode = 'auto' | 'eco' | 'max'
+export type PressureLevel = 'ok' | 'high' | 'critical'
+
+export interface ActivitySample {
+  t: number
+  cpu: number
+  ram: number
+  /** Video Factory's own share of the CPU (backend, FFmpeg, Ollama). */
+  own_cpu: number
+  gpu: number | null
+  vram: number | null
+  /** Windows commit charge as % of the commit limit: what ran out when the
+   *  PC crashed with WinError 1455. */
+  commit: number | null
+}
+
+export interface Activity {
+  mode: PerformanceMode
+  level: PressureLevel
+  reasons: string[]
+  /** A job is holding at a checkpoint until pressure clears. */
+  waiting: boolean
+  /** The heavy model load (torch, Whisper…) waiting for memory, if any. */
+  blocked_on: string
+  renders_active: number
+  render_budget: number
+  renders_configured: number
+  samples: ActivitySample[]
+}
+
+export interface ModelRuntime {
+  host: string
+  running: boolean
+  starting: boolean
+  /** Started by this app, so it stops when the app does. */
+  managed: boolean
+  version: string
+  loaded: { name: string; size: number; size_vram: number; expires_at: string }[]
+  can_start: boolean
+  busy: boolean
+  error: string
+  model: string
 }
 
 export interface SystemStats {
@@ -371,7 +516,6 @@ export interface Settings {
   privacy: string
   content_language: string // 'auto' or ISO code (es / pt / hi / id ...)
   translation_model: string // local model used for translation ('' = the main one)
-  outro: boolean // append the Video Factory end card to each clip (clips.outro)
 }
 
 /** Events arriving over the WebSocket. */
@@ -380,7 +524,27 @@ export interface StudioEvent {
    *  'publish' is a YouTube upload. It is deliberately NOT 'job': jobProgress
    *  resets the global processing bar on any 'job' event, and an upload has
    *  nothing to do with the video pipeline's progress. */
-  type: 'progress' | 'job' | 'model_pull' | 'queue' | 'publish' | 'automation'
+  /** 'library' and 'compilation' are bare pings like 'queue': an upload was
+   *  imported, or a compilation's segments changed outside its editor. */
+  type:
+    | 'progress'
+    | 'job'
+    | 'model_pull'
+    | 'queue'
+    | 'publish'
+    | 'automation'
+    | 'library'
+    | 'compilation'
+    | 'exports'
+  compilation_id?: number
+  /** 'progress' events: where the current step of the job ends (0..1). */
+  ceil?: number
+  /** 'exports' events: a transfer moved (and, while copying, how far). */
+  transfer?: number
+  sent?: number
+  bytes?: number
+  /** On 'job' events: the job only imported the video, so no clips is right. */
+  import_only?: boolean
   job_id?: number
   /** Present on 'job' events: lets the queue ignore re-renders. */
   job_type?: 'process' | 'render' | 'translate'
@@ -426,6 +590,7 @@ export interface CreatorSummary {
   display_name: string
   aliases: string[]
   learning_enabled: number
+  default_branding_id: number | null
   videos: number
   clips: number
   avg_score: number | null
@@ -463,6 +628,16 @@ export interface CreatorEvent {
   detected_date: string
 }
 
+/** A change suggested from a creator's flags; applies only once approved. */
+export interface LearningProposal {
+  id: number
+  creator_id: number
+  kind: 'pad_lead' | 'pad_tail' | 'crop' | 'min_score_delta' | 'guidance'
+  value: string
+  rationale: string
+  status: 'pending' | 'approved' | 'rejected'
+}
+
 export interface CreatorDetail {
   creator_id: number
   display_name: string
@@ -473,7 +648,17 @@ export interface CreatorDetail {
   knowledge: CreatorKnowledgeItem[]
   events: CreatorEvent[]
   feedback: Record<string, number>
-  preferences: { weight_bias: Record<string, number>; preferred_duration: number | null; signals: number } | null
+  /** Flagged clips from this creator's videos. */
+  flag_count: number
+  preferences: {
+    weight_bias: Record<string, number>
+    preferred_duration: number | null
+    signals: number
+    flags: number
+    boundary: { lead: number; tail: number }
+    crop: string | null
+    overrides: { min_score_delta: number; guidance: string[] }
+  } | null
 }
 
 /** One clip in a proposed batch of uploads. A plan is a proposal: nothing has
@@ -514,15 +699,53 @@ export interface WatchPublish {
   overrides: Record<string, Record<string, string | boolean>>
 }
 
+/** Where a watch's videos go when it feeds a compilation. */
+export interface WatchCompilationTarget {
+  compilation_id: number | null
+  /** Sent only: make a compilation with this title (empty: named after the
+   *  watch) instead of using compilation_id. */
+  new_title?: string
+  /** whole: each video start to end. clips: its best clips, which needs
+   *  clips switched on too. */
+  what: 'whole' | 'clips'
+  /** Best clips of each video to add; 0 is all of them. */
+  max_clips: number
+  /** Read only: the compilation's title, null once it has been deleted. */
+  title?: string | null
+}
+
+/** Catching up on what a channel or playlist already has, when it is first
+ *  watched. Neither count nor since: earlier videos are listed, not taken. */
+export interface WatchBackfill {
+  /** The latest this many; with `since`, the most to look through. */
+  count: number
+  /** "YYYY-MM-DD": only videos posted on or after it. */
+  since: string
+  /** A playlist's listing has no dates: which end new videos are added to. */
+  newest_at: 'bottom' | 'top'
+}
+
+/** What a watch does with each new video. Both off: it only lands in the
+ *  Library. */
+export interface WatchActions {
+  clips: boolean
+  compile: boolean
+  compilation: WatchCompilationTarget
+}
+
 export interface Watch {
   id: number
   platform: WatchPlatform
   channel_key: string
+  /** A YouTube playlist is watched the same way a channel is. */
+  kind: 'channel' | 'playlist'
   name: string
   enabled: boolean
   preset: string
   options: JobOptions
   publish: WatchPublish
+  actions: WatchActions
+  backfill: WatchBackfill
   backlog: 'all' | 'newest' | 'day' | 'none'
   min_minutes: number
   last_ok_poll_at: number
@@ -593,6 +816,12 @@ export interface WatchItem {
   /** 1: the download was deleted once the clips were published. 2: there was
    *  none to delete. 0: kept. */
   source_freed: number
+  /** Brought into the Library without making clips. */
+  imported: boolean
+  /** Into the watch's compilation: 0 not yet, 1 added, 2 could not be (see
+   *  compile_note), 3 not asked to. */
+  compiled: number
+  compile_note: string
 }
 
 export interface AutomationStatus {

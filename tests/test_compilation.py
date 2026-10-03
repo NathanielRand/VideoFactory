@@ -1,6 +1,7 @@
 """Compilations: recipe validation, credits, graph building, storage, the API,
 and one real render of a multi-source compilation."""
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -230,8 +231,13 @@ def client(tmp_path: Path):
     (data_dir / "downloads").mkdir(parents=True)
 
     class _Worker:
+        running: dict = {}
+
         def notify(self):
             pass
+
+        def progress_snapshot(self, job_id):
+            return self.running.get(job_id)
 
     class _Broadcaster:
         def publish(self, _):
@@ -243,7 +249,7 @@ def client(tmp_path: Path):
         data_dir=data_dir, worker=_Worker(), broadcaster=_Broadcaster(),
     )
     c = TestClient(app, base_url="http://127.0.0.1")
-    c.db_path, c.data_dir = db_path, data_dir
+    c.db_path, c.data_dir, c.worker = db_path, data_dir, _Worker
     return c
 
 
@@ -256,6 +262,59 @@ def test_template_names_are_unique_and_replacing_is_a_put(client):
     replaced = client.put(f"/compilation-templates/{a['id']}", json={"name": "Look", "config": {"canvas": "4:5"}})
     assert replaced.status_code == 200 and replaced.json()["config"]["canvas"] == "4:5"
     assert [t["name"] for t in client.get("/compilation-templates").json()] == ["Look", "Look (2)"]
+
+
+def test_renaming_a_template_keeps_its_look_and_stays_unique(client):
+    a = client.post("/compilation-templates", json={"name": "Look", "config": {"canvas": "9:16"}}).json()
+    client.post("/compilation-templates", json={"name": "Other", "config": {"canvas": "1:1"}})
+    got = client.patch(f"/compilation-templates/{a['id']}", json={"name": "  Vertical look "})
+    assert got.status_code == 200
+    assert got.json()["name"] == "Vertical look" and got.json()["config"] == {"canvas": "9:16"}
+    # Its own name in another case is fine; someone else's is not.
+    assert client.patch(f"/compilation-templates/{a['id']}", json={"name": "VERTICAL LOOK"}).status_code == 200
+    assert client.patch(f"/compilation-templates/{a['id']}", json={"name": "other"}).status_code == 409
+    assert client.patch(f"/compilation-templates/{a['id']}", json={"name": "   "}).status_code == 400
+    assert client.patch("/compilation-templates/999", json={"name": "x"}).status_code == 404
+
+
+def test_a_template_saves_even_if_a_segment_video_left_the_library(client):
+    # The look is all a template keeps, so a stale segment must not block it.
+    recipe = {"canvas": "9:16", "segments": [_seg("gone")]}
+    r = client.post("/compilation-templates", json={"name": "Look", "config": recipe})
+    assert r.status_code == 201
+    assert r.json()["config"] == {"canvas": "9:16"}
+    tid = r.json()["id"]
+    assert client.put(f"/compilation-templates/{tid}", json={"name": "Look", "config": recipe}).status_code == 200
+
+
+def test_render_progress_is_reported_per_compilation(client):
+    d = StateDB(client.db_path)
+    d.add_job("process", json.dumps({"url": "x"}), video_id="v0")
+    d.add_job("compile", json.dumps({"compilation_id": 6}))
+    # Renders go ahead of waiting videos, but not of each other.
+    queued = d.add_job("compile", json.dumps({"compilation_id": 7}))
+    running = d.add_job("compile", json.dumps({"compilation_id": 8}))
+    d.conn.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (running,))
+    d.conn.commit()
+    d.close()
+    client.worker.running = {running: {"percent": 42, "label": "Segment 2/5", "eta_seconds": 90}}
+    got = client.get("/compilations/progress").json()
+    assert got["7"]["state"] == "queued" and got["7"]["ahead"] == 1
+    assert got["8"] == {"job_id": running, "state": "running", "percent": 42,
+                        "label": "Segment 2/5", "eta_seconds": 90}
+
+
+def test_cancelling_a_waiting_render_takes_it_off_the_queue(client):
+    comp = client.post("/compilations", json={"title": "C"}).json()
+    d = StateDB(client.db_path)
+    job = d.add_job("compile", json.dumps({"compilation_id": comp["id"]}))
+    store.set_status(d, comp["id"], "queued")
+    d.close()
+    assert client.post(f"/compilations/{comp['id']}/cancel").json() == {"state": "removed"}
+    assert client.get(f"/compilations/{comp['id']}").json()["status"] == "draft"
+    d = StateDB(client.db_path)
+    assert d.get_job(job) is None
+    d.close()
 
 
 def test_api_create_edit_and_queue_a_render(client):
@@ -347,6 +406,53 @@ def test_renders_a_multi_source_compilation(tmp_path, transition):
 
 
 @needs_ffmpeg
+def test_render_progress_climbs_to_the_end_across_formats(tmp_path):
+    src = _make_source(tmp_path / "src.mp4", "640x360", 8, audio=True)
+    r = recipe.parse({
+        "canvas": "9:16", "outputs": ["9:16", "16:9"],
+        "segments": [_seg("s", 0, 3), _seg("s", 3, 8)],
+        "transition": {"type": "fade", "duration": 0.5},
+    })
+    seen: list[float] = []
+    lock = __import__("threading").Lock()
+
+    def heard(fraction, label):
+        with lock:
+            seen.append(fraction)
+
+    render.render_all(r, {"s": render.SourceInfo(path=src)}, tmp_path / "out", "comp",
+                      on_fraction=heard)
+    assert seen[-1] == 1.0
+    assert all(0.0 <= f <= 1.0 for f in seen)
+    # Both formats together: in between readings, not just a start and an end.
+    assert len({round(f, 2) for f in seen}) > 4
+    assert seen == sorted(seen)
+
+
+@needs_ffmpeg
+def test_cancelling_stops_ffmpeg_mid_pass(monkeypatch):
+    import time
+
+    from core import cancel
+
+    heard = []
+
+    def cancelled_after_first_report(key):
+        if heard:
+            raise cancel.CancelledError(key)
+
+    monkeypatch.setattr(cancel, "check", cancelled_after_first_report)
+    # Ten minutes of video: only a cancel that stops FFmpeg ends this quickly.
+    cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:duration=600",
+           "-f", "null", "-"]
+    started = time.monotonic()
+    with pytest.raises(cancel.CancelledError):
+        render.run_ffmpeg(cmd, duration=600, on_fraction=heard.append, cancel_key="c")
+    assert heard and heard[0] < 0.5
+    assert time.monotonic() - started < 20
+
+
+@needs_ffmpeg
 @pytest.mark.parametrize("audio", [True, False])
 def test_renders_a_credit_on_a_background_image(tmp_path, audio):
     src = _make_source(tmp_path / "src.mp4", "640x360", 4, audio=audio)
@@ -374,7 +480,7 @@ def test_renders_a_credit_on_a_background_image(tmp_path, audio):
 
 def test_missing_credit_image_fails_clearly(tmp_path):
     r = recipe.parse({"segments": [_seg("s", 0, 3)], "credits": {"bg_image": "gone.png"}}, check_files=False)
-    with pytest.raises(RuntimeError, match="gone.png"):
+    with pytest.raises(RuntimeError, match=r"gone\.png"):
         render.render(r, {"s": render.SourceInfo(path=tmp_path / "x.mp4")}, tmp_path / "o" / "c.mp4",
                       banner_assets=tmp_path)
 
@@ -483,3 +589,60 @@ def test_unused_files_are_listed_and_cleaned_but_tracked_ones_never(client, monk
     assert client.get("/compilation-files/unused").json() == [{"name": "Untitled compilation [9].mp4", "bytes": 100}]
     assert client.delete("/compilation-files/unused").json()["deleted"] == ["Untitled compilation [9].mp4"]
     assert (out / f"Best of [{cid}] v1.mp4").exists() and (out / "notes.txt").exists()
+
+
+# ---- credit placement ---------------------------------------------------------------
+
+
+def _margins_of(ass: str) -> tuple[int, int, int]:
+    """MarginL, MarginV and the alignment from the Credit style line."""
+    fields = next(l for l in ass.splitlines() if l.startswith("Style: Credit")).split(",")
+    return int(fields[-4]), int(fields[-2]), int(fields[-5])
+
+
+def test_unset_insets_keep_the_original_margin():
+    left, vertical, _ = _margins_of(credits.build_ass("Ann", CreditStyle(), (1080, 1920), 5.0))
+    assert left == vertical == round(0.045 * 1080)
+
+
+def test_insets_are_fractions_of_their_own_axis():
+    style = CreditStyle(position="top_left", inset_x=0.06, inset_y=0.14)
+    left, vertical, align = _margins_of(credits.build_ass("Ann", style, (1080, 1920), 5.0))
+    assert (left, vertical, align) == (65, 269, 7)
+
+
+def test_middle_positions_use_the_middle_row():
+    _, _, align = _margins_of(credits.build_ass("Ann", CreditStyle(position="middle_right"), (1080, 1920), 5.0))
+    assert align == 6
+    plate = credits.plate_for(CreditStyle(position="middle_left"), (1080, 1920), Path("p.png"), (400, 100))
+    assert plate.y == (1920 - plate.h) // 2
+
+
+def test_plate_respects_the_insets():
+    style = CreditStyle(position="top_right", inset_x=0.1, inset_y=0.2)
+    plate = credits.plate_for(style, (1080, 1920), Path("p.png"), (400, 100))
+    assert (plate.x + plate.w, plate.y) == (1080 - 108, 384)
+
+
+def test_custom_position_is_centred_on_the_point_and_kept_in_frame():
+    style = CreditStyle(position="custom", x=0.5, y=0.3)
+    assert "\\pos(540,576)" in credits.build_ass("Ann", style, (1080, 1920), 5.0)
+    corner = CreditStyle(position="custom", x=0.0, y=0.0)
+    ass = credits.build_ass("Ann", corner, (1080, 1920), 5.0)
+    cx, cy = (int(n) for n in ass.split("\\pos(")[1].split(")")[0].split(","))
+    assert cx > 0 and cy > 0  # nudged in, not half off the frame
+    plate = credits.plate_for(CreditStyle(position="custom", x=1.0, y=1.0), (1080, 1920), Path("p.png"), (400, 100))
+    assert plate.x + plate.w <= 1080 and plate.y + plate.h <= 1920
+
+
+def test_recipe_validates_the_new_credit_fields():
+    def parse(**kw):
+        return recipe.parse({"segments": [_seg()], "credits": kw}, check_files=False).credits
+
+    assert parse().inset_x is None and parse().inset_y is None
+    assert parse(inset_x=5, inset_y=-1).inset_x == recipe.MAX_INSET
+    assert parse(inset_x=5, inset_y=-1).inset_y == 0.0
+    assert parse(position="custom", x=9, y=-9).x == 1.0
+    assert parse(position="middle_center").position == "middle_center"
+    with pytest.raises(RecipeError):
+        parse(position="sideways")

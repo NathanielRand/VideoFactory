@@ -175,7 +175,8 @@ def _branding_id(name: str) -> int:
     stream with the wrong logo. An unknown name lists the real ones instead,
     so the next attempt can be right rather than another guess.
     """
-    profiles = _request("GET", "/branding") or []
+    # Compilation profiles brand compilations, never a stream's clips.
+    profiles = [p for p in _request("GET", "/branding") or [] if p.get("kind", "clip") == "clip"]
     wanted = name.strip().casefold()
     for row in profiles:
         if str(row.get("name", "")).strip().casefold() == wanted:

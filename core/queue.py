@@ -296,6 +296,11 @@ def estimate(db) -> dict:
     for job in db.queued_jobs():
         if job["type"] != "process":
             continue  # re-render/translate jobs are minutes, not hours
+        try:
+            if json.loads(job["payload"] or "{}").get("import_only"):
+                continue  # a download and nothing else
+        except (TypeError, ValueError):
+            pass
         row = (
             db.conn.execute(
                 "SELECT duration FROM videos WHERE video_id = ?", (job["video_id"],)

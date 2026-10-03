@@ -16,16 +16,20 @@ this one place, so render.py can trust what it is handed.
       "transition": {"type": "fade", "duration": 0.5},
       "credits": {"enabled": true, "template": "Clip: {channel}",
                   "seconds": 4.0, "whole_clip": false,   # whole_clip ignores seconds
-                  "position": "bottom_left", "font_size": 44,
+                  "position": "bottom_left", "font_size": 44,   # or middle_*, or "custom" + x, y
+                  "inset_x": 0.06, "inset_y": 0.14,      # optional: distance in from the edges
+                  "x": 0.5, "y": 0.5,                    # "custom": the credit's centre
                   "font": "Arial", "bold": true, "italic": false, "color": "#FFFFFF",
                   "backing": "box",                      # box | outline | none
                   "bg_image": "<hash>.png" | null,       # a branding asset: a plate
                   "bg_scale": 2.4,                       # plate height / font size
                   "bg_text_x": 0.5, "bg_text_y": 0.5},   # text centre on the plate
-      "banner": {...watermark config...} | {"profile_id": 3} | null,
+      "banner": {...watermark config...} | {"profile_id": 3} | {"profile_id": 3, "custom": {...}} | null,
+      "credits_custom": bool,   # false: the banner profile's credit is used; true: "credits" above
       "intro": {"path": "D:/brand/intro.mp4"} | null,
       "outro": {"path": "D:/brand/outro.mp4"} | null,
-      "normalize_audio": true
+      "normalize_audio": true,          # match every part's loudness (compilation/loudness.py)
+      "loudness_target": -14            # LUFS: -14 | -16 | -12
     }
 
 A TEMPLATE is the same object without "segments": the reusable look.
@@ -51,13 +55,25 @@ TRANSITIONS = (
     "smoothleft", "smoothright", "circleopen", "zoomin",
 )
 BACKINGS = ("box", "outline", "none")
-POSITIONS = ("bottom_left", "bottom_right", "top_left", "top_right", "bottom_center", "top_center")
+POSITIONS = (
+    "bottom_left", "bottom_right", "top_left", "top_right", "bottom_center", "top_center",
+    "middle_left", "middle_right", "middle_center", "custom",
+)
+# How far in from the edges a credit sits, as a fraction of the frame's width
+# (inset_x) and height (inset_y). None keeps the original 4.5% of the short edge.
+MAX_INSET = 0.45
 
 MIN_SEGMENT = 0.5          # seconds; shorter is a flash, not a clip
 MAX_SEGMENTS = 200
 MAX_TRANSITION = 2.0
 MAX_BLUR_REGIONS = 8
-TEMPLATE_KEYS = ("canvas", "outputs", "fit", "transition", "credits", "banner", "intro", "outro", "normalize_audio")
+TEMPLATE_KEYS = ("canvas", "outputs", "fit", "transition", "credits", "credits_custom", "banner", "intro",
+                 "outro", "normalize_audio", "loudness_target")
+# Loudness targets offered (LUFS): what YouTube, TikTok and Instagram
+# normalise to, a quieter podcast-style level, and a louder one.
+LOUDNESS_TARGETS = (-14.0, -16.0, -12.0)
+# A segment's volume is a multiplier; 4.0 is +12 dB, the most it may add.
+MAX_VOLUME = 4.0
 
 
 class RecipeError(ValueError):
@@ -99,6 +115,14 @@ class CreditStyle:
     # image with artwork on one side.
     bg_text_x: float = 0.5
     bg_text_y: float = 0.5
+    # Distance from the frame edges, so a credit can clear a platform's own
+    # overlays (YouTube's top bar, the title and buttons on a Short). None is
+    # the original margin. Ignored for "custom", which is placed by x / y.
+    inset_x: float | None = None
+    inset_y: float | None = None
+    # "custom": where the credit's centre sits, as fractions of the frame.
+    x: float = 0.5
+    y: float = 0.5
 
 
 @dataclass
@@ -114,6 +138,7 @@ class Recipe:
     intro: Path | None = None
     outro: Path | None = None
     normalize_audio: bool = True
+    loudness_target: float = -14.0  # LUFS every part is matched to (compilation/loudness.py)
 
     @property
     def size(self) -> tuple[int, int]:
@@ -167,6 +192,35 @@ def _credit_look(cr: dict) -> dict:
         "bg_text_x": max(0.1, min(0.9, _num(cr.get("bg_text_x", 0.5), "credit text position"))),
         "bg_text_y": max(0.1, min(0.9, _num(cr.get("bg_text_y", 0.5), "credit text position"))),
     }
+
+
+def _inset(raw) -> float | None:
+    if raw is None or raw == "":
+        return None
+    return max(0.0, min(MAX_INSET, _num(raw, "credit edge distance")))
+
+
+def credit_style(cr: dict | None) -> CreditStyle:
+    """A CreditStyle from its stored dict, validated and clamped. Shared by
+    compilations (recipe["credits"]) and clips (a branding profile's "credit")."""
+    cr = cr or {}
+    position = str(cr.get("position") or "bottom_left")
+    if position not in POSITIONS:
+        raise RecipeError(f"credits position must be one of {', '.join(POSITIONS)}")
+    template = str(cr.get("template") if cr.get("template") is not None else "Clip: {channel}")
+    return CreditStyle(
+        enabled=bool(cr.get("enabled", True)),
+        template=template[:120],
+        seconds=max(1.0, min(15.0, _num(cr.get("seconds", 4.0), "credit seconds"))),
+        whole_clip=bool(cr.get("whole_clip", False)),
+        position=position,
+        font_size=int(max(16, min(120, _num(cr.get("font_size", 44), "credit font size")))),
+        inset_x=_inset(cr.get("inset_x")),
+        inset_y=_inset(cr.get("inset_y")),
+        x=max(0.0, min(1.0, _num(cr.get("x", 0.5), "credit position"))),
+        y=max(0.0, min(1.0, _num(cr.get("y", 0.5), "credit position"))),
+        **_credit_look(cr),
+    )
 
 
 def _regions(raw, where: str) -> list[tuple[float, float, float, float]]:
@@ -237,7 +291,7 @@ def parse(
             start=round(start, 3),
             end=round(end, 3),
             credit=bool(s.get("credit", True)),
-            volume=max(0.0, min(2.0, _num(s.get("volume", 1.0), f"{where} volume"))),
+            volume=max(0.0, min(MAX_VOLUME, _num(s.get("volume", 1.0), f"{where} volume"))),
             blur_regions=_regions(s.get("blur_regions"), where),
         ))
     if require_segments and not segments:
@@ -258,20 +312,7 @@ def parse(
         if tdur < 0.1:
             ttype = "none"
 
-    cr = data.get("credits") or {}
-    position = str(cr.get("position") or "bottom_left")
-    if position not in POSITIONS:
-        raise RecipeError(f"credits position must be one of {', '.join(POSITIONS)}")
-    template = str(cr.get("template") if cr.get("template") is not None else "Clip: {channel}")
-    credits = CreditStyle(
-        enabled=bool(cr.get("enabled", True)),
-        template=template[:120],
-        seconds=max(1.0, min(15.0, _num(cr.get("seconds", 4.0), "credit seconds"))),
-        whole_clip=bool(cr.get("whole_clip", False)),
-        position=position,
-        font_size=int(max(16, min(120, _num(cr.get("font_size", 44), "credit font size")))),
-        **_credit_look(cr),
-    )
+    credits = credit_style(data.get("credits"))
 
     banner = data.get("banner")
     if banner is not None and not isinstance(banner, dict):
@@ -289,7 +330,19 @@ def parse(
         intro=_bumper(data.get("intro"), "intro", check_files),
         outro=_bumper(data.get("outro"), "outro", check_files),
         normalize_audio=bool(data.get("normalize_audio", True)),
+        loudness_target=_loudness_target(data.get("loudness_target")),
     )
+
+
+def _loudness_target(value) -> float:
+    if value is None:
+        return LOUDNESS_TARGETS[0]
+    target = _num(value, "loudness target")
+    if target not in LOUDNESS_TARGETS:
+        raise RecipeError(
+            f"loudness target must be one of {', '.join(f'{t:g}' for t in LOUDNESS_TARGETS)} LUFS"
+        )
+    return target
 
 
 def template_of(data: dict) -> dict:

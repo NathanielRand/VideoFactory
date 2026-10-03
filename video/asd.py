@@ -98,7 +98,12 @@ def _load():
     if _model is not None:
         return _model, _head
 
-    import torch
+    from core import cancel, governor
+
+    # The same torch libraries as tracking: wait for the memory to load them.
+    torch = governor.load_heavy(
+        "the speaker model (torch)", 2.5, lambda: __import__("torch"), cancel.check_active
+    )
 
     with _vendor_on_path():
         from loss import lossAV

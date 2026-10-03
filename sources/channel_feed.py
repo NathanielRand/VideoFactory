@@ -1,4 +1,4 @@
-"""What a watched channel has posted, on each platform that can say.
+"""What a watched channel or playlist has posted, on each platform that can say.
 
 Detection only. This answers "a new video appeared, and here is its link"; the
 link then goes through the same queue a pasted one does, so from there on a
@@ -11,6 +11,11 @@ Per platform:
            uploads playlist through yt-dlp, which lists the same videos.
   Twitch   the channel's past broadcasts, newest first, through yt-dlp. First
            page only: paging with cursors trips Twitch's integrity check.
+  YouTube playlists
+           read through yt-dlp, the whole list up to PLAYLIST_SCAN entries:
+           a playlist can be ordered oldest first, so what was added last may
+           be at the end, and a video is new because it was not there before,
+           not because of where it sits.
   Kick     Kick's own channel videos endpoint. yt-dlp has no extractor that
            lists a Kick channel. The endpoint is unofficial, but it is the same
            API, behind the same Cloudflare impersonation, that downloading a
@@ -23,6 +28,7 @@ never do.
 
 import re
 from collections.abc import Callable
+from itertools import islice
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -32,7 +38,17 @@ PLATFORMS = ("youtube", "twitch", "kick")
 # more would not be comparable across platforms.
 LISTING_SIZE = 15
 
+# How many entries of a watched playlist one look reads. yt-dlp pages them a
+# hundred at a time, so this is at most ten requests.
+PLAYLIST_SCAN = 1000
+
 _YOUTUBE_ID = re.compile(r"^UC[0-9A-Za-z_-]{22}$")
+# A YouTube playlist id: PL..., OLAK5uy_... (albums), UU... (a channel's
+# uploads) and the like. Mixes (RD...) are generated per viewer and never end;
+# Watch later and Liked videos are private. None of those can be watched.
+_PLAYLIST_ID = re.compile(r"^[0-9A-Za-z_-]{10,64}$")
+_UNWATCHABLE_LISTS = ("RD", "WL", "LL", "LM")
+_PLAYLIST_PREFIXES = ("PL", "OLAK5uy_", "UU", "FL", "PU", "EL")
 # Kick slugs are letters, digits, underscore and hyphen. Refused before they
 # are placed into a URL.
 _KICK_SLUG = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -56,8 +72,9 @@ _PERMANENT = (
 @dataclass
 class Channel:
     platform: str
-    channel_key: str  # UC id, Twitch login or Kick slug
+    channel_key: str  # UC id, YouTube playlist id, Twitch login or Kick slug
     name: str
+    kind: str = "channel"  # channel | playlist
 
 
 @dataclass
@@ -100,6 +117,8 @@ def resolve(
     raw = (text or "").strip()
     if not raw:
         raise ValueError("Paste a channel link or name.")
+    if platform == "youtube" and (list_id := playlist_id(raw)):
+        return _resolve_playlist(list_id, extract or _extract)
     if platform == "youtube":
         if resolve_youtube is None:
             from sources.youtube import resolve_channel as resolve_youtube
@@ -137,6 +156,48 @@ def resolve(
     raise ValueError(f"Video Factory can't watch {platform!r} channels.")
 
 
+def playlist_id(text: str) -> str | None:
+    """The playlist a pasted YouTube link points at, or None for anything else.
+    A video opened from a playlist carries it too (watch?v=...&list=...), and
+    that is taken as the playlist: pasting it here means "watch this list"."""
+    raw = (text or "").strip()
+    match = re.search(r"[?&]list=([^&#\s]+)", raw)
+    candidate = match.group(1) if match else raw
+    if not match and not candidate.startswith(("PL", "OLAK5uy_")):
+        return None  # a bare word is a handle, not a playlist
+    if not _PLAYLIST_ID.match(candidate) or _YOUTUBE_ID.match(candidate):
+        return None
+    return candidate
+
+
+def is_playlist(platform: str, channel_key: str) -> bool:
+    """Whether a watch's key is a YouTube playlist rather than a channel."""
+    key = channel_key or ""
+    return (platform == "youtube" and key.startswith(_PLAYLIST_PREFIXES)
+            and bool(_PLAYLIST_ID.match(key)) and not _YOUTUBE_ID.match(key))
+
+
+def _playlist_url(list_id: str) -> str:
+    return f"https://www.youtube.com/playlist?list={list_id}"
+
+
+def _resolve_playlist(list_id: str, extract) -> Channel:
+    if list_id.startswith(_UNWATCHABLE_LISTS):
+        raise ValueError(
+            "That's a mix or a private list (Watch later, Liked videos). "
+            "Only public or unlisted playlists can be watched."
+        )
+    if not list_id.startswith(_PLAYLIST_PREFIXES):
+        raise ValueError("That isn't a YouTube playlist Video Factory can watch.")
+    try:
+        info = extract(_playlist_url(list_id), flat=True, size=1) or {}
+    except Exception as e:
+        raise ValueError(f"Couldn't read that YouTube playlist: {_short(e)}") from e
+    if not info.get("id") and not info.get("title"):
+        raise ValueError("Couldn't find that YouTube playlist. Is it private?")
+    return Channel("youtube", list_id, info.get("title") or list_id, kind="playlist")
+
+
 def _handle_from(raw: str, host: str) -> str | None:
     """The channel name from a pasted link on `host`, or the text itself."""
     text = raw.strip().lstrip("@")
@@ -160,6 +221,8 @@ def latest(
     """The channel's newest videos, newest first. Raises when the platform
     could not be read at all, so a watch can say so instead of looking empty."""
     extract = extract or _extract
+    if is_playlist(platform, channel_key):
+        return _playlist_latest(channel_key, extract)
     if platform == "youtube":
         return _youtube_latest(channel_key, extract, rss)
     if platform == "twitch":
@@ -194,7 +257,52 @@ def _youtube_latest(channel_key, extract, rss) -> list[NewSourceVideo]:
     return _from_listing("youtube", channel_key, listing)
 
 
-def _kick_latest(slug, get_json) -> list[NewSourceVideo]:
+def history(
+    platform: str,
+    channel_key: str,
+    limit: int,
+    *,
+    extract: Callable[..., dict | None] | None = None,
+    get_json: Callable[[str], object] | None = None,
+) -> list[NewSourceVideo]:
+    """Up to `limit` of what a channel or playlist already has, for catching
+    up when it is first watched. Deeper than latest(), which is the newest
+    fifteen. Channels come newest first. A playlist comes in its own order,
+    since its listing carries no dates; the caller knows which end is new.
+
+    Twitch gives its first page only (paging trips its integrity check) and
+    Kick whatever its endpoint returns, so either may give fewer than asked."""
+    extract = extract or _extract
+    limit = max(1, min(PLAYLIST_SCAN, int(limit)))
+    if is_playlist(platform, channel_key):
+        return _playlist_latest(channel_key, extract)[:PLAYLIST_SCAN]
+    if platform == "youtube":
+        if not _YOUTUBE_ID.match(channel_key or ""):
+            raise ValueError(f"not a YouTube channel id: {channel_key!r}")
+        uploads = f"https://www.youtube.com/playlist?list=UU{channel_key[2:]}"
+        listing = extract(uploads, flat=True, size=limit) or {}
+        return _from_listing("youtube", channel_key, listing, limit=limit)
+    if platform == "twitch":
+        listing = extract(_twitch_listing(channel_key), flat=True, size=limit) or {}
+        return _from_listing("twitch", channel_key, listing, limit=limit)
+    if platform == "kick":
+        return _kick_latest(channel_key, get_json or _get_json, limit=limit)
+    raise ValueError(f"unsupported platform {platform!r}")
+
+
+def _playlist_latest(list_id, extract) -> list[NewSourceVideo]:
+    if not _PLAYLIST_ID.match(list_id or ""):
+        raise ValueError(f"not a YouTube playlist id: {list_id!r}")
+    listing = extract(_playlist_url(list_id), flat=True, size=PLAYLIST_SCAN) or {}
+    videos = _from_listing("youtube", list_id, listing, limit=PLAYLIST_SCAN)
+    # Newest first, like every other listing, when the entries say when they
+    # were posted. When they do not, the playlist's own order stands.
+    if videos and all(v.published_at for v in videos):
+        videos.sort(key=lambda v: v.published_at, reverse=True)
+    return videos
+
+
+def _kick_latest(slug, get_json, limit: int = LISTING_SIZE) -> list[NewSourceVideo]:
     if not _KICK_SLUG.match(slug or ""):
         raise ValueError(f"not a Kick channel: {slug!r}")
     data = get_json(f"https://kick.com/api/v2/channels/{slug}/videos")
@@ -212,15 +320,19 @@ def _kick_latest(slug, get_json) -> list[NewSourceVideo]:
         ))
     found.sort(key=lambda pair: pair[0], reverse=True)
     out = []
-    for when, video in found[:LISTING_SIZE]:
+    for when, video in found[:limit]:
         video.published_at = when
         out.append(video)
     return out
 
 
-def _from_listing(platform: str, channel_key: str, listing: dict) -> list[NewSourceVideo]:
+def _from_listing(
+    platform: str, channel_key: str, listing: dict, limit: int = LISTING_SIZE
+) -> list[NewSourceVideo]:
     out = []
-    for entry in [e for e in (listing.get("entries") or []) if e][:LISTING_SIZE]:
+    # islice, not a slice: unprocessed, yt-dlp hands the entries over as a
+    # generator that fetches page after page for as long as it is read.
+    for entry in (e for e in islice(listing.get("entries") or [], limit) if e):
         url = entry.get("url") or entry.get("webpage_url") or ""
         if platform == "youtube" and url and not url.startswith("http"):
             url = f"https://www.youtube.com/watch?v={url}"

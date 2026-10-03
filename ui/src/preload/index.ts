@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('studio', {
   readClipboardKey: (): Promise<string> => ipcRenderer.invoke('read-clipboard-key'),
   getDownloadsPath: (): Promise<string> => ipcRenderer.invoke('get-downloads-path'),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('pick-folder'),
+  /** Give the window keyboard focus back after a native dialog (alert/confirm). */
+  refocus: (): Promise<boolean> => ipcRenderer.invoke('refocus'),
+  showInFolder: (path: string): Promise<boolean> => ipcRenderer.invoke('show-in-folder', path),
+  openFolder: (path: string): Promise<boolean> => ipcRenderer.invoke('open-folder', path),
   // Desktop notification when a queued video finishes. Text only — the main
   // process builds the toast, so the renderer cannot attach actions or links.
   notify: (title: string, body: string): Promise<boolean> =>

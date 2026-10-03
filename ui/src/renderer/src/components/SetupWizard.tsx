@@ -289,8 +289,9 @@ export default function SetupWizard({ onClose }: { onClose: () => void }): JSX.E
               {pre?.ready ? (
                 <>
                   <p className="text-sm text-muted mt-3 leading-relaxed">
-                    Everything is installed. Paste a video link on the Clip Editor page and
-                    press <b>Generate clips</b>.
+                    Everything is installed. Paste a video link on <b>Home</b> and press{' '}
+                    <b>Generate clips</b> — or pick <b>Library only</b> to keep it in
+                    your Library without clipping.
                   </p>
                   <p className="text-sm text-muted mt-3 leading-relaxed">
                     A first video takes a while — it downloads, transcribes, then studies the

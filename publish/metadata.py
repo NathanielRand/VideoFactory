@@ -28,6 +28,47 @@ def clamp_title(title: str) -> str:
     return cleaned[:TITLE_MAX]
 
 
+def _cut_at_word(text: str, room: int) -> str:
+    """`text` shortened to `room` characters, at a word boundary when one is
+    near, with trailing punctuation dropped rather than left dangling."""
+    if len(text) <= room:
+        return text
+    cut = text[: max(0, room)]
+    space = cut.rfind(" ")
+    if space >= room * 0.6:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:-|–—")
+
+
+def decorate_title(title: str, channel: str = "", hashtag: str = "", limit: int = TITLE_MAX) -> str:
+    """"<title> | <channel> #Tag": the source channel and one always-on hashtag.
+
+    The suffix is what the creator asked for, so it is the title that gives way
+    when the two do not fit in `limit`, never the suffix (clamp_title cuts from
+    the end, which would take exactly these off). A part already in the title is
+    not added again, because the publish box is prefilled with whatever went up
+    last time and a second publish would otherwise stack a second copy.
+    A channel that would leave almost no room for the title itself is dropped.
+    """
+    base = title.translate(_FORBIDDEN).strip()
+    lowered = base.casefold()
+    word = "".join(c for c in (hashtag or "") if c.isalnum() or c == "_")[:30]
+    tag = f"#{word}" if word else ""
+    name = " ".join((channel or "").translate(_FORBIDDEN).split())
+    if name and (name.casefold() in lowered or len(name) > limit // 2):
+        name = ""
+    if tag and tag.casefold() in lowered:
+        tag = ""
+    if not (name or tag):
+        return base[:limit]
+    # "Title | Channel #Tag", or "Title #Tag" when there is no channel to name.
+    suffix = f"{name} {tag}".strip()
+    if not base:
+        return suffix[:limit]
+    joined = f" | {suffix}" if name else f" {suffix}"
+    return f"{_cut_at_word(base, limit - len(joined))}{joined}"
+
+
 def clamp_description(description: str) -> str:
     return description.translate(_FORBIDDEN)[:DESCRIPTION_MAX]
 
@@ -176,8 +217,10 @@ def build_insert_body(request: PublishRequest) -> dict:
         "publicStatsViewable": bool(request.public_stats_viewable),
         "license": request.license,
     }
-    if request.contains_synthetic_media:
-        status["containsSyntheticMedia"] = True
+    # An answer is sent as given, "no" included: leaving a "no" out left
+    # YouTube's "AI use" question open, and Studio holds processing for it.
+    if request.contains_synthetic_media is not None:
+        status["containsSyntheticMedia"] = bool(request.contains_synthetic_media)
     if request.publish_at:
         # Scheduling IS a private upload with a publish time attached.
         privacy = "private"
@@ -185,6 +228,11 @@ def build_insert_body(request: PublishRequest) -> dict:
     status["privacyStatus"] = privacy
 
     body: dict = {"snippet": snippet, "status": status}
+    if request.has_paid_product_placement is not None:
+        # YouTube's "Paid promotion" question, answered at upload.
+        body["paidProductPlacementDetails"] = {
+            "hasPaidProductPlacement": bool(request.has_paid_product_placement)
+        }
     if request.recording_date:
         body["recordingDetails"] = {"recordingDate": request.recording_date}
     if request.localizations:
@@ -199,4 +247,53 @@ def parts_for(request: PublishRequest) -> str:
         parts.append("recordingDetails")
     if request.localizations:
         parts.append("localizations")
+    if request.has_paid_product_placement is not None:
+        parts.append("paidProductPlacementDetails")
     return ",".join(parts)
+
+
+def timestamped_url(url: str, start: float) -> str:
+    """A YouTube link to the moment a clip starts, so the source link lands
+    where the clip came from. Any other link is returned unchanged."""
+    import re
+
+    link = (url or "").strip()
+    seconds = max(0, int(start or 0))
+    if not seconds or re.search(r"[?&]t=", link):
+        return link
+    if re.match(r"https?://(www\.|m\.)?youtube\.com/watch", link):
+        return f"{link}&t={seconds}s"
+    if re.match(r"https?://youtu\.be/", link):
+        return f"{link}{'&' if '?' in link else '?'}t={seconds}s"
+    return link
+
+
+def source_credit_line(name: str, url: str, start: float = 0.0) -> str:
+    """"Source: <channel> - <link>", or "" when there is neither. Only a real
+    web link is used; a local file's path is not something to publish."""
+    link = timestamped_url(url, start) if (url or "").strip().lower().startswith(("http://", "https://")) else ""
+    name = (name or "").strip()
+    if name and link:
+        return f"Source: {name} - {link}"
+    return f"Source: {link}" if link else (f"Source: {name}" if name else "")
+
+
+def playlist_url(playlist_id: str) -> str:
+    pid = (playlist_id or "").strip()
+    return f"https://www.youtube.com/playlist?list={pid}" if pid else ""
+
+
+def with_links(description: str, lines: list[str]) -> str:
+    """The description with credit lines under it. A line already there (same
+    link, or the same text) is not repeated, so re-publishing does not stack
+    them."""
+    body = description.rstrip()
+    for line in lines:
+        line = (line or "").strip()
+        if not line:
+            continue
+        link = line.rsplit(" ", 1)[-1] if "http" in line else line
+        if line in body or (link.startswith("http") and link in body):
+            continue
+        body = f"{body}\n\n{line}" if body else line
+    return body

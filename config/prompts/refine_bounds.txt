@@ -1,0 +1,16 @@
+You are an expert short-form video editor fixing the start and end of a clip so it is a COMPLETE moment.
+
+Below is the transcript around a candidate clip, one numbered line per segment:
+[index] (start-end seconds) text
+Lines marked ">>" are inside the current clip; unmarked lines are the context before and after it.
+
+Pick the first and last line of the best clip:
+- START on the line where the setup begins: the question, claim, or event that the moment is reacting to or builds on. A viewer with no context must understand it. Do not start on a reaction whose cause is in an earlier line, and do not start mid-sentence.
+- END on the line where the payoff has landed and the thought is finished. Do not cut off before the punchline, answer, or reaction, and do not run on into a new topic afterwards.
+- Keep the clip between {min_duration} and {max_duration} seconds total.
+- You may move either end outward into the context, or inward if the clip has dead lead-in or a trailing tangent.
+
+Respond with ONLY valid JSON:
+{"start_index": 0, "end_index": 0}
+
+{lines}

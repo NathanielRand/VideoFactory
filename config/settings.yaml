@@ -2,7 +2,7 @@
 #   QUICK SETUP — edit these lines, ignore everything below
 # ==============================================================
 
-model: gemma:7b        # your AI model (see: python main.py models)
+model: gpt-oss:120b-cloud        # your AI model (see: python main.py models)
 channel: ""            # your channel, e.g. "@YourHandle"
 
 content_language: auto # language of the streams you clip: auto = detect per
@@ -41,6 +41,19 @@ llm:
   # Empty = use the main model above. Install it from the Models page;
   # nothing is downloaded until you ask.
   translation_model: ""
+  # A different model for each clipping job. Blank / missing = the model above.
+  # Finding candidates reads a lot of text cheaply; placing edges, ranking and
+  # grading want the strongest judgement on a few short prompts. Cloud models
+  # (provider/model) run on your own key. A local model that is not installed
+  # is skipped, and that job uses the model above.
+  #   propose: candidates from the transcript      refine: each clip's start/end
+  #   rerank:  order the finalists (also used for flag reviews)
+  #   rubric:  grade the finalists                 metadata: titles + hashtags
+  stage_models: {}
+  #   e.g.  stage_models: {refine: "openrouter/some/strong-model", rerank: "openrouter/some/strong-model"}
+  # A local vision model (one that reads images) gives thumbnails a second
+  # opinion on which frame to use. Blank = off. e.g. "ollama/qwen2.5vl:7b"
+  vision_model: ""
   temperature: 0.4
   num_ctx: 8192          # context window; raise for models that support more
   ollama_host: http://localhost:11434
@@ -101,6 +114,14 @@ scoring:
                                # stays the main signal. 0 disables. (Kick keeps no
                                # chat after a stream ends, so Kick has no chat data.)
   rerank_pool: 8               # finalists compared head-to-head by the LLM
+  rubric: off                  # grade finalists on hook / payoff / standalone / edges /
+                               # energy instead of one number. off = not run (it
+                               # costs a model call per 6 finalists on every video).
+                               # shadow = graded and stored, changes nothing.
+                               # on = blended into the score and the ranking; never
+                               # drops a clip below min_score. Check it first with
+                               # `python main.py eval --rubric`, which grades your
+                               # kept / published / flagged clips live.
   reaction_top_k: 8            # candidates that get the (slower) YOLO reaction pass
 
 analysis:

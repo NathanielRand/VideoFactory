@@ -42,6 +42,7 @@ export interface YouTubeStatus {
   connected?: boolean
   scopes?: string[]
   playlists_available?: boolean
+  analytics_available?: boolean
   accounts?: YouTubeAccount[]
   channel?: YouTubeChannel | null
   settings?: YouTubeSettings
@@ -75,6 +76,28 @@ export interface PublishJobRow {
   error: string
   youtube_id: string
   after_job_id: number
+}
+
+/** One video on the channel, as publish/youtube_status.summarize shapes it. */
+export interface ChannelVideo {
+  video_id: string
+  title: string
+  thumbnail: string
+  published_at: string
+  publish_at: string
+  state: 'processing' | 'scheduled' | 'live' | 'unlisted' | 'private' | 'rejected' | 'failed' | 'deleted'
+  detail: string
+  privacy: string
+  duration: number
+  short: boolean
+  /** null when YouTube hides the count (comments off, likes hidden). */
+  views: number | null
+  likes: number | null
+  comments: number | null
+  url: string
+  studio_url: string
+  /** The clip (or negative compilation id) this app made it from, if any. */
+  publish_id: number | null
 }
 
 export interface Playlist {

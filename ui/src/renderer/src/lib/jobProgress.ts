@@ -10,6 +10,11 @@ export interface JobProgress {
   fraction: number
   startedAt: number
   videoId: string
+  /** Where the current step ends (0..1): the bar eases toward it between
+   *  events so it keeps moving while a long step runs. 0 = no such hint. */
+  ceil: number
+  /** When the last event arrived, for that easing. */
+  eventAt: number
 }
 
 const STAGES: Record<string, { base: number; weight: number; label: string }> = {
@@ -26,7 +31,9 @@ const STAGES: Record<string, { base: number; weight: number; label: string }> = 
   render: { base: 0.78, weight: 0.22, label: 'Rendering clips' },
   // Video Factory: a compilation job is one stage (server/jobs.py _STAGES).
   compile: { base: 0.0, weight: 1.0, label: 'Rendering compilation' },
-  variants: { base: 0.0, weight: 1.0, label: 'Rendering other formats' }
+  variants: { base: 0.0, weight: 1.0, label: 'Rendering other formats' },
+  // One clip re-rendered: the render names its own steps (core/progress.py).
+  rerender: { base: 0.0, weight: 1.0, label: 'Re-rendering clip' }
 }
 
 export const emptyProgress: JobProgress = {
@@ -35,7 +42,9 @@ export const emptyProgress: JobProgress = {
   label: '',
   fraction: 0,
   startedAt: 0,
-  videoId: ''
+  videoId: '',
+  ceil: 0,
+  eventAt: 0
 }
 
 /** Survives page switches: whichever page is mounted keeps it updated. */
@@ -70,7 +79,7 @@ export function applyEvent(p: JobProgress, e: StudioEvent): JobProgress {
   const label =
     e.stage === 'render' && e.clip && e.total
       ? `Rendering clip ${e.clip}/${e.total}`
-      : (e.stage === 'compile' || e.stage === 'variants') && e.message
+      : (e.stage === 'compile' || e.stage === 'variants' || e.stage === 'rerender') && e.message
         ? String(e.message)
         : stage.label
 
@@ -80,16 +89,33 @@ export function applyEvent(p: JobProgress, e: StudioEvent): JobProgress {
     label,
     fraction: Math.max(fraction, p.fraction), // progress never moves backwards
     startedAt,
-    videoId
+    videoId,
+    ceil:
+      typeof e.ceil === 'number'
+        ? Math.min(0.99, stage.base + stage.weight * Math.min(1, Math.max(0, e.ceil)))
+        : 0,
+    eventAt: Date.now()
   }
+}
+
+/** The fraction to SHOW. The server reports where a step starts and where it
+ *  ends, but a step can take a minute with nothing in between, so between
+ *  events this creeps toward (never reaching) the end of the step: slowly at
+ *  first, then flattening, so an honest report always lands ahead of it. */
+export function displayFraction(p: JobProgress, now: number): number {
+  if (!p.active || p.ceil <= p.fraction) return p.fraction
+  const waited = Math.max(0, now - p.eventAt) / 1000
+  const room = (p.ceil - p.fraction) * 0.9
+  return p.fraction + room * (1 - Math.exp(-waited / 10))
 }
 
 /** Remaining seconds, extrapolated from elapsed time vs fraction complete.
  *  Recomputed against a live clock, so it counts down between events. */
 export function etaSeconds(p: JobProgress, now: number): number | null {
-  if (!p.active || p.fraction < 0.06) return null // too early to estimate honestly
+  const f = displayFraction(p, now)
+  if (!p.active || f < 0.06) return null // too early to estimate honestly
   const elapsed = (now - p.startedAt) / 1000
-  return Math.max(0, (elapsed * (1 - p.fraction)) / p.fraction)
+  return Math.max(0, (elapsed * (1 - f)) / f)
 }
 
 export function formatEta(seconds: number): string {

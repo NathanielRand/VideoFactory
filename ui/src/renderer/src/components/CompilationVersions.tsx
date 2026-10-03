@@ -2,8 +2,11 @@
 // play any of them, see what differs from the current settings, put a
 // version's settings back, or delete it. How many are kept is a setting here
 // too; older ones are deleted after each render.
+import { thumbsApi } from '../lib/thumbnails'
+import { useThumbStatus } from './PublishThumb'
 import { useCallback, useEffect, useState } from 'react'
 import { t } from '../lib/i18n'
+import VideoPlayer from './VideoPlayer'
 import {
   compilationsApi,
   type Compilation,
@@ -85,6 +88,8 @@ export default function CompilationVersions({
   const formats = current ? Object.keys(current.outputs) : []
   const shown = formats.includes(canvas) ? canvas : (formats[0] ?? '')
   const busy = comp.status === 'queued' || comp.status === 'rendering'
+  // The compilation's thumbnail stands in for the frame before play.
+  const hasThumb = useThumbStatus([-comp.id])[-comp.id] === true
 
   if (versions.length === 0) return null
 
@@ -174,10 +179,11 @@ export default function CompilationVersions({
           {current.missing.includes(shown) ? (
             <div className="text-sm text-red-300">{t('This file is no longer on disk.')}</div>
           ) : (
-            <video
+            <VideoPlayer
               key={`${current.id}-${shown}`}
-              className="max-h-[420px] mx-auto rounded bg-black"
-              controls
+              className="mx-auto max-w-full"
+              label="Compilation render preview"
+              poster={hasThumb ? thumbsApi.imageUrl(-comp.id) : undefined}
               src={compilationsApi.renderMediaUrl(comp.id, current.id, shown)}
             />
           )}

@@ -9,7 +9,7 @@ import os
 import re
 from pathlib import Path
 
-from core import cancel, progress
+from core import cancel, governor, progress
 from core.binaries import whisper_model
 from core.models import Segment
 
@@ -117,7 +117,12 @@ def transcribe(
         return segments
 
     print(f"  Loading whisper model '{model_size}' (device={device})...")
-    model = _load_model(model_size, device)
+    # Whisper on the GPU loads the CUDA libraries too (cuBLAS, cuDNN):
+    # waited for and retried the same way as torch (core/governor.py).
+    model = governor.load_heavy(
+        f"Whisper ({model_size})", 2.5, lambda: _load_model(model_size, device),
+        cancel.check_active,
+    )
 
     raw_segments, info = model.transcribe(
         str(video_path),
@@ -146,6 +151,10 @@ def transcribe(
         # "cancelling" while it kept working. Whisper hands back a segment at
         # a time, which makes this the finest-grained place to stop.
         cancel.check_active()
+        # The same place is where a long transcription can pause while the
+        # machine is short of memory, and pick up at the next segment after.
+        if governor.pipeline_thread():
+            governor.checkpoint(cancel.check_active)
         words = [
             {"start": round(w.start, 2), "end": round(w.end, 2), "word": w.word.strip()}
             for w in (seg.words or [])
