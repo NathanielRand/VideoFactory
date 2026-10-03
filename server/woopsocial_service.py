@@ -29,7 +29,7 @@ DEFAULT_PROJECT_NAME = "Video Factory"
 # link users actually see has to live here, in the code that ships. Setting
 # it turns on the affiliate CTA and, with it, the disclosure that has to sit
 # beside it — the two are never shown apart.
-# Video Factory: upstream's referral link removed. Empty = no affiliate CTA.
+# No referral link. Empty = no affiliate CTA.
 AFFILIATE_URL = ""
 
 DEFAULTS = {

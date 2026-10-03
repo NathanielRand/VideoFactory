@@ -40,9 +40,8 @@ type Page =
   | 'models'
   | 'settings'
 
-// Video Factory is a fork of Clips Kitty (AGPL-3.0). Until this fork has a
-// public repo of its own, the source offer points at the upstream it is based on.
-const UPSTREAM_URL = 'https://github.com/ColinGPT9/clips-studio'
+// The AGPL-3.0 source offer points at this project's repository.
+const SOURCE_URL = 'https://github.com/NathanielRand/VideoFactory'
 
 interface NavItem {
   page: Page
@@ -460,10 +459,10 @@ export default function App(): JSX.Element {
         {collapsed ? (
           // The AGPL source offer stays reachable when collapsed, as a link.
           <a
-            href={UPSTREAM_URL}
+            href={SOURCE_URL}
             target="_blank"
             rel="noreferrer"
-            title={`${t('Open source')} — ${t('based on Clips Kitty')} · AGPL-3.0`}
+            title={`${t('Open source')} · AGPL-3.0`}
             aria-label={t('Open source')}
             className="py-4 border-t border-raised/60 text-center text-xs text-muted hover:text-accent transition-colors"
           >
@@ -472,13 +471,13 @@ export default function App(): JSX.Element {
         ) : (
           <div className="px-5 py-4 border-t border-raised/60">
             <a
-              href={UPSTREAM_URL}
+              href={SOURCE_URL}
               target="_blank"
               rel="noreferrer"
               className="text-xs text-muted hover:text-accent transition-colors"
             >
               <span className="font-semibold">{t('Open source')}</span> —{' '}
-              {t('based on Clips Kitty')} ↗
+              Video Factory ↗
             </a>
             {/* The AGPL expects anyone running the program to be able to find
                 its source. The link above is that offer, so it names the

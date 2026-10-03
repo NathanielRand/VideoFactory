@@ -159,12 +159,6 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
     data_dir = Path(config["paths"]["data_dir"])
     started = time.monotonic()
 
-    # Per-job, not per-process: the server is long-lived, so without this the
-    # end-card tally would report every job it had ever run.
-    from video import outro as _outro
-
-    _outro.reset_tally()
-
     print(f"[1/4] Downloading: {url}")
     progress.emit(stage="download", message=url)
     video = _cached_or_download(url, data_dir, db)
@@ -542,10 +536,6 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
     progress.emit(
         stage="done", video_id=video.video_id, clips=len(rendered), seconds=round(elapsed, 1)
     )
-    from video import outro as _outro
-
-    if (_line := _outro.summary()):
-        print(f"      {_line}")
     print(f"      Done in {elapsed / 60:.1f} min ({len(rendered)} clips)")
     return rendered
 
@@ -727,20 +717,7 @@ def _render_files(
     final_path = clip_dir / f"{stem}.mp4"
     clip_dir.mkdir(parents=True, exist_ok=True)
 
-    # The end card is part of PRODUCING the clip, not something applied to it
-    # afterwards -- the same way CapCut exports its outro. So when it is on,
-    # everything below renders to a scratch file and the final clip is written
-    # once, by the concat in outro.finish(), already containing the card.
-    #
-    # This is not a style preference. A clip open in the app's preview holds a
-    # Windows handle that forbids DELETING the file but permits WRITING it, so
-    # every version that replaced a finished clip lost its card to whichever
-    # clips you happened to be looking at -- one run managed 37 of 49 and spent
-    # twelve minutes stalling on locks it could never win.
-    from video import outro as _outro
-
-    wants_card = _outro.enabled(config)
-    render_path = clip_dir / f"{stem}.pre-card.mp4" if wants_card else final_path
+    render_path = final_path
 
     # Longform rendering profile (render_opts["profile"], set only by the
     # longform module): 16:9 1920x1080 output, no vertical crop/tracking.
@@ -970,14 +947,6 @@ def _render_files(
         except Exception as e:
             print(f"      (credit skipped: {str(e)[:200]})")
 
-    # Writes final_path complete, with the card. Never raises and never loses
-    # the clip: if the card cannot be made it still writes final_path without
-    # one, because every step here WRITES the destination rather than
-    # replacing it, which is what a held file permits.
-    if wants_card:
-        progress.step("Adding the end card", 0.97, 0.99)
-        _outro.finish(render_path, final_path, config)
-
     render_opts_json = json.dumps(
         {
             **opts,
@@ -1037,13 +1006,6 @@ def _register_clip(
 ) -> RenderedClip | None:
     """DB write for one rendered clip. Main thread only (sqlite connections
     are not shareable across threads).
-
-    The branded end card is appended HERE rather than in _render_files,
-    because this is the one place every finished video passes through. The
-    longform Highlights and Edited Stream modes build their output with
-    longform.assemble and never call _render_files at all, so hooking the
-    renderer silently left two of the four longform profiles with no end card.
-    Hooking the funnel means a mode added later cannot miss it either.
     """
     # The source channel goes into what is stored, so the title, description,
     # hashtags and keywords in the editor already carry it (idempotent).

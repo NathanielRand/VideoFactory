@@ -1,7 +1,7 @@
 {
   "name": "video-factory",
   "version": "1.2.0",
-  "description": "Video Factory: source-to-post video pipeline (desktop app). Based on Clips Kitty.",
+  "description": "Video Factory: source-to-post video pipeline (desktop app).",
   "author": "Video Factory contributors",
   "license": "AGPL-3.0-only",
   "main": "./out/main/index.js",

@@ -72,8 +72,8 @@ video can use up.
   (below). They identify the app, not you.
 
 Each provider handles what it receives under its own privacy policy, which can
-differ between free and paid plans. The full list of everything the app sends
-anywhere is in the [privacy policy](https://colingpt9.github.io/video-factory/privacy.html).
+differ between free and paid plans. What the app sends anywhere is described in
+[SECURITY.md](../SECURITY.md).
 
 ### Your key
 
@@ -89,7 +89,7 @@ an MCP client can read.
 Every request made to OpenRouter carries three headers:
 
 ```
-HTTP-Referer: https://colingpt9.github.io/video-factory/
+HTTP-Referer: https://github.com/NathanielRand/VideoFactory
 X-OpenRouter-Title: Video Factory
 X-OpenRouter-Categories: video-gen
 ```

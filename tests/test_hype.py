@@ -24,8 +24,8 @@ def test_organic_retention_spike_becomes_clip_scale_hot_zone():
     peak_second = round(0.92 * duration)
     assert float(curve[peak_second]) > 0.95
 
-    # The point-like Analytics peak is widened only enough to survive Clips
-    # Kitty's clip-window mean. It remains a local hot zone, not a video-wide
+    # The point-like Analytics peak is widened only enough to survive the
+    # clip-window mean. It remains a local hot zone, not a video-wide
     # lift.
     local_mean = float(curve[peak_second - 12 : peak_second + 13].mean())
     assert local_mean > 0.85

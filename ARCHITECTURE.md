@@ -1,7 +1,6 @@
-# Architecture: the Clips Kitty engine
+# Architecture: the engine
 
-> Upstream's architecture document, kept as the engine deep-dive (with names updated).
-> Video Factory's own map and extension points are in [docs/architecture.md](docs/architecture.md).
+> The engine deep-dive. The map of the codebase and its extension points is in [docs/architecture.md](docs/architecture.md).
 
 Video Factory is a local-first AI clipping engine with a desktop front end. It ingests a
 long video, finds the moments worth posting using a local LLM plus multimodal signal

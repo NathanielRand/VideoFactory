@@ -22,7 +22,7 @@ from llm.spec import is_local, parse_spec
 
 KEY = "sk-or-v1-" + "a1b2c3d4" * 8
 ATTRIBUTION = {
-    "HTTP-Referer": "https://colingpt9.github.io/video-factory/",
+    "HTTP-Referer": "https://github.com/NathanielRand/VideoFactory",
     "X-OpenRouter-Title": "Video Factory",
     "X-OpenRouter-Categories": "video-gen",
 }

@@ -521,7 +521,7 @@ def submit_to_relay(relay_url: str, kind: str, title: str, markdown: str,
     # The relay requires this header: cross-origin browser requests carrying
     # a custom header trigger a CORS preflight the relay never answers, so
     # web pages can't be used to spam it — only real clients can.
-    headers = {"X-Clips-Studio": "1"}
+    headers = {"X-Video-Factory": "1"}
     challenge = requests.get(f"{base}/challenge", timeout=15, headers=headers).json()
     pow_solution = _solve_pow(challenge)
     resp = requests.post(

@@ -8,7 +8,7 @@
 # Built by scripts/build_installer.py, which freezes the backend first and
 # leaves it in build/dist/backend/ for the extraResources rule below.
 
-# Video Factory: appId and package.json "name" were renamed at the fork, when
+# Video Factory: appId and package.json "name" were renamed once, when
 # nobody had an installed copy. From here on they are frozen, for these reasons:
 #
 #   * package.json "name" (video-factory) is what Electron derives userData
@@ -22,7 +22,7 @@
 #
 appId: com.videofactory.app
 productName: Video Factory
-copyright: Copyright © 2026 Video Factory contributors. Based on Clips Kitty, © 2026 ColinGPT9 (AGPL-3.0)
+copyright: Copyright © 2026 Nathaniel Rand. Portions © 2026 ColinGPT9 (AGPL-3.0)
 
 directories:
   output: ../release
@@ -161,8 +161,7 @@ compression: maximum
 # `generic` rather than a Hugging Face provider because electron-builder has
 # no HF provider; a plain HTTPS base URL is all the updater needs, and
 # huggingface.co/<repo>/resolve/main/<file> is exactly that.
-# Video Factory: no update feed yet. The upstream feed above would install
-# Clips Kitty releases over this fork, so it is removed. Without a feed the
+# No update feed yet. Without a feed the
 # packaged app's launch check fails quietly (see ui/src/main/updater.ts).
 # Add our own feed here before shipping a build to anyone.
 publish: null

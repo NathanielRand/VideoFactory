@@ -272,8 +272,8 @@ export default function UploadPostCard(): JSX.Element {
 
       {status.enabled && (
         <>
-          {/* Honest about what leaves the machine. Everything else in Clips
-              Kitty runs locally; this one step does not, and saying so here
+          {/* Honest about what leaves the machine. Everything else in Video
+              Factory runs locally; this one step does not, and saying so here
               is better than someone discovering it afterwards. */}
           <p className="text-[11px] text-muted border-l-2 border-raised pl-2">
             {t(

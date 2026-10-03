@@ -34,8 +34,7 @@ MAX_LINE = 26                 # characters per line of burned text
 MAX_LINES = 2
 
 # Bold faces worth trying, in order, ending with whatever Pillow can always
-# give us. Unlike video/outro.py this must never raise: the end card carries
-# the product's name and has to be in the right face, a thumbnail does not.
+# give us. This must never raise: a missing font should not cost the thumbnail.
 FONT_CANDIDATES = (
     r"C:\Windows\Fonts\segoeuib.ttf",
     r"C:\Windows\Fonts\arialbd.ttf",
@@ -49,7 +48,7 @@ def candidate_times(duration: float, count: int = 6) -> list[float]:
     """Where to look for a good frame.
 
     The first and last tenth are skipped: a clip starts on a sentence boundary,
-    which is often mid-turn, and ends on the end card, which is not a
+    which is often mid-turn, and ends on a closing beat, which is not a
     thumbnail of anybody's video.
     """
     if duration <= 0 or count <= 0:
@@ -384,7 +383,7 @@ def pick_frames(video: Path, count: int = 6, start: float = 0.0, duration: float
         length = duration if duration else max(0.0, total - start)
         if length <= 0:
             return []
-        lo, hi = length * 0.1, length * 0.9      # clips open mid-turn and end on the end card
+        lo, hi = length * 0.1, length * 0.9      # clips open mid-turn and end on a closing beat
         if hi <= lo:
             lo, hi = 0.0, length
         step = max(SAMPLE_STEP, (hi - lo) / MAX_SAMPLES)

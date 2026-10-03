@@ -1,11 +1,9 @@
 # Video Factory — Architecture map (Phase 1)
 
-This is our fork's map of the Clips Kitty codebase, written against [plan.md](plan.md).
-Upstream's own deep-dive lives in [`/ARCHITECTURE.md`](../ARCHITECTURE.md). Read it before
+This is a map of the codebase, written against [plan.md](plan.md).
+The engine deep-dive lives in [`/ARCHITECTURE.md`](../ARCHITECTURE.md). Read it before
 changing the tracker, ASD, queue or scoring: it records several measured performance
 traps.
-
-Upstream base: `ColinGPT9/clips-studio` @ `4bb531d` (v1.2.0), remote `upstream`.
 
 ## Shape of the system
 
@@ -37,7 +35,7 @@ Electron + React (ui/)  ──HTTP/WS 127.0.0.1:8765──►  FastAPI (server/a
 | **Compose: compilation** | `longform/assemble.py` (keep-ranges → concat demuxer → 1920×1080), `longform/highlight_select.py` | ⚠️ Closest analogue, but **one source only**, 16:9 only, and **no transitions** (a lossless concat join). |
 | **Edit model** | `video_editor/timeline.py::EditList` (keep, mutes, volume, fades, speed, hook, music), applied by `video_editor/export.py` in one FFmpeg pass | ✅ A good per-segment model. Extend it rather than replace it. |
 | **Branding** | `video_editor/watermark.py` (text via ASS, image via overlay, "moving" anti-crop mode), `branding_profiles` table, per-creator default branding | ✅ Reuse for our banner/logo. |
-| **Outro** | `video/outro.py`: **Clips Kitty's own animated end card, ON by default**, appended with a lossless concat | ⚠️ Replace with a user-supplied outro (and an intro), keeping the same "format-matched, lossless append" trick. |
+| **Intro/outro** | Compilations append user-supplied intro and outro files (`compilation/render.py`), format-matched so the join is lossless | ✅ Done in Phase 2. |
 | **Effects** | `video/filters.py` (colour presets), blur-fill background in `cropper._render_fit_blur` and the letterbox path | ⚠️ No general blur-region, zoom or transition effects yet. |
 | **Render formats** | `video/cropper.py` is **hard-coded 1080×1920**. `longform/` is hard-coded 1920×1080. `video/encoding.py` picks NVENC/AMF/QSV/CPU | ❌ No 1:1 or 4:5, and no "one project → many profiles". |
 | **Review UI** | `ui/.../components/ClipEditor.tsx`, `TimelineEditor.tsx`, `EditChat.tsx`, `EditorModal.tsx` | ✅ Per-clip editor exists. ❌ No multi-segment compilation timeline. |
@@ -63,13 +61,12 @@ Original design notes:
   - `assemble.py`: cut each segment to identical encode params, as
     `longform/assemble.py` does. Transitions are then applied **only at the joins**:
     re-encode a short tail+head window with `xfade`/`acrossfade`, and keep the lossless
-    concat for everything else. This keeps upstream's "no giant filter graph" rule.
+    concat for everything else. This keeps the "no giant filter graph" rule.
   - `credits.py`: per-segment credit lower-third as an ASS event (the same mechanism as
     watermark text), filled from `videos.channel_name` plus new ingest metadata.
 - **Ingest additions:** store `channel_url`, `source_url` and a `rights` field on
   `videos` (additive columns). Set from `VideoInfo` in `sources/*`.
-- **Intro/outro:** generalize `video/outro.py`'s append-with-matched-format into
-  "user bumper clips". Default Clips Kitty's own card to **off** in our fork.
+- **Intro/outro:** user bumper clips, appended format-matched (done: see `compilation/render.py`).
 - **Effects:** add `blur_regions` and `zoom` to `EditList`, applied in
   `video_editor/export.py`.
 - **API:** `POST/GET/PATCH /compilations`, `POST /compilations/{id}/render`, as a job type
@@ -79,7 +76,7 @@ Original design notes:
 ### Phase 3: multi-format render (built)
 As built: `formats/profiles.py` is the one canvas table (compilations import it too).
 `video/cropper.render_vertical(..., size=)` renders any canvas. 9:16 output stays byte-identical to
-upstream, and the split (webcam over gameplay) layout falls back to blur-fill in other shapes.
+the single-canvas render, and the split (webcam over gameplay) layout falls back to blur-fill in other shapes.
 `core/pipeline._render_files` reads `render_opts["canvas"]`, tags the file (`clip_...4x5.mp4`) and takes
 a shared `tracking_cache`. `formats/variants.py` renders the first extra shape alone (which fills the
 cache), then the rest in a thread pool. Routes: `server/formats_api.py`; `variants` job type. UI:
@@ -102,25 +99,15 @@ Original design notes:
   `YouTubeMetadataForm.tsx`). Unify it into one "post everywhere" form per rendered
   version.
 
-## Fork housekeeping (done: rebranded to Video Factory)
-- **Names:** "Clips Kitty" and "Clips Studio" are "Video Factory" everywhere a person reads them
-  (UI, 19 locales, backend messages, docs). Env vars are `VIDEO_FACTORY_*`, and the installed data
-  folder is `%LOCALAPPDATA%\Video Factory`. `appId` `com.videofactory.app` and package
-  name `video-factory` are now **frozen**: renaming them later would orphan users' settings.
+## Branding and identity
+- **Names:** env vars are `VIDEO_FACTORY_*`, and the installed data folder is
+  `%LOCALAPPDATA%\Video Factory`. `appId` `com.videofactory.app` and package
+  name `video-factory` are **frozen**: renaming them later would orphan users' settings.
 - **Logo:** `scripts/make_logo.py` draws the logo and writes the UI logo, `ui/build/icon.ico`
-  (installer, taskbar and tray) and the appx tiles. `scripts/make_mascot.py` no longer
-  touches the icon.
-- **Removed upstream infrastructure:** `site/`, `whop-app/`, `web/`, `feedback-relay/`,
-  `twitch-proxy/`, `packaging/winget`, Microsoft Store docs and art, stats, mirror, Pages and MSIX
-  workflows, CODEOWNERS, PayPal donate window, WoopSocial affiliate link, and the auto-update feed
-  (`publish: null`). All of it can be restored from `upstream` if ever needed.
-- **Still upstream-branded (on purpose, disabled):** `video/outro.py` + `video/mascot_art.py` +
-  `assets/outro/*.mp4`, the Clippy end card. It is off by default, and two of its artwork tests
-  are skipped. Phase 2 replaces it with user intro/outro bumpers and can then delete it.
-- **Legal:** `LICENSE` is unchanged. `NOTICE` has a fork header above upstream's notice, which is
-  otherwise unchanged. The app footer shows "based on Clips Kitty" and links to the upstream source.
-- **Upstream merges:** the rename touched about 140 files, so `git merge upstream/main` will
-  conflict. Cherry-pick specific upstream fixes instead.
+  (installer, taskbar and tray) and the appx tiles.
+- **Legal:** `LICENSE` is AGPL-3.0-or-later. `NOTICE` carries the copyright notices the
+  licence requires, including those for the code this project was started from. The app
+  footer links to this project's source.
 
 ## Local dev environment
 - Python **3.11** venv at `.venv` (matches CI). Your default `python` is 3.14, which is
@@ -137,10 +124,10 @@ Original design notes:
 - **The queue starts paused by design.** Press Start in the UI or `POST /queue/resume`.
 - URLs go to `POST /jobs {"url"}`. Local files go to `POST /videos/local {"path","title","channel"}`, and
   `channel` there is what our credit captions will read.
-- Tests: `.venv/Scripts/python -m pytest -m "not slow"` (940 pass). Two upstream scan tests needed
-  `.venv` added to their skip lists, and the outro tests now force the card on inside their fixture.
+- Tests: `.venv/Scripts/python -m pytest -m "not slow"` (940 pass). Two scan tests needed
+  `.venv` added to their skip lists.
 - UI: `cd ui && pnpm install && pnpm run dev`. This launches Electron and spawns the backend. We patched
-  `ui/src/main/index.ts` so dev mode uses `.venv/Scripts/python.exe` when it exists (upstream calls the bare PATH
+  `ui/src/main/index.ts` so dev mode uses `.venv/Scripts/python.exe` when it exists (it would otherwise call the bare PATH
   `python`, which here is 3.14 with no dependencies). Stop any standalone `main.py serve` first, because both use port 8765.
 - The Electron dev renderer is pinned to **port 5273** (`strictPort`), which is in the engine's CORS list.
   Vite's default 5173 clashed with another local project, and the silent fallback to 5174 broke every API call.

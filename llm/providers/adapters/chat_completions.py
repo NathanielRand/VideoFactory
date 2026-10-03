@@ -17,7 +17,7 @@ def _formats(json_mode: bool, schema: dict | None) -> list[dict | None]:
     formats: list[dict | None] = []
     if schema:
         formats.append({"type": "json_schema",
-                        "json_schema": {"name": "clips_kitty", "strict": True, "schema": schema}})
+                        "json_schema": {"name": "video_factory", "strict": True, "schema": schema}})
     if json_mode or schema:
         formats.append({"type": "json_object"})
     formats.append(None)

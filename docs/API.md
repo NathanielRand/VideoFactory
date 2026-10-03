@@ -285,7 +285,7 @@ its video was identified.
 Add `webhook_secret` and the body is signed:
 
 ```
-X-Clips-Kitty-Signature: sha256=<hmac-sha256 of the exact body bytes>
+X-Video-Factory-Signature: sha256=<hmac-sha256 of the exact body bytes>
 ```
 
 Verify against the **raw bytes you received**, not a re-serialised copy of them:

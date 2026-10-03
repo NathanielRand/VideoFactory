@@ -182,8 +182,8 @@ Tick **Use the thumbnail chosen for this clip** to send the thumbnail you
 picked in the editor.
 
 Only **YouTube, LinkedIn and Facebook (video posts)** accept a custom
-thumbnail through Upload-Post. The others use a frame from the video. Clips
-Kitty says so under each platform rather than letting the option appear to
+thumbnail through Upload-Post. The others use a frame from the video. The app
+says so under each platform rather than letting the option appear to
 work and do nothing.
 
 ## First comments

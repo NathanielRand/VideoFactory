@@ -1,5 +1,6 @@
-> **Video Factory note:** this is upstream's release process (their Hugging Face repo and
-> GitHub releases). It needs our own update feed and hosting before we ship anything.
+> **Note:** the hosting below (a Hugging Face repo for payloads, GitHub releases for
+> notes) is the intended setup. Create the Hugging Face repo and point the `publish`
+> block of `ui/electron-builder.yml` at it before shipping anything.
 
 # Releasing Video Factory
 
@@ -68,9 +69,8 @@ weights roughly doubles it. Uploading it to a release does not work, and no
 amount of retrying changes that.
 
 So the big files live in a Hugging Face repository, which has no such cap,
-costs nothing and serves from a CDN. This project already pushes to Hugging
-Face for the website (see [MIRRORS.md](MIRRORS.md)); this is a second repo,
-`ColinGPT9/clips-studio-releases`, for release payloads.
+costs nothing and serves from a CDN. A repo of its own,
+`NathanielRand/video-factory-releases`, holds the release payloads.
 
 | Where | What |
 |---|---|
@@ -91,7 +91,7 @@ Files that big need Git LFS on the Hugging Face side, or the `hf` CLI, which
 handles the chunking itself:
 
 ```
-hf upload ColinGPT9/clips-studio-releases release/nsis-web/ . --repo-type=model
+hf upload NathanielRand/video-factory-releases release/nsis-web/ . --repo-type=model
 ```
 
 **`huggingface-cli` no longer works.** It was deprecated and now exits with

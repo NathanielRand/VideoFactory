@@ -6,9 +6,8 @@ timing, corner, font, colours, and an optional banner image ("plate") the text
 sits on. `{channel}` is filled from the source video, so one profile credits
 whichever creator the clip came from.
 
-It runs as one extra pass on the finished clip, after the watermark and before
-the end card, and only when a credit is enabled and the video has a name to
-credit. The plate is overlaid first and the text burned on top of it, which is
+It runs as one extra pass on the finished clip, after the watermark, and only when a credit is enabled and the video has a name
+to credit. The plate is overlaid first and the text burned on top of it, which is
 why this is its own pass and not a line in the clip's shared caption file: that
 file is burned BEFORE any image overlay, so a plate would cover the text.
 

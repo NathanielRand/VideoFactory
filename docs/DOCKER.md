@@ -17,8 +17,7 @@ time.
 amd64 and runs under emulation, which is fine for editing code and running
 tests. A local build produces an arm64 image, and one dependency has no arm64
 wheel and has to compile, which fails because the base image ships no C
-compiler. [#62](https://github.com/ColinGPT9/clips-studio/issues/62) tracks
-that. Do not reach for `--platform=linux/amd64` on a local build either. That
+compiler. Do not reach for `--platform=linux/amd64` on a local build either. That
 emulates the whole ten-minute build, not just the run.
 
 **Give the Docker Desktop VM 12 GB of memory, and 4 CPUs.** Docker Desktop,

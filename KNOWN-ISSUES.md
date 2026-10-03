@@ -6,7 +6,7 @@ been fixed is still listed as broken.
 
 Hit something that is not here? The **💬 button on the Dashboard** files a
 report without needing a GitHub account, or open an
-[issue](https://github.com/ColinGPT9/clips-studio/issues).
+[issue](https://github.com/NathanielRand/VideoFactory/issues).
 
 ---
 
@@ -120,8 +120,7 @@ where downloads from that one site fail even though the fix already exists.
 Other sites keep working, which is the tell: **if Twitch works and Kick does
 not, it is this, not your setup.**
 
-Being worked on in
-[#39](https://github.com/ColinGPT9/clips-studio/issues/39). If you hit it,
+If you hit it,
 report it with the site and the error. It helps establish how often this
 actually bites.
 
@@ -162,7 +161,7 @@ Leave it running. A **Restart & install** button appears when it finishes.
 
 If an update fails, the banner vanishes rather than saying so, and no log is
 kept. If an update seems to go nowhere, download the installer from the
-[releases page](https://github.com/ColinGPT9/clips-studio/releases) instead,
+[releases page](https://github.com/NathanielRand/VideoFactory/releases) instead,
 installing over the top works fine and keeps your settings and models.
 
 ## Low-memory machines may fail to render

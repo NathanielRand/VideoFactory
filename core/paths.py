@@ -39,8 +39,8 @@ def resolve_data_dir(config: dict) -> Path:
         #
         # This is where every user's library, settings, creator profiles and
         # clips live. Renaming it later makes an upgrade look like a factory
-        # reset, so treat the name as frozen. (Upstream's data folder is
-        # "Clips Studio"; the fork started fresh as "Video Factory".)
+        # reset, so treat the name as frozen. (The folder is
+        # "Video Factory".)
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         return base / "Video Factory" / raw
 

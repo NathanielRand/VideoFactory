@@ -20,27 +20,13 @@ pull request. Saying "this word is wrong, here is the right one" is enough.
 
 ## The languages
 
-Each language has its own issue. Find yours here, or in
-[the issue list](https://github.com/ColinGPT9/clips-studio/issues?q=is%3Aissue+is%3Aopen+label%3Atranslation).
+Open [the issue list](https://github.com/NathanielRand/VideoFactory/issues?q=is%3Aissue+is%3Aopen+label%3Atranslation)
+to see which languages need work, or [ask for a new one](https://github.com/NathanielRand/VideoFactory/issues/new).
 
-| Complete, needs **checking** | Half-finished, needs **finishing** |
-|---|---|
-| [العربية (Arabic)](https://github.com/ColinGPT9/clips-studio/issues/52) | [বাংলা (Bengali)](https://github.com/ColinGPT9/clips-studio/issues/43) |
-| [Deutsch (German)](https://github.com/ColinGPT9/clips-studio/issues/53) | [Italiano (Italian)](https://github.com/ColinGPT9/clips-studio/issues/44) |
-| [Español (Spanish)](https://github.com/ColinGPT9/clips-studio/issues/54) | [한국어 (Korean)](https://github.com/ColinGPT9/clips-studio/issues/45) |
-| [Français (French)](https://github.com/ColinGPT9/clips-studio/issues/55) | [ไทย (Thai)](https://github.com/ColinGPT9/clips-studio/issues/46) |
-| [हिन्दी (Hindi)](https://github.com/ColinGPT9/clips-studio/issues/56) | [Tagalog (Filipino)](https://github.com/ColinGPT9/clips-studio/issues/47) |
-| [Bahasa Indonesia (Indonesian)](https://github.com/ColinGPT9/clips-studio/issues/57) | [Türkçe (Turkish)](https://github.com/ColinGPT9/clips-studio/issues/48) |
-| [日本語 (Japanese)](https://github.com/ColinGPT9/clips-studio/issues/58) | [اردو (Urdu)](https://github.com/ColinGPT9/clips-studio/issues/49) |
-| [Português (Portuguese)](https://github.com/ColinGPT9/clips-studio/issues/59) | [Tiếng Việt (Vietnamese)](https://github.com/ColinGPT9/clips-studio/issues/50) |
-| [Русский (Russian)](https://github.com/ColinGPT9/clips-studio/issues/60) | [中文 (Chinese)](https://github.com/ColinGPT9/clips-studio/issues/51) |
-
-The complete ones have every string translated and need **checking**. The
-half-finished ones have 57 strings of 116 and need **finishing**. The missing
-ones were added to English and never backfilled, so you will see English text
-in the app. That is a known gap, not something to report.
-
-Your language not listed? [Ask for it](https://github.com/ColinGPT9/clips-studio/issues/61).
+Some languages have every string translated and need **checking**. Others are
+half-finished and need **finishing**. Strings that were added to English and never
+backfilled show up as English text in the app. That is a known gap, not something
+to report.
 
 ## Where the words live
 
@@ -122,9 +108,8 @@ Two honest caveats:
   size and freely licensed, not because it has been measured. Qwen is worth
   trying for non-English content, since it is reputed to be strong
   multilingually. That is reputation, not a measurement, which is exactly the
-  gap worth closing. See
-  [#38](https://github.com/ColinGPT9/clips-studio/issues/38).
-- **AI dubbing works in an installed copy as of 1.1.3.** The speech engine
+  gap worth closing.
+- **AI dubbing works in an installed copy today.** The speech engine
   ships with the app. The voice for a language is downloaded the first time
   that language is dubbed (~60 MB), so the first run needs a connection.
   Languages with no Piper voice (Filipino, Thai, Korean) are subtitle-only,

@@ -14,7 +14,7 @@ the title "Video Factory Web", from the visitor's browser.
 
 from llm.providers.base import ModelInfo, ProviderSpec
 
-APP_URL = "https://colingpt9.github.io/video-factory/"
+APP_URL = "https://github.com/NathanielRand/VideoFactory"
 APP_TITLE = "Video Factory"
 APP_CATEGORY = "video-gen"
 

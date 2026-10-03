@@ -58,7 +58,7 @@ class JobIn(BaseModel):
     import_only: bool | None = None  # into the library without making clips
     add_to_compilation: int | None = None  # once in the library, append it whole to this compilation
     webhook_url: str | None = None  # POST once when this job reaches a terminal state
-    webhook_secret: str | None = None  # signs that POST (X-Clips-Kitty-Signature)
+    webhook_secret: str | None = None  # signs that POST (X-Video-Factory-Signature)
     hashtags: list[str] | None = None  # tags every clip of this job must carry
     then: dict | None = None  # what to do once this job finishes, e.g.
     #     {"action": "publish", "platforms": ["youtube"]}

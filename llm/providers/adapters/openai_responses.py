@@ -20,7 +20,7 @@ def generate(spec: ProviderSpec, key: str, model: str, prompt: str, *,
              json_mode: bool = False, schema: dict | None = None) -> str:
     formats: list[dict | None] = []
     if schema:
-        formats.append({"type": "json_schema", "name": "clips_kitty", "schema": schema, "strict": True})
+        formats.append({"type": "json_schema", "name": "video_factory", "schema": schema, "strict": True})
     if json_mode or schema:
         formats.append({"type": "json_object"})
     formats.append(None)

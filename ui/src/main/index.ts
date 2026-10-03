@@ -432,7 +432,7 @@ const EXTERNAL_ALLOWED = [
   /^https:\/\/(console|www)\.anthropic\.com\//,
   /^https:\/\/(console|docs)\.x\.ai\//,
   /^https:\/\/dev\.meta\.ai\//,
-  /^https:\/\/github\.com\/ColinGPT9\/clips-studio(\/|$)/,
+  /^https:\/\/github\.com\/NathanielRand\/VideoFactory(\/|$)/,
   // YouTube publishing: the setup wizard sends people to Cloud Console and
   // the audit form, and a published clip links to its own watch/Studio page.
   /^https:\/\/console\.cloud\.google\.com\//,

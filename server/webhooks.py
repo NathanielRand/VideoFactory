@@ -13,7 +13,7 @@ POSTs once, when that job reaches a terminal state:
 With `webhook_secret`, the body is signed so the listener can tell a real
 delivery from anything else that found the URL:
 
-    X-Clips-Kitty-Signature: sha256=<hmac-sha256 of the exact body bytes>
+    X-Video-Factory-Signature: sha256=<hmac-sha256 of the exact body bytes>
 
 Fire and forget, deliberately:
 
@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 import requests
 
 TIMEOUT = 10.0
-HEADER = "X-Clips-Kitty-Signature"
+HEADER = "X-Video-Factory-Signature"
 
 
 def is_deliverable(url: str) -> bool:
