@@ -115,7 +115,7 @@ def test_cutout_mask_keeps_the_subject_and_drops_extras():
     class Result:
         class masks:
             # One person filling a third of the frame, one tiny figure far away.
-            xy = [np.array([[10, 10], [100, 10], [100, 190], [10, 190]], dtype=np.float32),
+            xy = [np.array([[10, 10], [100, 10], [100, 190], [10, 190]], dtype=np.float32),  # noqa: RUF012 (test fake)
                   np.array([[150, 150], [153, 150], [153, 153]], dtype=np.float32)]
 
     cutout._model = lambda *a, **k: [Result()]

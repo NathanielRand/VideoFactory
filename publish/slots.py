@@ -45,7 +45,7 @@ class Policy:
     days: list[int] = field(default_factory=lambda: list(range(7)))  # Monday = 0
 
     @classmethod
-    def from_settings(cls, s: dict) -> "Policy":
+    def from_settings(cls, s: dict) -> Policy:
         times = [t for t in (s.get("fixed_times") or []) if _clock(t) is not None] or list(DEFAULT_TIMES)
         days = [d for d in (s.get("slot_days") or []) if isinstance(d, int) and 0 <= d <= 6] or list(range(7))
         return cls(

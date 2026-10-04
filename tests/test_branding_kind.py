@@ -7,7 +7,6 @@ the compilation keeps its look.
 """
 
 import json
-import sqlite3
 
 from core.state import StateDB
 

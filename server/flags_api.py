@@ -224,7 +224,6 @@ def install(app, *, config, db, data_dir: Path, worker=None) -> None:
             if not reasons:
                 raise HTTPException(409, "This clip has no open flags to act on.")
             plan = _plan(d, clip, reasons)
-            opts = json.loads(clip["render_opts"]) if clip["render_opts"] else {}
             if not plan["changes"]:
                 edited = plan["edited"]
                 raise HTTPException(

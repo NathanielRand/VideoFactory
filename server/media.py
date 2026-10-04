@@ -108,7 +108,6 @@ def _return_switching() -> None:
 
 from video.poster import make_poster, poster, poster_path  # noqa: E402,F401  (re-exported)
 
-
 # ---- draft previews ----------------------------------------------------------------
 
 

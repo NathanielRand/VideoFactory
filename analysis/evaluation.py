@@ -25,7 +25,7 @@ class. Pure and stdlib-only, so it tests on a CI runner.
 from __future__ import annotations
 
 import json
-from typing import Callable
+from collections.abc import Callable
 
 MIN_EACH = 8          # labelled clips of each class before the AUC means anything
 CHANNELS = ("text", "audio", "visual", "reaction", "engagement")

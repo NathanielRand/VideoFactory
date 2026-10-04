@@ -259,7 +259,7 @@ def duplicates(d, publish_ids: list[int]) -> dict[int, list[dict]]:
         vid, start, end = clip["video_id"] or "", clip["start_s"], clip["end_s"]
         seen: dict[tuple[str, str], dict] = {}
 
-        def add(platform, provider, state, at, url):
+        def add(platform, provider, state, at, url, seen=seen):  # bound per iteration
             seen.setdefault((_norm(provider), platform), {
                 "platform": platform, "provider": provider, "state": state, "at": at or "", "url": url or ""})
 

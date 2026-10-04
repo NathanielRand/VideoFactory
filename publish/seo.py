@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 
 from publish.metadata import TAGS_BUDGET, clamp_tags
 
+
 # Per platform: the whole caption's limit, how much shows before "more", how
 # many hashtags it rewards, and whether it has a title separate from the text.
 #

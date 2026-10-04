@@ -199,7 +199,6 @@ def test_a_second_preview_gets_the_first_ones_tracking(tmp_path, monkeypatch):
 
     def fake_render(source, candidate, segments, folder, config, opts, lang, tracking_cache=None):
         seen.append(tracking_cache)
-        first = "tracking" not in tracking_cache
         tracking_cache["tracking"] = {"mode": "track"}     # what a real render stores on a miss
         out = folder / "made.mp4"
         out.write_bytes(b"v")

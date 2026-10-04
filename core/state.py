@@ -10,6 +10,7 @@ import json
 import sqlite3
 from datetime import date, datetime
 from pathlib import Path
+from typing import ClassVar
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (
@@ -1393,7 +1394,7 @@ class StateDB:
     # ---- job queue (used by the API server's worker) --------------------
 
     # What each job type does to a clip, for the badge on its card.
-    _CLIP_JOB_KINDS = {"render": "render", "variants": "formats", "translate": "translate"}
+    _CLIP_JOB_KINDS: ClassVar[dict[str, str]] = {"render": "render", "variants": "formats", "translate": "translate"}
     FAILED_SHOWN_FOR = 24 * 3600   # seconds a failed job keeps a card flagged
 
     def clip_work(self, ids: list[int]) -> dict[int, dict]:

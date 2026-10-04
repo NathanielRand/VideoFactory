@@ -7,13 +7,11 @@ import json
 from pathlib import Path
 
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
-
-from server.media import video_response
 from pydantic import BaseModel
 
 from core import queue
 from formats import profiles, variants
+from server.media import video_response
 
 
 class VariantsIn(BaseModel):

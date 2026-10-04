@@ -140,7 +140,7 @@ def test_measure_route_reports_each_creator_and_the_spread(tmp_path, quiet_and_l
     d.close()
 
     class _W:
-        running: dict = {}
+        running: dict = {}  # noqa: RUF012 (test fake)
 
         def notify(self):
             pass

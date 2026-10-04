@@ -514,7 +514,7 @@ class PublishMetaIn(BaseModel):
     canvas: str = ""
 
 
-def install(app, *, config, db, data_dir: Path) -> "StatsPoller":
+def install(app, *, config, db, data_dir: Path) -> StatsPoller:
     data_path = Path(data_dir)
 
     @app.get("/publish/states")

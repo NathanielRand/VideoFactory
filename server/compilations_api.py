@@ -12,14 +12,13 @@ from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
-
-from server.media import video_response
 from pydantic import BaseModel
 
 from compilation import store
 from compilation.recipe import CANVASES, FITS, POSITIONS, TRANSITIONS, RecipeError
 from core import queue
 from core.paths import cached_source, discard
+from server.media import video_response
 
 
 class CompilationIn(BaseModel):

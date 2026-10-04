@@ -661,7 +661,6 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         list stops showing it. About 51 quota units."""
         import re
 
-        from publish.youtube_status import video_id_from
 
         if not re.fullmatch(r"[A-Za-z0-9_-]{6,32}", video_id):
             raise HTTPException(400, "That is not a YouTube video id.")
@@ -797,7 +796,6 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         what lets the clip be published again. About 50 quota units."""
         import re
 
-        from publish.youtube_status import video_id_from
 
         if not body.confirm:
             raise HTTPException(400, "Deleting a video cannot be undone: confirm it.")

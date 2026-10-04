@@ -38,10 +38,21 @@ jobs:
         # installing PyTorch. Import checking would need ~4 GB of wheels.
         run: python -m compileall -q analysis core creator llm longform multilingual publish server sources transcription video video_editor main.py
 
+      - name: Install FFmpeg and OpenCV's system library
+        # Tests that cut, probe and thumbnail real (tiny, synthetic) video.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg libgl1
+
       - name: Install what these checks need
         # NOT requirements.txt — that pulls ~4 GB of PyTorch wheels to run a
-        # syntax check. The tests are written to need nothing heavier.
-        run: pip install --quiet pyyaml ruff pytest requests httpx2
+        # syntax check. The tests need only these, at the versions the project
+        # pins: opencv-python must stay below 5, whose wheels ship no Haar
+        # cascade files (two tests fail on it, and so would the face-refinement
+        # fallback). Verified: the whole suite passes on a clean Linux
+        # container with exactly this set.
+        run: >
+          pip install --quiet pyyaml ruff pytest requests httpx2 psutil pillow numpy
+          "fastapi>=0.141.1,<1" "opencv-python>=4.14.0.94,<5"
+          "yt-dlp>=2026.8.19" "defusedxml>=0.7.1,<1"
 
       - name: Lint
         run: python -m ruff check .

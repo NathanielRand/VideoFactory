@@ -1,6 +1,4 @@
-import json
 
-import pytest
 
 from publish.metadata import playlist_url, source_credit_line, timestamped_url, with_links
 
@@ -63,7 +61,7 @@ def test_stored_metadata_carries_the_source_channel(db):
     from server import publishing_api
 
     _clip(db)
-    kw = dict(title="Wild clutch", description="A great moment.", hashtags=["#funny"], keywords=["clutch"])
+    kw = {"title": "Wild clutch", "description": "A great moment.", "hashtags": ["#funny"], "keywords": ["clutch"]}
     got = publishing_api.enrich_clip_metadata(db, "v1", 65, **kw)
     assert got["title"] == "Wild clutch | Some Streamer"
     assert "Source: Some Streamer - https://youtu.be/v1?t=65s" in got["description"]

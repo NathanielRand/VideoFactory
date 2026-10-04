@@ -252,7 +252,6 @@ def test_a_framing_complaint_steps_toward_a_framing_that_shows_more():
 def test_the_flag_reply_says_whether_recut_can_do_anything(tmp_path):
     pytest = __import__("pytest")
     pytest.importorskip("httpx")
-    import json
 
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

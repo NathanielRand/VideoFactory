@@ -5,11 +5,12 @@ Three things used to cut moments short: the start snap only moved inward
 they react to), and nothing let the model place edges once it had a shortlist.
 """
 
-from analysis.highlights import _fit_to_segments, refine_boundaries
+import numpy as np
+
 from analysis.fusion import _signal_peak_windows
+from analysis.highlights import _fit_to_segments, refine_boundaries
 from core.models import ClipCandidate, Segment
 from llm.base import LLMBackend
-import numpy as np
 
 MIN, MAX = 10.0, 60.0
 

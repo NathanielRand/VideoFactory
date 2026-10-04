@@ -231,7 +231,7 @@ def client(tmp_path: Path):
     (data_dir / "downloads").mkdir(parents=True)
 
     class _Worker:
-        running: dict = {}
+        running: dict = {}  # noqa: RUF012 (test fake)
 
         def notify(self):
             pass
@@ -292,7 +292,7 @@ def test_render_progress_is_reported_per_compilation(client):
     d.add_job("process", json.dumps({"url": "x"}), video_id="v0")
     d.add_job("compile", json.dumps({"compilation_id": 6}))
     # Renders go ahead of waiting videos, but not of each other.
-    queued = d.add_job("compile", json.dumps({"compilation_id": 7}))
+    d.add_job("compile", json.dumps({"compilation_id": 7}))
     running = d.add_job("compile", json.dumps({"compilation_id": 8}))
     d.conn.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (running,))
     d.conn.commit()

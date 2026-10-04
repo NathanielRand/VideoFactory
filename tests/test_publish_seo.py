@@ -312,7 +312,7 @@ def test_playlist_rules_and_auto_creation(tmp_path):
     d = StateDB(tmp_path / "s.db")
 
     class Pub:
-        made: list = []
+        made: list = []  # noqa: RUF012 (test fake)
 
         def credentials(self, scopes=None):
             return object()  # connected with the playlist permission

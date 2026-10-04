@@ -259,7 +259,6 @@ def clean_copy(raw, keywords=()) -> list[dict]:
 
 def install(app, *, config, db, data_dir: Path) -> None:
     folder = (Path(data_dir) / "thumbnails").resolve()
-    cache = folder / "cache"
 
     def _item(pid: int):
         d = db()

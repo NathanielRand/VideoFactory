@@ -14,13 +14,13 @@ def _rating(index, **kw):
 
 
 def test_rubric_score_weights_the_hook_and_payoff_most():
-    flat = {d: 5 for d in rubric.DIMENSIONS}
+    flat = dict.fromkeys(rubric.DIMENSIONS, 5)
     assert rubric.rubric_score(flat) == 50
     strong_open = {**flat, "hook": 10}
     strong_edges = {**flat, "clean_edges": 10}
     assert rubric.rubric_score(strong_open) > rubric.rubric_score(strong_edges)
-    assert rubric.rubric_score({d: 10 for d in rubric.DIMENSIONS}) == 100
-    assert rubric.rubric_score({d: 0 for d in rubric.DIMENSIONS}) == 0
+    assert rubric.rubric_score(dict.fromkeys(rubric.DIMENSIONS, 10)) == 100
+    assert rubric.rubric_score(dict.fromkeys(rubric.DIMENSIONS, 0)) == 0
 
 
 def test_parse_ratings_keeps_complete_entries_and_clamps():

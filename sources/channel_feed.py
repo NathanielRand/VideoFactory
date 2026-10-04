@@ -28,9 +28,9 @@ never do.
 
 import re
 from collections.abc import Callable
-from itertools import islice
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import islice
 
 PLATFORMS = ("youtube", "twitch", "kick")
 

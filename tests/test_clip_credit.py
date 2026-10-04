@@ -9,6 +9,7 @@ import pytest
 from core.binaries import ffmpeg
 from video_editor import credit
 
+
 def _have_ffmpeg() -> bool:
     try:
         return bool(ffmpeg())

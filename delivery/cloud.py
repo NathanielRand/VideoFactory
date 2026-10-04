@@ -175,7 +175,7 @@ def rclone_copy(
     proc = popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     tail: list[str] = []
     for line in proc.stderr:  # type: ignore[union-attr]
-        tail = (tail + [line.rstrip()])[-20:]
+        tail = [*tail, line.rstrip()][-20:]
         m = _PERCENT.search(line)
         if m and on_fraction:
             on_fraction(min(1.0, int(m.group(1)) / 100))

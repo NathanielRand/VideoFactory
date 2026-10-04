@@ -18,14 +18,11 @@ import urllib.error
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 import requests as _requests
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-import anyio
 from fastapi.responses import FileResponse
-
-from server.media import poster as make_poster_file
-from server.media import BoostPlayback, TrackingCache, video_response
 from pydantic import BaseModel
 
 from core import queue
@@ -34,6 +31,8 @@ from core.paths import cached_source, discard, picked_file, safe_name
 from core.state import StateDB
 from server.events import broadcaster
 from server.jobs import Worker
+from server.media import BoostPlayback, TrackingCache, video_response
+from server.media import poster as make_poster_file
 
 # Version of the supported API described in docs/API.md. Bumped only when a
 # supported endpoint changes shape, never for additions.
