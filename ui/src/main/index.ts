@@ -12,7 +12,7 @@ import {
 } from 'electron'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 import { setupUpdater } from './updater'
 
 const API_PORT = 8765
@@ -123,8 +123,23 @@ function bundledModelsDir(): string {
   // rather than in their user profile. This must match how data_dir resolves
   // in core/paths.py, or the engine and the runtime disagree about what is
   // downloaded.
-  const localAppData = process.env.LOCALAPPDATA ?? join(app.getPath('home'), 'AppData', 'Local')
-  return join(localAppData, 'Video Factory', 'data', 'models')
+  return join(userDataBase(), 'Video Factory', 'data', 'models')
+}
+
+/** The per-user data directory. Deliberately NOT app.getPath('appData'): on
+ *  Linux that is ~/.config, while the engine keeps its data under XDG_DATA_HOME.
+ *  Must match core/host.py user_data_base() exactly. */
+function userDataBase(): string {
+  const home = app.getPath('home')
+  if (process.platform === 'win32') return process.env.LOCALAPPDATA ?? join(home, 'AppData', 'Local')
+  if (process.platform === 'darwin') return join(home, 'Library', 'Application Support')
+  const xdg = process.env.XDG_DATA_HOME
+  return xdg && isAbsolute(xdg) ? xdg : join(home, '.local', 'share')
+}
+
+/** Executable name with the platform suffix. */
+function exeName(name: string): string {
+  return process.platform === 'win32' ? `${name}.exe` : name
 }
 
 function startOllama(): void {
@@ -132,7 +147,7 @@ function startOllama(): void {
 
   // PyInstaller puts bundled data under _internal/, which is where the spec
   // places the runtime — the same shape as _internal/ffmpeg.
-  const exe = join(process.resourcesPath, 'backend', '_internal', 'ollama', 'ollama.exe')
+  const exe = join(process.resourcesPath, 'backend', '_internal', 'ollama', exeName('ollama'))
 
   ollama = spawn(exe, ['serve'], {
     stdio: 'ignore',
@@ -145,7 +160,9 @@ function startOllama(): void {
       OLLAMA_MAX_LOADED_MODELS: '1',
       OLLAMA_NUM_PARALLEL: '1'
     },
-    windowsHide: true
+    windowsHide: true,
+    // Own process group on POSIX so killTree can signal the whole tree.
+    detached: process.platform !== 'win32'
   })
   ollama.on('error', (e) => console.error(`bundled Ollama could not start: ${e.message}`))
   ollama.on('exit', (code) => {
@@ -171,6 +188,15 @@ function killTree(child: ChildProcess | null): void {
     } catch {
       // Already exited, or taskkill is unavailable — fall through to a signal.
     }
+  } else {
+    // The child was spawned detached, so it leads its own process group and a
+    // negative pid signals the whole tree.
+    try {
+      process.kill(-child.pid, 'SIGTERM')
+      return
+    } catch {
+      // Already exited, or not a group leader — fall through to a plain signal.
+    }
   }
   child.kill()
 }
@@ -194,7 +220,10 @@ function startBackend(): void {
   const backendEnv: NodeJS.ProcessEnv = {
     ...process.env,
     PYTHONIOENCODING: 'utf-8',
-    PYTHONUTF8: '1'
+    PYTHONUTF8: '1',
+    // macOS/Linux have no Job Object: the backend watches this pid and ends
+    // its own children if the app dies without stopping it (core/lifetime.py).
+    VIDEO_FACTORY_PARENT_PID: String(process.pid)
   }
 
   // Packaged builds run their own Ollama on a private port, so the engine has
@@ -210,20 +239,24 @@ function startBackend(): void {
   // Dev: run the repo's Python directly (repo root is one level up from ui/).
   // Packaged: run the frozen backend exe shipped in resources/backend/.
   if (app.isPackaged) {
-    const exe = join(process.resourcesPath, 'backend', 'api.exe')
+    const exe = join(process.resourcesPath, 'backend', exeName('api'))
     // The backend is built as a console app so its prints have somewhere to
     // go (a windowed build gives it no stdout, and every print() then
     // throws). windowsHide keeps that console from flashing up at the user.
     backend = spawn(exe, ['serve', '--port', String(API_PORT)], {
       stdio: 'ignore',
       env: backendEnv,
-      windowsHide: true
+      windowsHide: true,
+      detached: process.platform !== 'win32'
     })
   } else if (process.env.BACKEND_EXTERNAL !== '1') {
     const repoRoot = join(app.getAppPath(), '..')
     // Prefer the repo's .venv: the PATH `python` may be a different version
     // with none of the engine's dependencies installed.
-    const venvPython = join(repoRoot, '.venv', 'Scripts', 'python.exe')
+    const venvPython =
+      process.platform === 'win32'
+        ? join(repoRoot, '.venv', 'Scripts', 'python.exe')
+        : join(repoRoot, '.venv', 'bin', 'python')
     const python = existsSync(venvPython) ? venvPython : 'python'
     backend = spawn(python, ['main.py', 'serve', '--port', String(API_PORT)], {
       cwd: repoRoot,

@@ -163,9 +163,24 @@ def _gpu() -> dict:
         parts = [p.strip() for p in smi.splitlines()[0].split(",")]
         if len(parts) >= 3:
             return {"name": parts[0], "vram": parts[1], "driver": parts[2]}
-    wmic = _run(["powershell", "-NoProfile", "-Command",
-                 "(Get-CimInstance Win32_VideoController).Name"])
-    return {"name": wmic.splitlines()[0] if wmic else "unknown", "vram": "?", "driver": "?"}
+    return {"name": _gpu_name_fallback(), "vram": "?", "driver": "?"}
+
+
+def _gpu_name_fallback() -> str:
+    """The GPU's name when nvidia-smi is not there: another vendor, or none."""
+    from core import host
+
+    if host.is_windows():
+        out = _run(["powershell", "-NoProfile", "-Command",
+                    "(Get-CimInstance Win32_VideoController).Name"])
+    elif host.is_mac():
+        # Apple Silicon reports the SoC ("Apple M2"); its GPU is part of it.
+        out = _run(["sysctl", "-n", "machdep.cpu.brand_string"])
+    else:
+        lines = _run(["lspci"]).splitlines()
+        out = next((ln.split(": ", 1)[-1] for ln in lines
+                    if any(k in ln for k in ("VGA", "3D controller", "Display controller"))), "")
+    return out.splitlines()[0] if out else "unknown"
 
 
 def _cuda() -> dict:
@@ -200,19 +215,9 @@ def _cuda() -> dict:
 
 def _ram_gb() -> float:
     try:
-        import ctypes
+        import psutil
 
-        class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-        st = MEMORYSTATUSEX()
-        st.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st))
-        return round(st.ullTotalPhys / (1024 ** 3), 1)
+        return round(psutil.virtual_memory().total / (1024 ** 3), 1)
     except Exception:
         return 0.0
 

@@ -15,6 +15,11 @@ chosen over the `keyring` package deliberately:
   does not have, so it would degrade to a plaintext backend anyway — i.e. we
   would pay a dependency to arrive back at the fallback below.
 
+macOS gets the login Keychain through the `keyring` package, which is a
+dependency there only (requirements.txt marks it darwin-only): every Mac has a
+Keychain, so unlike Linux it cannot degrade to a plaintext backend. If it fails
+to import or reports no usable backend, the 0600 file below is used instead.
+
 Everywhere else there is a 0600 file, and this module is honest about that
 being obfuscation-free: it protects against another user on the box, not
 against someone who already has your account.
@@ -35,13 +40,42 @@ _ENTROPY = b"video-factory/publish/v1"
 _DIR = "credentials"
 
 
+_KEYCHAIN_SERVICE = "Video Factory"
+
+
+def _keyring():
+    """The keyring module when it can really talk to the macOS Keychain, else
+    None. Checked at call time so a test can fake it."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import keyring
+        from keyring.backends import fail
+
+        if isinstance(keyring.get_keyring(), fail.Keyring):
+            return None
+        return keyring
+    except Exception:
+        return None
+
+
 def backend_name() -> str:
-    return "windows-dpapi" if sys.platform == "win32" else "file"
+    if sys.platform == "win32":
+        return "windows-dpapi"
+    if _keyring() is not None:
+        return "macos-keychain"
+    return "file"
 
 
 def _path(data_dir: Path, name: str) -> Path:
     suffix = "bin" if backend_name() == "windows-dpapi" else "secret.json"
     return Path(data_dir) / _DIR / f"{name}.{suffix}"
+
+
+def _account(data_dir: Path, name: str) -> str:
+    # One Keychain item per credential PER DATA DIR, so two installs (or a
+    # checkout beside an installed copy) do not overwrite each other.
+    return f"{Path(data_dir).resolve()}::{name}"
 
 
 # ---- Windows DPAPI ---------------------------------------------------------
@@ -95,9 +129,14 @@ def _dpapi(encrypt: bool, payload: bytes) -> bytes:
 
 
 def save(data_dir: Path, name: str, payload: dict) -> None:
+    raw = json.dumps(payload).encode("utf-8")
+    kr = _keyring()
+    if kr is not None:
+        kr.set_password(_KEYCHAIN_SERVICE, _account(data_dir, name), raw.decode("utf-8"))
+        return
+
     target = _path(data_dir, name)
     target.parent.mkdir(parents=True, exist_ok=True)
-    raw = json.dumps(payload).encode("utf-8")
 
     if backend_name() == "windows-dpapi":
         target.write_bytes(_dpapi(True, raw))
@@ -122,6 +161,14 @@ def load(data_dir: Path, name: str) -> dict | None:
     # twice means the file could go between the two answers. Same class of bug
     # as stat-then-read, and here it buys nothing.
     try:
+        kr = _keyring()
+        if kr is not None:
+            stored = kr.get_password(_KEYCHAIN_SERVICE, _account(data_dir, name))
+            if stored is not None:
+                value = json.loads(stored)
+                return value if isinstance(value, dict) else None
+            # Nothing in the Keychain: fall through, so a file written before
+            # the Keychain was available still loads.
         raw = _path(data_dir, name).read_bytes()
         if backend_name() == "windows-dpapi":
             raw = _dpapi(False, raw)
@@ -140,9 +187,15 @@ def wipe(data_dir: Path, name: str) -> bool:
     Google and a half-finished disconnect is worse than a noisy one.
     """
     try:
+        kr = _keyring()
+        if kr is not None:
+            try:
+                kr.delete_password(_KEYCHAIN_SERVICE, _account(data_dir, name))
+            except kr.errors.PasswordDeleteError:
+                pass  # not there: the desired state
         _path(data_dir, name).unlink(missing_ok=True)
         return True
-    except OSError:
+    except Exception:
         # Says nothing about WHICH credential, or what the OS complained
         # about: the error text carries the full path to a token file, and
         # this module's one rule is that it never puts anything about a
@@ -153,6 +206,13 @@ def wipe(data_dir: Path, name: str) -> bool:
 
 
 def has(data_dir: Path, name: str) -> bool:
+    kr = _keyring()
+    if kr is not None:
+        try:
+            if kr.get_password(_KEYCHAIN_SERVICE, _account(data_dir, name)) is not None:
+                return True
+        except Exception:
+            pass
     return _path(data_dir, name).exists()
 
 

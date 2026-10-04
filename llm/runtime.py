@@ -101,11 +101,19 @@ class OllamaRuntime:
             return None
         if exe and Path(exe).exists():
             return exe
-        # Not bundled and not on PATH. Ollama's Windows installer puts it
-        # here, and a PATH that has not caught up since install is common.
-        local = os.environ.get("LOCALAPPDATA")
-        if local:
-            default = Path(local) / "Programs" / "Ollama" / "ollama.exe"
+        # Not bundled and not on PATH. Each installer puts it somewhere fixed,
+        # and a PATH that has not caught up since install is common.
+        from core import host
+
+        if host.is_windows():
+            local = os.environ.get("LOCALAPPDATA")
+            candidates = [Path(local) / "Programs" / "Ollama" / "ollama.exe"] if local else []
+        elif host.is_mac():
+            candidates = [Path("/Applications/Ollama.app/Contents/Resources/ollama"),
+                          Path("/usr/local/bin/ollama"), Path("/opt/homebrew/bin/ollama")]
+        else:
+            candidates = [Path("/usr/local/bin/ollama"), Path("/usr/bin/ollama")]
+        for default in candidates:
             if default.exists():
                 return str(default)
         return None

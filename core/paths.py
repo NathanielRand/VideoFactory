@@ -12,6 +12,8 @@ import stat
 import sys
 from pathlib import Path
 
+from core import host
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -41,8 +43,7 @@ def resolve_data_dir(config: dict) -> Path:
         # clips live. Renaming it later makes an upgrade look like a factory
         # reset, so treat the name as frozen. (The folder is
         # "Video Factory".)
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-        return base / "Video Factory" / raw
+        return host.user_data_root() / raw
 
     # Checkout: next to the code, not next to the terminal.
     return _REPO_ROOT / raw
@@ -108,10 +109,9 @@ def user_config_path(bundled: Path) -> Path:
     if not getattr(sys, "frozen", False):
         return bundled
 
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     # Same folder as resolve_data_dir, frozen for the same reason. See the
     # note there before changing it.
-    user_copy = base / "Video Factory" / bundled.name
+    user_copy = host.user_data_root() / bundled.name
 
     if not user_copy.exists():
         try:

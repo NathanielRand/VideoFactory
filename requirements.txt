@@ -61,3 +61,7 @@ piper-tts>=1.5.0,<2
 # PyTorch wheels only carry cuBLAS 13. transcription/transcriber.py adds this
 # wheel's DLL folder to the search path. Windows/Linux only; harmless on CPU.
 nvidia-cublas-cu12>=12.4,<13; sys_platform != "darwin"
+
+# macOS Keychain access for core/secrets.py. Darwin only: Windows uses DPAPI and
+# Linux a 0600 file (no Secret Service in a typical headless install).
+keyring>=25,<26; sys_platform == "darwin"

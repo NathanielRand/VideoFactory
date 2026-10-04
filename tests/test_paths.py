@@ -35,6 +35,7 @@ def test_installed_build_uses_per_user_storage(monkeypatch, tmp_path):
     local_appdata = tmp_path / "AppData" / "Local"
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    monkeypatch.setattr(sys, "platform", "win32")
 
     got = resolve_data_dir({"paths": {"data_dir": "data"}})
     # Not "Video Factory": the data folder keeps its pre-rename name on
@@ -89,6 +90,7 @@ def test_installed_build_writes_settings_where_the_user_can(monkeypatch, tmp_pat
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    monkeypatch.setattr(sys, "platform", "win32")
 
     got = user_config_path(bundled)
     assert got == local_appdata / "Video Factory" / "settings.yaml"
@@ -110,6 +112,7 @@ def test_an_existing_installs_settings_are_carried_over(monkeypatch, tmp_path):
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    monkeypatch.setattr(sys, "platform", "win32")
 
     got = user_config_path(bundled)
     assert got.read_text(encoding="utf-8") == bundled.read_text(encoding="utf-8")
@@ -130,6 +133,7 @@ def test_unwritable_appdata_falls_back_to_the_bundled_copy(monkeypatch, tmp_path
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "nope"))
+    monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(
         paths.shutil, "copyfile", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only"))
     )

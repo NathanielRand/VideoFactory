@@ -110,3 +110,68 @@ def test_a_junk_legacy_file_is_left_alone(tmp_path):
     legacy.write_text("{{{not json", encoding="utf-8")
     assert secrets.migrate_plaintext(tmp_path, "youtube_token", legacy) is False
     assert legacy.exists(), "we did not understand it, so we must not delete it"
+
+
+# ---- macOS Keychain ----------------------------------------------------------
+
+
+class _FakeKeyring:
+    """Just enough of the `keyring` module to stand in for the Keychain."""
+
+    class errors:
+        class PasswordDeleteError(Exception):
+            pass
+
+    def __init__(self):
+        self.items = {}
+
+    def set_password(self, service, account, value):
+        self.items[(service, account)] = value
+
+    def get_password(self, service, account):
+        return self.items.get((service, account))
+
+    def delete_password(self, service, account):
+        try:
+            del self.items[(service, account)]
+        except KeyError:
+            raise self.errors.PasswordDeleteError from None
+
+
+@pytest.fixture
+def keychain(monkeypatch):
+    fake = _FakeKeyring()
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(secrets, "_keyring", lambda: fake)
+    return fake
+
+
+def test_macos_uses_the_keychain_and_leaves_no_file(keychain, tmp_path):
+    secrets.save(tmp_path, "youtube_token", {"refresh_token": "sentinel"})
+    assert secrets.backend_name() == "macos-keychain"
+    assert secrets.load(tmp_path, "youtube_token") == {"refresh_token": "sentinel"}
+    assert secrets.has(tmp_path, "youtube_token")
+    assert not (tmp_path / "credentials").exists(), "nothing readable should hit the disk"
+
+
+def test_macos_installs_do_not_share_credentials(keychain, tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(), b.mkdir()
+    secrets.save(a, "youtube_token", {"who": "a"})
+    assert secrets.load(b, "youtube_token") is None
+
+
+def test_macos_wipe_removes_it_and_tolerates_absence(keychain, tmp_path):
+    secrets.save(tmp_path, "youtube_token", {"v": 1})
+    assert secrets.wipe(tmp_path, "youtube_token") is True
+    assert secrets.load(tmp_path, "youtube_token") is None
+    assert secrets.wipe(tmp_path, "youtube_token") is True
+
+
+def test_macos_without_a_usable_keychain_falls_back_to_the_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(secrets, "_keyring", lambda: None)
+    secrets.save(tmp_path, "youtube_token", {"v": 1})
+    assert secrets.backend_name() == "file"
+    assert secrets.load(tmp_path, "youtube_token") == {"v": 1}
+    assert (tmp_path / "credentials" / "youtube_token.secret.json").exists()

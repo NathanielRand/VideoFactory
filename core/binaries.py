@@ -30,6 +30,8 @@ import sys
 from functools import cache
 from pathlib import Path
 
+from core import host
+
 
 def _search_roots(folder: str) -> list[Path]:
     """Directories a packaged build may keep a bundled tool's binaries in.
@@ -62,7 +64,7 @@ def _resolve(name: str, folder: str) -> str:
     if override and Path(override).exists():
         return override
 
-    filename = f"{name}.exe" if os.name == "nt" else name
+    filename = host.exe_name(name)
     for root in _search_roots(folder):
         candidate = root / filename
         if candidate.exists():
@@ -103,7 +105,7 @@ def has_bundled_ollama() -> bool:
     problem — a developer with Ollama installed must still be told to go and
     start it.
     """
-    filename = "ollama.exe" if os.name == "nt" else "ollama"
+    filename = host.exe_name("ollama")
     return any((root / filename).exists() for root in _search_roots("ollama"))
 
 
