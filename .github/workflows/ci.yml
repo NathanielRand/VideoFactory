@@ -126,6 +126,7 @@ jobs:
           tests/test_secrets.py tests/test_binaries.py tests/test_fetch_scripts.py
           tests/test_gpu_capability.py tests/test_gpu_mps.py
           tests/test_encoder_selection.py tests/test_render_diagnosis.py
+          tests/test_build_installer.py
 
   ui:
     name: Desktop app

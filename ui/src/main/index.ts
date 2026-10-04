@@ -159,7 +159,15 @@ function startOllama(): void {
 
   // PyInstaller puts bundled data under _internal/, which is where the spec
   // places the runtime — the same shape as _internal/ffmpeg.
-  const exe = join(process.resourcesPath, 'backend', '_internal', 'ollama', exeName('ollama'))
+  // Windows and macOS put the executable at the top of that folder; the Linux
+  // build keeps Ollama's own bin/ + lib/ollama/ layout (it finds its libraries
+  // relative to itself), so the executable is one level down. core/binaries.py
+  // searches both for the same reason.
+  const ollamaDir = join(process.resourcesPath, 'backend', '_internal', 'ollama')
+  const exe =
+    [join(ollamaDir, exeName('ollama')), join(ollamaDir, 'bin', exeName('ollama'))].find(
+      existsSync
+    ) ?? join(ollamaDir, exeName('ollama'))
 
   ollama = spawn(exe, ['serve'], {
     stdio: 'ignore',

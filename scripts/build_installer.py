@@ -26,6 +26,7 @@ Flags:
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -174,6 +175,40 @@ def freeze_backend() -> None:
     print(f"    backend: {exe} ({total / 1e9:.2f} GB unpacked)")
 
 
+def verify_bundled_executables() -> None:
+    """Make sure FFmpeg and Ollama kept their executable bit through the freeze.
+
+    They ride into the bundle as data files, and Windows has no exec bit, so a
+    build there cannot show whether PyInstaller preserves it. On macOS and
+    Linux a lost bit means every render and every Ollama start fails with
+    "permission denied" in an app that otherwise looks fine, and the engine
+    smoke test below would not notice: it only checks that `status` runs.
+
+    So: restore the bit if it went missing, then actually run FFmpeg, which also
+    proves it is the right architecture and finds its libraries.
+    """
+    if host.is_windows():
+        return
+    say("3a/5", "checking the bundled executables")
+    internal = BACKEND_OUT / "_internal"
+    ollama = internal / "ollama" / ("bin" if host.is_linux() else ".") / "ollama"
+    for path in (internal / "ffmpeg" / "ffmpeg", internal / "ffmpeg" / "ffprobe", ollama):
+        if not path.exists():
+            sys.exit(f"\nExpected {path} in the frozen engine but it is not there.")
+        if not os.access(path, os.X_OK):
+            print(f"    {path.name}: lost its executable bit in the freeze, restoring")
+            path.chmod(path.stat().st_mode | 0o755)
+        if not os.access(path, os.X_OK):
+            sys.exit(f"\n{path} is not executable and could not be made so.")
+        print(f"    {path.name}: executable")
+
+    result = subprocess.run([str(internal / "ffmpeg" / "ffmpeg"), "-version"],
+                            capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        sys.exit(f"\nBundled FFmpeg will not run:\n{(result.stderr or result.stdout)[-1500:]}")
+    print(f"    ffmpeg runs: {result.stdout.splitlines()[0][:80]}")
+
+
 def smoke_test_backend() -> None:
     """A frozen build that can't import its own dependencies is the classic
     PyInstaller failure, and it only shows up at runtime. Catch it here
@@ -289,6 +324,7 @@ def main() -> None:
             sys.exit("--skip-backend given but no frozen backend exists yet.")
     else:
         freeze_backend()
+        verify_bundled_executables()
         smoke_test_backend()
 
     if args.backend_only:

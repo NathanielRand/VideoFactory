@@ -66,6 +66,14 @@ using it.
 
 ## Known limits
 
+- **Keychain prompts after updates (unverified, likely).** A Keychain item trusts
+  the code signature of the program that created it. An ad-hoc signature changes
+  with every build, so after updating, macOS may ask "Video Factory wants to use
+  your confidential information stored in the keychain", and the call that needed
+  the token waits for an answer. Choose **Always Allow**. If it proves to be a
+  problem, the credential store can be switched back to the 0600 file on macOS
+  until there is a Developer ID: see `core/secrets.py`.
+
 - The in-app updater is not wired up for macOS: there is no update feed yet, and
   macOS auto-update requires a signed app.
 - Switching processing from "gentle" back to "full speed" does not raise
