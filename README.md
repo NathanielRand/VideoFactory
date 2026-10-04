@@ -24,6 +24,14 @@ The roadmap is in [docs/plan.md](docs/plan.md). How the code fits together is in
 [docs/architecture.md](docs/architecture.md), the map of the codebase, and
 [ARCHITECTURE.md](ARCHITECTURE.md), the engine deep-dive.
 
+## Platforms
+
+| | Status |
+|---|---|
+| Windows 10/11 + NVIDIA GPU | The reference platform. Installer builds. |
+| macOS (Apple Silicon, 14+) | Ported, **not yet tested on a Mac**. See [docs/MACOS.md](docs/MACOS.md). |
+| Linux x86_64 | Ported, **not yet tested on a desktop**. See [docs/LINUX.md](docs/LINUX.md). |
+
 ## Dev setup (Windows)
 
 Needs Python **3.11**, Node 22+ with pnpm 11 (`corepack enable` picks the pinned version), FFmpeg on PATH, [Ollama](https://ollama.com), and an

@@ -190,3 +190,18 @@ should be capable, please report it with your specifications.
 It works on CPU. Transcription, tracking and scoring all run, just far slower,
 a video that takes minutes with an NVIDIA card can take hours without one. The
 app detects this and picks a smaller AI model to compensate.
+
+---
+
+## macOS and Linux builds are new and untested on real desktops
+
+Both were written and checked from a Windows machine: the logic against faked
+platforms, the bundled FFmpeg and Ollama archives on Linux in a container, the
+Electron config against electron-builder's schema. Neither packaged app has yet
+been launched on real hardware, and **Metal, VideoToolbox and the Mac and Linux
+installers in particular are unverified.** Details and workarounds are in
+[docs/MACOS.md](docs/MACOS.md) and [docs/LINUX.md](docs/LINUX.md).
+
+On macOS and Linux, switching processing from "gentle" back to "full speed" does
+not raise priority again: lowering a process's nice value needs privileges the
+app does not have.

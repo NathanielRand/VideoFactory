@@ -68,11 +68,23 @@ function showWindow(): void {
 
 async function ensureTray(): Promise<void> {
   if (tray) return
-  // The app's own icon, taken from the running executable, so there is no
-  // separate image to ship or to fall out of step with the installer's.
-  const icon = await app
-    .getFileIcon(process.execPath, { size: 'small' })
-    .catch(() => nativeImage.createEmpty())
+  // Windows: the app's own icon, taken from the running executable, so there is
+  // no separate image to ship or to fall out of step with the installer's.
+  // macOS and Linux have no equivalent (the executable's icon is generic), so
+  // they use the PNG that electron-builder.yml ships beside the engine, sized
+  // for a menu bar / tray.
+  let icon = nativeImage.createEmpty()
+  if (process.platform !== 'win32') {
+    const size = process.platform === 'darwin' ? 18 : 22
+    icon = nativeImage
+      .createFromPath(join(process.resourcesPath, 'icon.png'))
+      .resize({ width: size, height: size })
+  }
+  if (icon.isEmpty()) {
+    icon = await app
+      .getFileIcon(process.execPath, { size: 'small' })
+      .catch(() => nativeImage.createEmpty())
+  }
   if (tray) return // a second close raced this one
   tray = new Tray(icon)
   tray.setToolTip('Video Factory: watching for new videos')

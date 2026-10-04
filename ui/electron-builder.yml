@@ -1,4 +1,9 @@
-# Windows installer for Video Factory.
+# Installers for Video Factory: Windows (NSIS), macOS (dmg) and Linux (AppImage,
+# deb). Each is built natively on its own OS, because the frozen Python engine
+# cannot be cross-compiled: `pnpm run package` (Windows), `package:mac`,
+# `package:linux`, or scripts/build_installer.py, which picks the right one.
+#
+# The Windows story, which the rest of this file mostly tells:
 #
 # Produces an NSIS installer that carries everything the app needs: the
 # Electron front end, the frozen Python engine, FFmpeg, and the YOLO
@@ -53,6 +58,10 @@ extraResources:
     to: backend
     filter:
       - "**/*"
+  # The tray icon on macOS and Linux. Windows reads its tray icon out of the
+  # exe itself; elsewhere there is no such trick, so the image ships as a file.
+  - from: build/icon.png
+    to: icon.png
 
 win:
   # nsis-web, not plain nsis. makensis.exe is a 32-bit program: it memory-maps
@@ -89,6 +98,70 @@ win:
   # turn on Windows Developer Mode (Settings > System > For developers),
   # then delete this line.
   signAndEditExecutable: false
+
+# macOS. Apple Silicon only: PyTorch no longer publishes Intel Mac wheels, so an
+# x64 build would mean a second engine with a different feature set. macOS 14 or
+# newer, because OpenCV's current wheels are not published for older systems
+# (checked with pip against macosx_11_0 and macosx_14_0).
+#
+# UNSIGNED, and that needs saying precisely. An arm64 app with NO signature at
+# all will not launch: macOS reports "is damaged and can't be opened", with no
+# way past it in the UI. So the build is AD-HOC signed (identity "-"), which
+# satisfies the kernel but not Gatekeeper: users get "Apple could not verify
+# ..." and must allow it once in System Settings > Privacy & Security ("Open
+# Anyway"), or run `xattr -dr com.apple.quarantine "/Applications/Video
+# Factory.app"`. See docs/MACOS.md.
+#
+# hardenedRuntime is off because ad-hoc signing plus hardened runtime makes
+# macOS refuse the Electron frameworks (different Team ID). To ship properly
+# with a Developer ID: delete `identity`, set hardenedRuntime to true, and
+# provide CSC_LINK / CSC_KEY_PASSWORD plus notarization credentials. The
+# entitlements the engine needs are already in build/entitlements.mac.plist.
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    # Also a zip: electron-updater reads updates from the zip on macOS, and it
+    # doubles as the no-dmg fallback.
+    - target: zip
+      arch:
+        - arm64
+  category: public.app-category.video
+  minimumSystemVersion: "14.0"
+  icon: build/icon.png
+  identity: "-"
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  artifactName: VideoFactory-${version}-${arch}.${ext}
+
+dmg:
+  title: Video Factory ${version}
+
+# Linux. x64. One build: it carries CUDA PyTorch when the build machine has it
+# and a CPU one when not (scripts/build_installer.py says which). The app falls
+# back to the CPU on its own either way.
+#
+# AppImage and deb, not Flatpak or Snap yet. Known quirk, documented in
+# docs/LINUX.md: on Ubuntu 24.04+ an AppImage may refuse to start because
+# unprivileged user namespaces are restricted for Electron's sandbox. The deb
+# does not have this problem (it installs chrome-sandbox setuid).
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  category: AudioVideo
+  icon: build/icon.png
+  maintainer: Nathaniel Rand <nathanieljrand@gmail.com>
+  synopsis: Source to post, in one flow
+  description: Grab videos, clip them or build compilations, add branding, render for every platform, then post or schedule. Runs on your own machine.
+  artifactName: VideoFactory-${version}-${arch}.${ext}
 
 # Microsoft Store packaging. NOT part of the default build: `win.target` above
 # is untouched, and this target is selected explicitly by

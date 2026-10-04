@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **macOS and Linux port** (untested on real Mac/Linux desktops): per-OS data
+  folders, Keychain credential storage, Metal tracking, VideoToolbox encoding,
+  CPU Whisper on Mac, per-OS FFmpeg and Ollama bundling, dmg / AppImage / deb
+  packaging, a cross-platform portability CI job and a "Build desktop" workflow.
+  See docs/MACOS.md and docs/LINUX.md.
+
 - **Video Factory** name, logo and icon; `VIDEO_FACTORY_*` env vars; data under
   `%LOCALAPPDATA%\Video Factory`.
 - Compilation mode: multi-source recipes, credit plates and fonts, render

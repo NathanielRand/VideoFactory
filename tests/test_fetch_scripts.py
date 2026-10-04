@@ -142,7 +142,7 @@ def test_a_tar_cannot_escape_the_destination(tmp_path):
     dest.mkdir()
     archive = tmp_path / "a.tgz"
     archive.write_bytes(_tar_with([("../escaped", "file", b"x")]))
-    with pytest.raises(Exception):  # tarfile.OutsideDestinationError
+    with pytest.raises((ValueError, tarfile.TarError)):
         ollama._extract_tar_within(archive, dest, zstd=False)
     assert not (tmp_path / "escaped").exists()
 
@@ -160,7 +160,7 @@ def test_links_inside_the_archive_work_and_links_outside_are_refused(tmp_path):
 
     bad = tmp_path / "bad.tgz"
     bad.write_bytes(_tar_with([("sneaky", "symlink", "../../etc/passwd")]))
-    with pytest.raises(Exception):
+    with pytest.raises((ValueError, tarfile.TarError)):
         ollama._extract_tar_within(bad, tmp_path / "vendor2", zstd=False)
 
 

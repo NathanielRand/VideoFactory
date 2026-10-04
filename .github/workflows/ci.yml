@@ -97,6 +97,36 @@ jobs:
           fi
           echo "no credential files tracked"
 
+  portability:
+    # The code that decides per-OS behaviour: data folders, binary lookup, the
+    # credential store, encoder and GPU choice, the fetch scripts. Each test
+    # fakes the platform it is not running on, so all of them run everywhere,
+    # and running them on all three real systems catches what faking cannot
+    # (path separators, symlinks, file modes).
+    name: Portability (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Install what these tests need
+        run: pip install --quiet pyyaml pytest requests zstandard
+
+      - name: Platform tests
+        run: >
+          python -m pytest -q --tb=short
+          tests/test_host.py tests/test_lifetime.py tests/test_paths.py
+          tests/test_secrets.py tests/test_binaries.py tests/test_fetch_scripts.py
+          tests/test_gpu_capability.py tests/test_gpu_mps.py
+          tests/test_encoder_selection.py tests/test_render_diagnosis.py
+
   ui:
     name: Desktop app
     runs-on: ubuntu-latest

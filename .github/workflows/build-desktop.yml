@@ -1,0 +1,89 @@
+# Builds the macOS and Linux desktop apps. Manual, and on version tags.
+#
+# Not part of every pull request: freezing the engine with PyTorch takes tens
+# of minutes and gigabytes. The Windows installer is still built on a
+# developer's machine (CUDA PyTorch, signing, the Hugging Face upload; see
+# docs/RELEASING.md), so it is not in this matrix.
+#
+# What this proves and what it cannot:
+#   - proves: the engine freezes, starts (`api status`), and packages; on macOS
+#     that the bundle's signature is structurally valid.
+#   - cannot prove: that Metal, VideoToolbox or a real clip render work. A
+#     hosted runner has no GPU worth the name. That needs a person with a Mac.
+
+name: Build desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (Apple Silicon)
+            os: macos-14
+            torch_index: ''
+          - name: Linux (x64, CPU engine)
+            os: ubuntu-22.04
+            torch_index: '--index-url https://download.pytorch.org/whl/cpu'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.11'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ui/package.json
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: Free disk space (Linux)
+        if: runner.os == 'Linux'
+        # PyTorch, PyInstaller's work folder and the packaged app all coexist.
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Install the engine's dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision ${{ matrix.torch_index }}
+          python -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Build
+        run: python scripts/build_installer.py
+
+      - name: Check the macOS bundle's signature
+        if: runner.os == 'macOS'
+        # Ad-hoc signed on purpose (see electron-builder.yml). An arm64 app with
+        # no valid signature will not launch at all, so this is the check that
+        # matters.
+        run: |
+          app=$(find release -maxdepth 3 -name "*.app" | head -1)
+          echo "bundle: $app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv "$app" 2>&1 | grep -E "Signature|Authority|flags" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-factory-${{ runner.os }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.deb
+          if-no-files-found: error

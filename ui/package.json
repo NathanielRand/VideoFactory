@@ -11,7 +11,9 @@
     "dev:web": "vite",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json",
-    "package": "electron-vite build && electron-builder --win"
+    "package": "electron-vite build && electron-builder --win",
+    "package:mac": "electron-vite build && electron-builder --mac",
+    "package:linux": "electron-vite build && electron-builder --linux"
   },
   "dependencies": {
     "electron-updater": "^6.8.9",
