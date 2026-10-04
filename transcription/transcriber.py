@@ -51,7 +51,13 @@ def _load_model(model_size: str, device: str):
     def load(name: str, **kwargs):
         return WhisperModel(whisper_model(name), **kwargs)
 
-    if device in ("auto", "cuda"):
+    from core import host
+
+    if host.is_mac() and device in ("auto", "cuda"):
+        # CTranslate2 has no Metal backend; "cuda" cannot succeed here, so do
+        # not try (the failed load is slow and its message is misleading).
+        print("  Whisper: no GPU backend on macOS — using CPU")
+    elif device in ("auto", "cuda"):
         try:
             _add_gpu_dlls()
             if model_size == "auto":

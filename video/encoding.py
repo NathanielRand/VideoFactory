@@ -1,9 +1,15 @@
-"""Hardware-accelerated encoding selection — NVIDIA, AMD, and Intel.
+"""Hardware-accelerated encoding selection — NVIDIA, AMD, Intel and Apple.
 
 Hardware encoders render H.264 many times faster than libx264 on CPU and
 leave the CPU free for detection/analysis. Preference order:
 
-  NVENC (NVIDIA) -> AMF (AMD) -> QSV (Intel) -> libx264 (CPU)
+  Windows, Linux: NVENC (NVIDIA) -> AMF (AMD) -> QSV (Intel) -> libx264 (CPU)
+  macOS:          VideoToolbox (Apple)                       -> libx264 (CPU)
+
+VAAPI (the usual Linux route for Intel and AMD) is deliberately not here: it
+needs `-vaapi_device` before the input and an `hwupload` filter in the graph,
+and this module only supplies the `-c:v` block. QSV and AMF cover those cards
+on Linux where their drivers are installed; the rest get libx264.
 
 Detection is done once per process by actually test-encoding a frame WITH
 THE EXACT ARGUMENTS we render with — an encoder can be listed by FFmpeg but
@@ -13,11 +19,12 @@ tried, so a wrong flag on some AMD driver degrades to CPU encoding instead
 of breaking renders.
 
 Config: video.encoder in settings.yaml — "auto" (default) or force one of
-"nvenc" / "amf" / "qsv" / "cpu".
+"nvenc" / "amf" / "qsv" / "videotoolbox" / "cpu".
 """
 
 import subprocess
 
+from core import host
 from core.binaries import ffmpeg, ffprobe
 from core.paths import discard
 
@@ -40,7 +47,22 @@ _CANDIDATES: dict[str, list[str]] = {
     "nvenc": ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0", *_PLAYBACK],
     "amf": ["-c:v", "h264_amf", "-quality", "quality", "-b:v", "8M", "-maxrate", "12M", *_PLAYBACK],
     "qsv": ["-c:v", "h264_qsv", "-global_quality", "23", "-preset", "medium", *_PLAYBACK],
+    # -allow_sw 0: refuse FFmpeg's silent software fallback, so a failed probe
+    # means "no hardware" and the CPU path below takes over honestly.
+    "videotoolbox": ["-c:v", "h264_videotoolbox", "-allow_sw", "0", "-b:v", "8M",
+                     "-maxrate", "12M", *_PLAYBACK],
 }
+
+_VENDOR = {"nvenc": "NVIDIA NVENC", "amf": "AMD AMF", "qsv": "Intel QSV",
+           "videotoolbox": "Apple VideoToolbox"}
+
+
+def _auto_order() -> list[str]:
+    """Which encoders to try, in order, on this OS. Probing one that cannot
+    exist here only wastes a subprocess and mislabels the failure."""
+    if host.is_mac():
+        return ["videotoolbox"]
+    return ["nvenc", "amf", "qsv"]
 
 _selected: tuple[str, list[str]] | None = None  # cached (name, args)
 
@@ -73,10 +95,10 @@ def _select(mode: str) -> tuple[str, list[str]]:
         return "cpu", CPU_ARGS
 
     # auto: first hardware encoder that actually works on this machine
-    for name, args in _CANDIDATES.items():
+    for name in _auto_order():
+        args = _CANDIDATES[name]
         if _probe(args):
-            vendor = {"nvenc": "NVIDIA NVENC", "amf": "AMD AMF", "qsv": "Intel QSV"}[name]
-            print(f"  Encoder: {vendor} (GPU) available — using hardware encoding")
+            print(f"  Encoder: {_VENDOR[name]} (GPU) available — using hardware encoding")
             return name, args
     return "cpu", CPU_ARGS
 

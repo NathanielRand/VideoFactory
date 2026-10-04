@@ -98,7 +98,7 @@ def _get_model(model_name: str):
         if _model is None:
             from core import cancel, governor
             from core.binaries import yolo_weights
-            from core.gpu import cuda_usable
+            from core.gpu import accelerator
 
             def load():
                 from ultralytics import YOLO  # lazy: heavy import, pulls in torch
@@ -117,11 +117,11 @@ def _get_model(model_name: str):
                 "the tracking model (torch + YOLO)", 2.5, load, cancel.check_active
             )
 
-            usable, reason = cuda_usable()
-            if not usable:
+            device, reason = accelerator()
+            if device == "cpu":
                 print(f"  Tracking: using CPU — {reason}")
             else:
-                _model.to("cuda")
+                _model.to(device)
                 # Prove the GPU before the whole job depends on it. Moving
                 # weights launches no kernel, so .to("cuda") succeeds even on a
                 # card this build has no code for, and the failure would
@@ -133,12 +133,13 @@ def _get_model(model_name: str):
                 # deadlock on the non-reentrant lock already held here.
                 try:
                     _model.predict(np.zeros((32, 32, 3), np.uint8),
-                                   device="cuda", verbose=False)
+                                   device=device, verbose=False)
                 except Exception as e:
                     _model.to("cpu")
                     print(f"  Tracking: GPU unusable ({str(e)[:90]}) — using CPU")
                 else:
-                    print(f"  Tracking: GPU (CUDA) active — {reason}")
+                    label = {"cuda": "CUDA", "mps": "Metal"}[device]
+                    print(f"  Tracking: GPU ({label}) active — {reason}")
     return _model
 
 

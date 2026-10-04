@@ -252,9 +252,20 @@ def check_whisper(configured: str) -> Check:
 def check_gpu() -> Check:
     """Not blocking: the app works on CPU, just slowly. Worth saying so
     plainly rather than letting someone conclude it's broken."""
-    from core.gpu import NO_GPU, cuda_usable, gpu_too_old
+    from core import host
+    from core.gpu import NO_GPU, accelerator, cuda_usable, gpu_too_old
+
+    device, reason = accelerator()
+    if device == "mps":
+        # Tracking uses the Apple GPU. Speech recognition (faster-whisper) has
+        # no Metal backend, so it runs on the CPU: say so rather than let a
+        # slow transcript look like a fault.
+        return Check(name="gpu", ok=True, blocking=False,
+                     detail=f"{reason} for tracking; speech recognition runs on the CPU")
 
     usable, reason = cuda_usable()
+    if device == "cpu" and host.is_mac():
+        _, reason = accelerator()
 
     if usable:
         try:
@@ -272,7 +283,11 @@ def check_gpu() -> Check:
     # was fine right up until the job crashed on it. It is still not blocking —
     # CPU genuinely works — but it is not "fine", and the two cases share no
     # remedy at all.
-    if reason == NO_GPU:
+    if host.is_mac():
+        fix = ("Processing will run on the CPU, which works but is slower. "
+               "Apple Silicon Macs use their GPU automatically; Intel Macs "
+               "are not accelerated.")
+    elif reason == NO_GPU:
         fix = ("Video Factory works without a GPU, but processing is much "
                "slower. An NVIDIA GPU gives the biggest speed-up.")
     elif gpu_too_old(reason):

@@ -135,7 +135,7 @@ analysis:
 video:
   encoder: auto          # auto = first working GPU encoder (NVIDIA nvenc /
                          # AMD amf / Intel qsv), else CPU. Or force one:
-                         # "nvenc" / "amf" / "qsv" / "cpu"
+                         # "nvenc" / "amf" / "qsv" / "videotoolbox" / "cpu"
   parallel_renders: 3    # clips rendered at once (one's GPU tracking overlaps
                          # another's NVENC encode). Sized for ~6 CPU cores /
                          # 16GB RAM; raise only with more RAM + spare VRAM.

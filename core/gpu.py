@@ -18,6 +18,8 @@ is outside it, and the honest answer is to run on CPU and say so rather than to
 crash halfway through their video.
 """
 
+import os
+import sys
 
 # The one reason callers need to tell apart from the rest: having no GPU and
 # having one this build cannot use both mean "running on CPU", but the first is
@@ -126,8 +128,56 @@ def cuda_usable() -> tuple[bool, str]:
         return False, f"could not check the GPU ({type(e).__name__})"
 
 
-def torch_device() -> str:
-    """`"cuda"` or `"cpu"` — the device every model and inference call must use.
+def mps_usable() -> tuple[bool, str]:
+    """`(usable, reason)` for Apple's Metal backend in PyTorch.
+
+    Only ever true on a Mac with Apple Silicon. Returns early everywhere else
+    without importing torch, so asking is free on Windows and Linux.
+    """
+    if sys.platform != "darwin":
+        return False, "not a Mac"
+    try:
+        import torch
+
+        mps = torch.backends.mps
+        if mps.is_available():
+            return True, "Apple GPU (Metal)"
+        if not mps.is_built():
+            return False, "this PyTorch build has no Metal support"
+        return False, "no Metal GPU available (Apple Silicon is required)"
+    except Exception as e:
+        return False, f"could not check the Apple GPU ({type(e).__name__})"
+
+
+def accelerator() -> tuple[str, str]:
+    """`(device, reason)` where device is "cuda", "mps" or "cpu".
+
+    The reason is shown to the user either way, so on a Mac that ends up on the
+    CPU it describes Metal rather than the "no CUDA GPU" a Mac never could have.
+    """
+    usable, reason = cuda_usable()
+    if usable:
+        return "cuda", reason
+    if reason == _OUT_OF_MEMORY:
+        return "cpu", reason
+    ok, mps_reason = mps_usable()
+    if ok:
+        # Ops Metal lacks fall back to the CPU instead of raising. Read when
+        # the first Metal op runs, so setting it here is early enough, and
+        # main.py sets it up front as well.
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        return "mps", mps_reason
+    if sys.platform == "darwin" and reason == NO_GPU:
+        reason = mps_reason
+    return "cpu", reason
+
+
+def torch_device(allow_mps: bool = True) -> str:
+    """`"cuda"`, `"mps"` or `"cpu"` — the device every model and inference call
+    must use.
+
+    `allow_mps=False` for models that have not been validated on Metal (the
+    TalkNet speaker model): they get the CPU on a Mac rather than a guess.
 
     Exists because "don't move the model to CUDA" turned out not to be enough.
     Ultralytics rebuilds its predictor on each call with
@@ -145,8 +195,10 @@ def torch_device() -> str:
     """
     global _DEVICE
     if _DEVICE is None:
-        usable, reason = cuda_usable()
+        device, reason = accelerator()
         if reason == _OUT_OF_MEMORY:
             return "cpu"  # for this call only; ask again next time
-        _DEVICE = "cuda" if usable else "cpu"
+        _DEVICE = device
+    if _DEVICE == "mps" and not allow_mps:
+        return "cpu"
     return _DEVICE

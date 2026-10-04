@@ -742,7 +742,7 @@ scoring:
   rerank_pool: 8
 
 video:
-  encoder: auto            # nvenc / amf / qsv / cpu
+  encoder: auto            # nvenc / amf / qsv / videotoolbox / cpu
   parallel_renders: 3
 
 tracking:

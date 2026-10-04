@@ -113,7 +113,8 @@ def _load():
     # present', not 'can this build run on it'. See core/gpu.py.
     from core.gpu import torch_device
 
-    device = torch_device()
+    # Metal is not validated for TalkNet's ops, so a Mac runs it on the CPU.
+    device = torch_device(allow_mps=False)
     model, head = talkNetModel().to(device), lossAV().to(device)
 
     # The checkpoint was saved from the training wrapper, so its keys carry
