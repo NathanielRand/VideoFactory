@@ -27,6 +27,34 @@ export function isMicrosoftStore(): boolean {
   return (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true
 }
 
+/** How this copy gets updated.
+ *
+ *   store   the Microsoft Store does it
+ *   auto    electron-updater downloads and installs in place: the Windows
+ *           installer, and a Linux AppImage (which can replace itself)
+ *   manual  the user installs a newer build by hand: macOS, and a Linux .deb
+ *
+ *  macOS is manual because electron-updater installs through Squirrel.Mac,
+ *  which refuses an app whose signature does not validate, and this build is
+ *  ad-hoc signed (no Apple Developer ID; see electron-builder.yml). A .deb is
+ *  owned by the system package manager, so replacing its files from inside the
+ *  app would fight dpkg. Both would otherwise offer an update they cannot
+ *  install.
+ *
+ *  Pure on purpose, taking its inputs, so it can be checked without Electron. */
+export type UpdateMode = 'store' | 'auto' | 'manual'
+
+export function updateMode(
+  platform: string = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  store: boolean = isMicrosoftStore()
+): UpdateMode {
+  if (store) return 'store'
+  if (platform === 'win32') return 'auto'
+  if (platform === 'linux') return env.APPIMAGE ? 'auto' : 'manual'
+  return 'manual'
+}
+
 /** Short name for logs and the Settings screen. */
 export function distributionName(): string {
   return isMicrosoftStore() ? 'Microsoft Store' : 'standalone'

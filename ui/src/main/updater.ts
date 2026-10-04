@@ -17,7 +17,7 @@ import { app, ipcMain, type BrowserWindow } from 'electron'
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { autoUpdater, type UpdateInfo } from 'electron-updater'
-import { isMicrosoftStore } from './distribution'
+import { updateMode } from './distribution'
 
 /** Which releases this install is offered. Alpha sees everything, stable
  *  only sees finished releases. Read from the same file the renderer writes,
@@ -161,11 +161,16 @@ export function setupUpdater(win: BrowserWindow): void {
   // to run it over a package Windows itself manages. So it is never wired up
   // at all — no listeners, no startup check — and the handlers below answer
   // honestly instead of pretending to check.
-  if (isMicrosoftStore()) {
-    const storeState = (): void => send('update:state', { state: 'store' })
+  //
+  // A manual-install copy (macOS, a Linux .deb) is wired the same way and for
+  // a related reason: it cannot install an update in place, so offering one
+  // would only end in an error. See updateMode() in distribution.ts.
+  const mode = updateMode()
+  if (mode !== 'auto') {
+    const storeState = (): void => send('update:state', { state: mode })
     ipcMain.handle('update:check', async () => {
       storeState()
-      return { ok: false, reason: 'store' }
+      return { ok: false, reason: mode }
     })
     ipcMain.handle('update:download', async () => ({ ok: false }))
     ipcMain.handle('update:install', () => ({ ok: false }))

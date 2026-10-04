@@ -434,6 +434,8 @@ function UpdateCard(): JSX.Element {
         return 'Updates are disabled while running from source.'
       case 'store':
         return 'Installed from the Microsoft Store, which keeps Video Factory up to date for you.'
+      case 'manual':
+        return 'Updates on this system are installed by hand: download the newer build and install it over this one. Your library and settings are kept.'
       case 'error':
         return `Could not check: ${state.message ?? 'unknown error'}`
       default:
