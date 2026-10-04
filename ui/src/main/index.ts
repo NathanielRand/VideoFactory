@@ -563,6 +563,15 @@ ipcMain.handle('open-folder', async (_e, path: unknown) => {
   return (await shell.openPath(path)) === ''
 })
 
+// Every 60 fps clip played at half its frame rate (about 30 of 60 frames
+// dropped, steadily, with no stalls) while a 30 fps copy of the same clip dropped
+// none. Measured in a bare Electron window with none of the app in it, on a 120 Hz
+// + 60 Hz mixed-monitor setup: the cause is Chromium's GPU compositing, which
+// presents at roughly half the display rate there. Compositing on the CPU brought
+// the dropped frames to 0 and requestAnimationFrame back to 120 Hz; hardware video
+// decode and rasterization stay on the GPU. Must be set before the app is ready.
+app.commandLine.appendSwitch('disable-gpu-compositing')
+
 // One Video Factory at a time. A second launch used to start a second engine
 // that could not bind port 8765 and a window talking to the first one's; with
 // the window hidden in the tray it would look like the app had not started at
