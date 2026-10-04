@@ -6,11 +6,12 @@ download a second installer, run it, and come back. That is the single biggest
 thing standing between "downloaded Video Factory" and "made a clip", and it is
 the kind of errand people abandon.
 
-So the app carries its own copy. This fetches the standalone Windows build --
-a zip, not the ollama.com installer -- and drops it into vendor/ollama/, where
-core.binaries looks for it and the packaging step picks it up. The standalone
-build matters: it needs no admin rights, edits no PATH, registers no service,
-and leaves any Ollama the creator already installed completely alone.
+So the app carries its own copy. This fetches the standalone build for this
+OS -- a zip on Windows, a tgz on macOS (one universal binary), a tar.zst on
+Linux, never the ollama.com installer -- and drops it into vendor/ollama/,
+where core.binaries looks for it and the packaging step picks it up. The
+standalone build matters: it needs no admin rights, edits no PATH, registers no
+service, and leaves any Ollama the creator already installed completely alone.
 
     python scripts/fetch_ollama.py            # fetch if missing
     python scripts/fetch_ollama.py --force    # re-download
@@ -25,10 +26,13 @@ installer ships it.
 """
 
 import argparse
-import io
+import hashlib
 import json
+import platform
 import shutil
 import sys
+import tarfile
+import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -42,24 +46,52 @@ DEST = ROOT / "vendor" / "ollama"
 # from a build that happened to run on a Tuesday.
 OLLAMA_VERSION = "v0.32.6"
 RELEASES_API = "https://api.github.com/repos/ollama/ollama/releases/latest"
-ASSET = "ollama-windows-amd64.zip"
-BUILD_URL = f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}/{ASSET}"
+RELEASE_BASE = f"https://github.com/ollama/ollama/releases/download/{OLLAMA_VERSION}"
+
+# asset name, archive kind, and where the executable lands under vendor/ollama/.
+# Linux keeps Ollama's own bin/ + lib/ollama/ layout: the executable finds its
+# GPU libraries relative to itself, so that layout has to survive packaging.
+ASSETS = {
+    "win32": ("ollama-windows-amd64.zip", "zip", "ollama.exe"),
+    "darwin": ("ollama-darwin.tgz", "tar", "ollama"),
+    "linux-x86_64": ("ollama-linux-amd64.tar.zst", "tar.zst", "bin/ollama"),
+    "linux-aarch64": ("ollama-linux-arm64.tar.zst", "tar.zst", "bin/ollama"),
+}
 
 # Records which version is sitting in vendor/ollama/, so bumping the constant
 # above re-downloads instead of silently keeping the old runtime.
 STAMP = "VERSION.txt"
 
-NOTICE = f"""Ollama
+
+def target_key(plat: str | None = None, machine: str | None = None) -> str:
+    """Which entry of ASSETS this machine uses, or exit saying what exists."""
+    plat = plat or sys.platform
+    machine = (machine or platform.machine()).lower()
+    arch = {"amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+    if plat == "win32":
+        key = "win32"
+    elif plat == "darwin":
+        key = "darwin"
+    else:
+        key = f"linux-{arch}"
+    if key not in ASSETS:
+        raise SystemExit(f"No Ollama build is configured for {plat}/{machine}. "
+                         f"Supported: {', '.join(ASSETS)}")
+    return key
+
+
+def notice(asset: str) -> str:
+    return f"""Ollama
 ------
 This application bundles an unmodified Ollama runtime ({OLLAMA_VERSION},
-{ASSET}).
+{asset}).
 
 Ollama is free software licensed under the MIT License. Video Factory starts
 it as a separate program on a private port and does not link against it.
 
 Source code and releases:
     https://github.com/ollama/ollama
-    {BUILD_URL}
+    {RELEASE_BASE}/{asset}
 
 ---
 
@@ -125,16 +157,99 @@ def _extract_within(archive: zipfile.ZipFile, dest: Path) -> None:
             shutil.copyfileobj(src, out)
 
 
-def _installed_version() -> str | None:
-    stamp = DEST / STAMP
+def _extract_member_within(t: tarfile.TarFile, member: tarfile.TarInfo, dest: Path) -> None:
+    """Extract one tar member into `dest`, refusing anything that escapes it.
+
+    The tar counterpart of _extract_within(). Checked by hand rather than with
+    tarfile's "data" filter because that only exists from Python 3.11.4 and a
+    build machine may have older; the filter is still applied where it exists.
+
+    Resolving the target follows any symlink an EARLIER member created, so a
+    link pointing outside cannot be used to redirect a later file through it.
+    The macOS archive does carry symlinks (libggml.dylib -> libggml.0.dylib),
+    so links must work, but only ones that stay inside.
+    """
+    root = dest.resolve()
+    target = (root / member.name).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError(f"archive entry escapes the destination: {member.name}")
+    if member.issym():
+        link = (target.parent / member.linkname).resolve()
+    elif member.islnk():
+        link = (root / member.linkname).resolve()
+    else:
+        link = None
+    if link is not None and not link.is_relative_to(root):
+        raise ValueError(f"archive link points outside the destination: {member.name}")
+    if member.isdev():
+        raise ValueError(f"archive contains a device file: {member.name}")
+    member.mode &= 0o755  # no setuid/setgid/sticky, nothing group- or world-writable
+    if hasattr(tarfile, "data_filter"):
+        t.extract(member, dest, filter="data")
+    else:
+        t.extract(member, dest)
+
+
+def _extract_tar_within(path: Path, dest: Path, zstd: bool) -> None:
+    """Unpack a tar (optionally zstd-compressed) into `dest`, member by member."""
+    if not zstd:
+        with tarfile.open(path, "r:*") as t:
+            for member in t:
+                _extract_member_within(t, member, dest)
+        return
     try:
-        return stamp.read_text(encoding="utf-8").strip()
+        import zstandard
+    except ImportError:
+        raise SystemExit("Extracting .tar.zst needs the zstandard package: "
+                         "pip install -r requirements-build.txt") from None
+    with open(path, "rb") as raw:
+        with zstandard.ZstdDecompressor().stream_reader(raw) as stream:
+            with tarfile.open(fileobj=stream, mode="r|") as t:
+                for member in t:
+                    _extract_member_within(t, member, dest)
+
+
+def _installed_version() -> str | None:
+    try:
+        return (DEST / STAMP).read_text(encoding="utf-8").strip()
     except OSError:
         return None
 
 
+def _expected_sha(asset: str) -> str | None:
+    """`asset`'s SHA-256 from the release's own sha256sum.txt, if reachable.
+
+    A mirror, a proxy or a bad download can all hand back the wrong bytes under
+    the right name. None when the list cannot be fetched: the caller warns and
+    carries on rather than making a flaky network fail every build.
+    """
+    try:
+        with urllib.request.urlopen(f"{RELEASE_BASE}/sha256sum.txt", timeout=60) as r:
+            for line in r.read().decode("utf-8", "replace").splitlines():
+                digest, _, name = line.strip().partition(" ")
+                if name.strip().lstrip("*") == asset:
+                    return digest.lower()
+    except Exception:
+        pass
+    return None
+
+
+def _download_to(url: str, path: Path) -> str:
+    """Stream `url` to `path` and return its SHA-256. Streaming, because the
+    Linux asset is 1.4 GB and holding it in memory just to hash it is waste."""
+    h = hashlib.sha256()
+    with urllib.request.urlopen(url, timeout=600) as r, open(path, "wb") as out:
+        while chunk := r.read(1 << 20):
+            h.update(chunk)
+            out.write(chunk)
+    return h.hexdigest()
+
+
 def fetch(force: bool = False) -> int:
-    exe = DEST / "ollama.exe"
+    asset, kind, exe_rel = ASSETS[target_key()]
+    url = f"{RELEASE_BASE}/{asset}"
+    exe = DEST / exe_rel
+
     if exe.exists() and _installed_version() == OLLAMA_VERSION and not force:
         total = sum(p.stat().st_size for p in DEST.rglob("*") if p.is_file())
         print(f"  present: {exe} ({OLLAMA_VERSION}, {total / 1e6:.0f} MB total)")
@@ -151,33 +266,49 @@ def fetch(force: bool = False) -> int:
     DEST.mkdir(parents=True, exist_ok=True)
 
     print(f"Downloading Ollama {OLLAMA_VERSION}")
-    print(f"  {BUILD_URL}")
-    try:
-        with urllib.request.urlopen(BUILD_URL, timeout=600) as r:
-            blob = r.read()
-    except Exception as e:
-        print(f"\nDownload failed: {type(e).__name__}: {e}")
-        latest = _latest_tag()
-        if latest and latest != OLLAMA_VERSION:
-            print(f"The newest published release is {latest}.")
-            print(f"If {OLLAMA_VERSION} was withdrawn, set OLLAMA_VERSION to {latest} in this file.")
-        print("Or fetch it by hand and unzip it into:")
-        print(f"  {DEST}")
-        return 1
-    print(f"  got {len(blob) / 1e6:.0f} MB")
+    print(f"  {url}")
+    with tempfile.TemporaryDirectory(dir=DEST.parent) as tmp:
+        archive = Path(tmp) / asset
+        try:
+            got = _download_to(url, archive)
+        except Exception as e:
+            print(f"\nDownload failed: {type(e).__name__}: {e}")
+            latest = _latest_tag()
+            if latest and latest != OLLAMA_VERSION:
+                print(f"The newest published release is {latest}.")
+                print(f"If {OLLAMA_VERSION} was withdrawn, set OLLAMA_VERSION to {latest} in this file.")
+            print("Or fetch it by hand and unpack it into:")
+            print(f"  {DEST}")
+            return 1
+        print(f"  got {archive.stat().st_size / 1e6:.0f} MB")
 
-    # Extract everything, not a chosen few files: ollama.exe is useless on its
-    # own. The GPU runners and the CUDA libraries beside it under lib/ are what
-    # make it faster than CPU inference, and they must keep their layout.
-    with zipfile.ZipFile(io.BytesIO(blob)) as z:
-        _extract_within(z, DEST)
+        want = _expected_sha(asset)
+        if want is None:
+            print("  WARNING: could not read sha256sum.txt, so this download is unverified")
+        elif want != got:
+            print(f"\nSHA-256 mismatch for {asset}\n  expected {want}\n  got      {got}")
+            shutil.rmtree(DEST, ignore_errors=True)
+            return 1
+        else:
+            print("  sha256 verified against the release's sha256sum.txt")
+
+        # Extract everything, not a chosen few files: the executable is useless
+        # on its own. The GPU runners and libraries beside it are what make it
+        # faster than CPU inference, and they must keep their layout.
+        if kind == "zip":
+            with zipfile.ZipFile(archive) as z:
+                _extract_within(z, DEST)
+        else:
+            _extract_tar_within(archive, DEST, zstd=kind == "tar.zst")
 
     if not exe.exists():
-        print(f"\n{ASSET} did not contain ollama.exe — archive layout changed?")
+        print(f"\n{asset} did not contain {exe_rel} — archive layout changed?")
         return 1
+    if sys.platform != "win32":
+        exe.chmod(0o755)
 
     (DEST / STAMP).write_text(OLLAMA_VERSION, encoding="utf-8")
-    (DEST / "README-OLLAMA.txt").write_text(NOTICE, encoding="utf-8")
+    (DEST / "README-OLLAMA.txt").write_text(notice(asset), encoding="utf-8")
     total = sum(p.stat().st_size for p in DEST.rglob("*") if p.is_file())
     print(f"  extracted {total / 1e6:.0f} MB to {DEST}")
     print(f"  wrote {DEST / 'README-OLLAMA.txt'}")

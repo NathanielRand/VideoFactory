@@ -12,6 +12,7 @@
 # every print() in the pipeline into a crash. Electron passes windowsHide so
 # no console window is ever shown to the user.
 
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
@@ -61,6 +62,11 @@ hiddenimports += [
     "googleapiclient",
     "googleapiclient.discovery",
 ]
+
+# macOS Keychain access for core/secrets.py; imported lazily, so invisible to
+# the analyser. Only installed on darwin (see requirements.txt).
+if sys.platform == "darwin":
+    hiddenimports += ["keyring", "keyring.backends.macOS"]
 
 # Config the app reads from disk at runtime. Prompts especially: they are
 # plain text on purpose so they can be tuned without touching code, and that

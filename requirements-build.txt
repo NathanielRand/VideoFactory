@@ -6,3 +6,5 @@
 # The app's own dependencies are in requirements.txt.
 
 pyinstaller>=6.21.0
+# Unpacks Ollama's Linux .tar.zst in scripts/fetch_ollama.py (build machines only).
+zstandard>=0.23,<1

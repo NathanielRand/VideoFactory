@@ -203,3 +203,24 @@ def test_yolo_weights_are_never_loaded_by_bare_name():
         "directory and then download; wrap it in core.binaries.yolo_weights(): "
         f"{offenders}"
     )
+
+
+def test_the_linux_ollama_layout_with_a_bin_folder_is_found(monkeypatch, tmp_path):
+    """Ollama's Linux build keeps bin/ollama beside lib/ollama/, and the
+    executable finds its GPU libraries relative to itself, so the packaged
+    layout cannot be flattened."""
+    exe_dir = tmp_path / "backend"
+    bin_dir = exe_dir / "_internal" / "ollama" / "bin"
+    bin_dir.mkdir(parents=True)
+    name = "ollama.exe" if os.name == "nt" else "ollama"
+    bundled = bin_dir / name
+    bundled.write_text("")
+
+    monkeypatch.setattr(binaries.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(binaries.sys, "executable", str(exe_dir / "api"))
+    monkeypatch.delenv("VIDEO_FACTORY_OLLAMA", raising=False)
+    binaries._resolve.cache_clear()
+
+    assert binaries.ollama() == str(bundled)
+    assert binaries.has_bundled_ollama()
+    binaries._resolve.cache_clear()

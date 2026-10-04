@@ -66,9 +66,11 @@ def _resolve(name: str, folder: str) -> str:
 
     filename = host.exe_name(name)
     for root in _search_roots(folder):
-        candidate = root / filename
-        if candidate.exists():
-            return str(candidate)
+        # bin/ too: the Linux Ollama build keeps its own bin/ + lib/ layout,
+        # and the executable finds its libraries relative to itself.
+        for candidate in (root / filename, root / "bin" / filename):
+            if candidate.exists():
+                return str(candidate)
 
     return shutil.which(name) or name
 
@@ -106,7 +108,8 @@ def has_bundled_ollama() -> bool:
     start it.
     """
     filename = host.exe_name("ollama")
-    return any((root / filename).exists() for root in _search_roots("ollama"))
+    return any((root / sub / filename).exists()
+               for root in _search_roots("ollama") for sub in (".", "bin"))
 
 
 # faster-whisper writes several files per model; this is the big one, and its
