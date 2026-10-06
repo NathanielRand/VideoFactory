@@ -28,7 +28,9 @@ const YES = args.has('--yes')
 const NO_MODEL = args.has('--no-model')
 
 const OS = process.platform // 'darwin' | 'win32' | 'linux'
-const MODEL = 'gemma:7b' // the model the scoring is tuned on (README)
+// Fallback only. The real pick comes from the app's own hardware table (llm/manager.py) so this
+// and the in-app setup wizard can never recommend different models.
+const FALLBACK_MODEL = 'gemma:7b'
 const venvPython =
   OS === 'win32' ? join(root, '.venv', 'Scripts', 'python.exe') : join(root, '.venv', 'bin', 'python')
 const venvStamp = join(root, '.venv', '.setup-stamp')
@@ -170,6 +172,15 @@ if (NO_MODEL) {
 } else if (!has('ollama')) {
   warn('Ollama is not installed, so the local model cannot be checked')
 } else {
+  let MODEL = FALLBACK_MODEL
+  if (existsSync(venvPython)) {
+    const r = sh(venvPython, ['-c', "import json;from llm.manager import detect_model_memory as d,recommend_for as r;print(json.dumps([r(d()[0])['model'],d()[1]]))"])
+    try {
+      const [model, hw] = JSON.parse(r.stdout.trim().split(/\r?\n/).pop())
+      MODEL = model
+      if (hw) note(`Detected: ${hw}`)
+    } catch { /* keep the fallback */ }
+  }
   const ollamaUp = () => has('ollama', ['list'])
   const haveModel = () => out('ollama', ['list']).split(/\r?\n/).some((l) => l.startsWith(`${MODEL} `))
   if (!ollamaUp() && !CHECK) {
@@ -186,7 +197,7 @@ if (NO_MODEL) {
   } else if (CHECK) {
     fail(`${MODEL} is not downloaded`)
     results.push('model')
-  } else if (await confirm(`Download ${MODEL} (about 5 GB)?`)) {
+  } else if (await confirm(`Download ${MODEL} (several GB)?`)) {
     if (live('ollama', ['pull', MODEL])) ok(`${MODEL} downloaded`)
     else { fail('Download failed. Run `ollama pull ' + MODEL + '` later.'); results.push('model') }
   } else {

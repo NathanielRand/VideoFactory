@@ -84,6 +84,42 @@ OTHER_MODELS = [
 ]
 
 
+def detect_model_memory() -> tuple[float | None, str]:
+    """(GB a model can use, a label for the setup screen) for this machine.
+
+    NVIDIA: the card's VRAM. Apple Silicon: the GPU shares system memory and
+    macOS lets it wire roughly 60% of it, so that is what Ollama can really
+    use. Without this every Mac was told "No graphics card detected" and given
+    the 4B CPU model, even a 64 GB one. Anything else: None (CPU advice).
+    """
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            vram = pynvml.nvmlDeviceGetMemoryInfo(handle).total / 1e9
+            name = pynvml.nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", "replace")
+        finally:
+            pynvml.nvmlShutdown()
+        return vram, str(name)
+    except Exception:
+        pass  # no NVIDIA GPU, or the library isn't available
+    import platform
+
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        try:
+            import psutil
+
+            total_gb = psutil.virtual_memory().total / 1e9
+            return total_gb * 0.6, f"Apple Silicon, {total_gb:.0f} GB unified memory"
+        except Exception:
+            return None, "Apple Silicon"
+    return None, ""
+
+
 def recommend_for(vram_gb: float | None) -> dict:
     """The model to suggest for this machine, from the table above.
 

@@ -71,6 +71,7 @@ export default function SetupWizard({ onClose }: { onClose: () => void }): JSX.E
   const [pre, setPre] = useState<Preflight | null>(null)
   const [stats, setStats] = useState<SystemStats | null>(null)
   const [rec, setRec] = useState<{ model: string; reason: string } | null>(null)
+  const [hardware, setHardware] = useState('')
   const [checking, setChecking] = useState(false)
   const [pullStatus, setPullStatus] = useState<string | null>(null)
   const [pullPct, setPullPct] = useState<number | null>(null)
@@ -91,6 +92,7 @@ export default function SetupWizard({ onClose }: { onClose: () => void }): JSX.E
       setPre(p)
       if (s) setStats(s)
       if (m?.recommended) setRec(m.recommended)
+      if (m?.hardware) setHardware(m.hardware)
     } catch (e) {
       setError(
         'Could not reach the Video Factory engine. If you just installed, give it a few seconds and try again.'
@@ -230,7 +232,11 @@ export default function SetupWizard({ onClose }: { onClose: () => void }): JSX.E
                 <>
                   <div className="mt-4 bg-raised/40 border border-raised rounded-lg px-4 py-3">
                     <p className="text-xs text-muted">
-                      {stats?.gpu ? `Detected: ${stats.gpu.name}` : 'No graphics card detected'}
+                      {hardware
+                        ? `Detected: ${hardware}`
+                        : stats?.gpu
+                          ? `Detected: ${stats.gpu.name}`
+                          : 'No graphics card detected'}
                     </p>
                     <p className="text-sm font-semibold mt-1">
                       {modelOk

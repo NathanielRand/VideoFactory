@@ -2950,6 +2950,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         from llm.manager import (
             OTHER_MODELS,
             RECOMMENDATIONS,
+            detect_model_memory,
             installed_models,
             recommend_for,
         )
@@ -2961,16 +2962,13 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
         # Pick the model for THIS machine server-side, so the setup wizard and
         # the Models page can never give contradictory advice.
-        vram_gb = None
-        try:
-            import pynvml
-
-            pynvml.nvmlInit()
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            vram_gb = pynvml.nvmlDeviceGetMemoryInfo(handle).total / 1e9
-            pynvml.nvmlShutdown()
-        except Exception:
-            pass  # no NVIDIA GPU, or the library isn't available — CPU advice
+        vram_gb, hardware = detect_model_memory()
+        rec = recommend_for(vram_gb)
+        if hardware.startswith("Apple"):
+            # Unified memory, not a card's VRAM: say what the number means.
+            rec["reason"] = rec["reason"].replace(
+                "of VRAM", "of GPU-usable memory"
+            )
 
         return {
             "active": config["llm"]["backend"],
@@ -2984,7 +2982,8 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             "other_models": [
                 {"purpose": p, "model": m, "note": n} for p, m, n in OTHER_MODELS
             ],
-            "recommended": recommend_for(vram_gb),
+            "recommended": rec,
+            "hardware": hardware,
         }
 
     @app.post("/models/activate")

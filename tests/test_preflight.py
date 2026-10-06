@@ -361,3 +361,46 @@ def test_every_recommendation_explains_itself():
     for vram in (None, 0, 6, 12, 24):
         rec = recommend_for(vram)
         assert rec["model"] and rec["reason"]
+
+
+def _no_nvidia(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pynvml", None)  # import raises ImportError
+
+
+def test_apple_silicon_is_sized_by_unified_memory(monkeypatch):
+    """A Mac has no NVML. It used to read as "no graphics card" and get the 4B
+    CPU model whatever its memory."""
+    import platform
+
+    import psutil
+
+    from llm.manager import detect_model_memory, recommend_for
+
+    _no_nvidia(monkeypatch)
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+
+    class Mem:
+        total = 16e9
+
+    monkeypatch.setattr(psutil, "virtual_memory", lambda: Mem)
+    gb, label = detect_model_memory()
+    assert label == "Apple Silicon, 16 GB unified memory"
+    assert recommend_for(gb)["model"] == "gemma:7b"
+
+    Mem.total = 8e9
+    assert recommend_for(detect_model_memory()[0])["model"] == "gemma4:e2b"
+    Mem.total = 64e9
+    assert recommend_for(detect_model_memory()[0])["model"] == "gemma3:27b"
+
+
+def test_no_gpu_and_not_a_mac_stays_cpu_advice(monkeypatch):
+    import platform
+
+    from llm.manager import detect_model_memory
+
+    _no_nvidia(monkeypatch)
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    assert detect_model_memory() == (None, "")

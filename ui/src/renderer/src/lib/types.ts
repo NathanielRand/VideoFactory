@@ -444,6 +444,8 @@ export interface ModelsInfo {
   /** The one model to suggest for THIS machine, chosen server-side from the
    *  same table as `recommendations` so nothing can contradict it. */
   recommended?: { model: string; reason: string }
+  /** e.g. "NVIDIA GeForce RTX 4070" or "Apple Silicon, 16 GB unified memory"; empty if none */
+  hardware?: string
 }
 
 export interface GpuStats {
