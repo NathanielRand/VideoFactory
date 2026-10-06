@@ -273,6 +273,15 @@ export default function SetupWizard({ onClose }: { onClose: () => void }): JSX.E
                     )}
                   </div>
 
+                  {/* Whisper has no Metal backend, so on a Mac the speech-to-text stage
+                      runs on the processor. Say so before the first video, not after. */}
+                  {hardware.startsWith('Apple') && (
+                    <p className="text-xs text-muted mt-3 leading-relaxed">
+                      On a Mac, transcription runs on the processor, so it is the slowest part
+                      of a video. Finding and rendering clips use the Apple GPU.
+                    </p>
+                  )}
+
                   <div className="mt-4">
                     {pre.checks.map((c) => (
                       <CheckRow key={c.name} check={c} />
