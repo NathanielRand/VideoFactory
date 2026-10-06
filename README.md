@@ -53,6 +53,18 @@ Packaged apps (a Windows installer, a macOS `.dmg`, a Linux `.AppImage` or `.deb
 come from `python scripts/build_installer.py` on that OS, or from the **Build
 desktop** workflow on GitHub. See [Building an installable app](#building-an-installable-app).
 
+### The quick way
+
+```sh
+node start.mjs
+```
+
+On first run this walks through setup step by step: system tools (installed with Homebrew on
+macOS; elsewhere it tells you what to install), the `.venv` with PyTorch and `requirements.txt`,
+the `gemma:7b` model, and the UI dependencies. It then launches the app. Each step is skipped when
+already done. Flags: `--check` (report only), `--setup` (redo the Python environment), `--yes`
+(no prompts), `--no-model` (skip the model download). The manual steps below do the same thing.
+
 ### Windows
 
 ```powershell
