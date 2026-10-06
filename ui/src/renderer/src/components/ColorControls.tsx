@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useClipRendering } from '../lib/clipWork'
 import { api } from '../lib/api'
 import type { Adjust, Clip } from '../lib/types'
 import FilterPicker, { FILTER_CSS } from './FilterPicker'
@@ -51,6 +52,7 @@ export default function ColorControls({
   const [clipFilter, setClipFilter] = useState(renderedFilter)
   const [adjust, setAdjust] = useState<Required<Adjust>>(renderedAdjust)
   const [busy, setBusy] = useState(false)
+  const rendering = useClipRendering(clip.id)
   const [notice, setNotice] = useState('')
 
   useEffect(() => {
@@ -153,7 +155,7 @@ export default function ColorControls({
       {dirty && (
         <button
           className="btn-accent w-full"
-          disabled={busy}
+          disabled={busy || rendering}
           onClick={async () => {
             setBusy(true)
             try {
@@ -167,7 +169,7 @@ export default function ColorControls({
             }
           }}
         >
-          {busy ? 'Queueing…' : 'Apply color changes (re-render)'}
+          {busy ? 'Queueing…' : rendering ? 'Rendering…' : 'Apply color changes (re-render)'}
         </button>
       )}
       {notice && <p className="text-xs text-muted">{notice}</p>}

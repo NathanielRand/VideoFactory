@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import AsyncButton from '../components/AsyncButton'
+import { useAction } from '../lib/useAction'
 import { api } from '../lib/api'
 import AICard from '../components/AICard'
 import ModelGradeBadge from '../components/ModelGradeBadge'
@@ -44,6 +46,7 @@ export default function Models(): JSX.Element {
   const [offline, setOffline] = useState(false)
   const [pullTag, setPullTag] = useState('')
   const [pullStatus, setPullStatus] = useState<string | null>(null)
+  const starting = useAction()
   const [busy, setBusy] = useState<string | null>(null)
   // For the "won't fit your card" warning — the one speed difference big
   // enough that people report it as the app being broken.
@@ -124,9 +127,15 @@ export default function Models(): JSX.Element {
 
   const pull = async (): Promise<void> => {
     if (!pullTag.trim()) return
-    setPullStatus(`${pullTag}: starting…`)
-    await api.pullModel(pullTag.trim())
-    setPullTag('')
+    await starting.run(async () => {
+      setPullStatus(`${pullTag}: starting…`)
+      try {
+        await api.pullModel(pullTag.trim())
+        setPullTag('')
+      } catch (e) {
+        setPullStatus(`Could not start: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    })
   }
 
   if (offline) {
@@ -196,11 +205,18 @@ export default function Models(): JSX.Element {
             placeholder="e.g. gemma3:12b"
             value={pullTag}
             onChange={(e) => setPullTag(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && pull()}
+            onKeyDown={(e) => e.key === 'Enter' && void pull()}
           />
-          <button className="btn-accent" onClick={pull}>
+          {/* Locked from the press until the download ends, not just until it starts. */}
+          <AsyncButton
+            className="btn-accent"
+            busyLabel="Downloading…"
+            holdWhile={pullStatus !== null && !/failed|Could not/.test(pullStatus)}
+            disabled={!pullTag.trim()}
+            onClick={pull}
+          >
             Download
-          </button>
+          </AsyncButton>
         </div>
         <TagGrade tag={pullTag} withText />
         {pullStatus && <p className="text-sm text-accent">{pullStatus}</p>}

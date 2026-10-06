@@ -83,6 +83,7 @@ export interface LiveOverlay {
   hook: { text: string; seconds: number } | null
   captions: { lines: CaptionLine[]; style: Required<CaptionStyle> } | null
   bakedKeep?: [number, number][] // edits already burned into the preview file
+  bakedOverlap?: number // seconds each join of bakedKeep overlaps (crossfade)
   keep: [number, number][] // current pending edit — for hook timing
   // What's ALREADY burned into the preview file, so the overlay can mask it
   // with a blur strip while pending text is shown on top (otherwise the old
@@ -189,6 +190,8 @@ export interface MutedWord {
  *  relative to the clip start, on the clip's ORIGINAL timeline. */
 export interface EditData {
   keep?: [number, number][]
+  /** Crossfade seconds between kept sections (0 or absent = hard cut). */
+  transition?: number
   mutes: [number, number][]
   muted_words: MutedWord[]
   volume: number
@@ -207,7 +210,7 @@ export interface Word {
 }
 
 export interface RenderOpts {
-  crop?: 'track' | 'center' | 'bias_left' | 'bias_right' | 'letterbox'
+  crop?: 'track' | 'center' | 'bias_left' | 'bias_right' | 'letterbox' | 'lock'
   captions?: boolean
   caption_style?: CaptionStyle
   caption_lines?: CaptionLine[]
@@ -338,6 +341,8 @@ export interface QueueJob {
   url: string
   settings: JobOptions
   interrupted: 0 | 1
+  /** A cancel was requested and is waiting for the job's next checkpoint. */
+  cancelling?: boolean
   attempts: number
   started_at: string
   finished_at: string

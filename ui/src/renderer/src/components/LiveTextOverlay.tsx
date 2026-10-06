@@ -31,6 +31,7 @@ export default function LiveTextOverlay({
 
   // Follow playback on rAF (timeupdate is too coarse for 1-3 word captions).
   const bakedKeep = overlay?.bakedKeep
+  const bakedOverlap = overlay?.bakedOverlap ?? 0
   useEffect(() => {
     if (!overlay) return
     let raf = 0
@@ -39,7 +40,7 @@ export default function LiveTextOverlay({
       raf = requestAnimationFrame(tick)
       const el = videoRef.current
       if (!el) return
-      const tOrig = bakedToOrig(el.currentTime, bakedKeep)
+      const tOrig = bakedToOrig(el.currentTime, bakedKeep, bakedOverlap)
       // A caption changes a few times a second, so playing needs a redraw about
       // fifteen times a second, not on every frame (that was fifty). A seek
       // while paused still shows at once.
@@ -50,7 +51,7 @@ export default function LiveTextOverlay({
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [videoRef, bakedKeep, overlay === null])
+  }, [videoRef, bakedKeep, bakedOverlap, overlay === null])
 
   if (!overlay || (!overlay.hook && !overlay.captions)) return null
 

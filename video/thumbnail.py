@@ -415,8 +415,13 @@ def pick_frames(video: Path, count: int = 6, start: float = 0.0, duration: float
         return rank_frames(list(rows.values()))[:count]
 
 
-def generate(video_path: Path, hook: str, targets: list[Path]) -> list[Path]:
+def generate(
+    video_path: Path, hook: str, targets: list[Path], channel: str = ""
+) -> list[Path]:
     """Write up to len(targets) thumbnail candidates. Returns what was written.
+
+    `channel` is the creator the clip came from; when given it is credited as
+    "@channel" in the top-left corner.
 
     Best candidate first. An empty list means nothing usable came out, which
     is a normal outcome and not an error.
@@ -454,6 +459,7 @@ def generate(video_path: Path, hook: str, targets: list[Path]) -> list[Path]:
     scored.sort(key=lambda row: row[0], reverse=True)
 
     lines = wrap_title(hook)
+    handle = handle_text(channel)
     written: list[Path] = []
     for (_score, frame, face), target in zip(scored, targets):
         left, top, right, bottom = crop_box(frame.shape[1], frame.shape[0], face)
@@ -463,6 +469,8 @@ def generate(video_path: Path, hook: str, targets: list[Path]) -> list[Path]:
         )
         if lines:
             _draw_title(ImageDraw.Draw(image, "RGBA"), lines)
+        if handle:
+            _draw_handle(ImageDraw.Draw(image, "RGBA"), handle)
         target.parent.mkdir(parents=True, exist_ok=True)
         # Quality stepped down only if needed: YouTube refuses over 2 MB, and a
         # 1280x720 JPEG is nowhere near it until the picture is very noisy.
@@ -472,6 +480,33 @@ def generate(video_path: Path, hook: str, targets: list[Path]) -> list[Path]:
                 break
         written.append(target)
     return written
+
+
+def handle_text(channel: str) -> str:
+    """"@name" for a channel or creator name, or "" when there is none.
+
+    Handles have no spaces, so "Some Creator" reads as @SomeCreator. A name that
+    already starts with "@" is not given a second one.
+    """
+    name = "".join((channel or "").split()).lstrip("@")
+    return f"@{name}" if name else ""
+
+
+def _draw_handle(draw, handle: str) -> None:
+    """The credit, top-left on a dark pill: opposite the bottom title band, and
+    clear of the corner the platforms overlay the duration badge on."""
+    font = _font(40)
+    if font is None:
+        return
+    box = draw.textbbox((0, 0), handle, font=font, stroke_width=2)
+    w, h = box[2] - box[0], box[3] - box[1]
+    pad, margin = 16, 28
+    draw.rounded_rectangle(
+        [(margin, margin), (margin + w + 2 * pad, margin + h + 2 * pad)],
+        radius=14, fill=(0, 0, 0, 150),
+    )
+    draw.text((margin + pad - box[0], margin + pad - box[1]), handle, font=font,
+              fill=(255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0))
 
 
 def _draw_title(draw, lines: list[str]) -> None:

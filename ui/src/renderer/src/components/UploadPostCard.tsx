@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import AsyncButton from './AsyncButton'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { PLATFORMS, type UploadPostStatus } from '../lib/uploadpost'
@@ -303,9 +304,9 @@ export default function UploadPostCard(): JSX.Element {
                     <span className="text-muted"> ····{status.key_tail}</span>
                   )}
                 </span>
-                <button className="btn-ghost !py-1 !px-3 text-xs" onClick={() => void removeKey()}>
+                <AsyncButton className="btn-ghost !py-1 !px-3 text-xs" busyLabel={t('Removing…')} onClick={removeKey}>
                   {t('Remove')}
-                </button>
+                </AsyncButton>
                 {status.storage && (
                   <span className="text-[11px] text-muted">
                     {t('Stored with')} {status.storage}

@@ -40,7 +40,7 @@ def apply_edits(
         audio_label = "amuted"
 
     if edit.keep is not None:
-        cut_graph, video_out, audio_out = concat_graph(edit.keep, audio_label)
+        cut_graph, video_out, audio_out = concat_graph(edit.keep, audio_label, edit.overlap())
         graph_parts.append(cut_graph)
     else:
         video_out = "[0:v]"

@@ -166,7 +166,7 @@ export default function Watch({
   }
 
   const add = async (): Promise<void> => {
-    if (!channel.trim()) return
+    if (!channel.trim() || adding) return
     setAdding(true)
     setError(null)
     try {

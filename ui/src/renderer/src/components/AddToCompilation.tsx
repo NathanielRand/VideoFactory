@@ -48,6 +48,7 @@ export default function AddToCompilation({
   }, [videoId, start, end, segments?.length])
 
   const add = async (comp: Compilation | null): Promise<void> => {
+    if (busy) return // Enter in the title box skips the button's own lock
     setBusy(true)
     setError('')
     try {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
+import { useAction } from '../lib/useAction'
 import Popover from './Popover'
 import {
   EMOJIS,
@@ -74,6 +75,8 @@ export default function ThumbnailStudio({
   const [ideas, setIdeas] = useState<string[]>([])
   const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [error, setError] = useState('')
+  // Templates and re-cuts run the AI cut-out, which takes seconds: one at a time.
+  const cutting = useAction()
   const [notice, setNotice] = useState('')
   const [showSafe, setShowSafe] = useState(true)
   const [dirty, setDirty] = useState(false)
@@ -559,7 +562,8 @@ export default function ThumbnailStudio({
           <button
             key={tpl.id}
             className="btn-ghost !py-1 !px-2 text-xs"
-            onClick={() => void applyTemplate(tpl.id)}
+            disabled={cutting.busy}
+            onClick={() => void cutting.run(() => applyTemplate(tpl.id))}
             title={tpl.needsCutout ? t('Uses the AI subject cut-out') : ''}
           >
             {tpl.needsCutout ? '✨ ' : ''}
@@ -732,7 +736,7 @@ export default function ThumbnailStudio({
               <AddButton onClick={() => addLayer(shapeLayer('ring'))}>◯ {t('Ring')}</AddButton>
               <AddButton onClick={() => addLayer(shapeLayer('box'))}>▭ {t('Box')}</AddButton>
             </div>
-            <div className="flex flex-wrap gap-1">
+            <div className="flex flex-wrap gap-1 max-h-40 overflow-y-auto">
               {EMOJIS.map((em) => (
                 <button
                   key={em}
@@ -839,8 +843,12 @@ export default function ThumbnailStudio({
                 {cutFromElsewhere && (
                   <p className="text-[11px] text-warn">
                     {t('This cut-out is from another moment than the background.')}{' '}
-                    <button className="underline" onClick={() => void recut(layer.id)}>
-                      {t('Re-cut at this frame')}
+                    <button
+                      className="underline disabled:opacity-50"
+                      disabled={cutting.busy}
+                      onClick={() => void cutting.run(() => recut(layer.id))}
+                    >
+                      {cutting.busy ? t('Cutting…') : t('Re-cut at this frame')}
                     </button>
                   </p>
                 )}
@@ -1109,8 +1117,8 @@ function Common({
       <Slider
         label={t('Rotate')}
         value={layer.rotation}
-        min={-45}
-        max={45}
+        min={-180}
+        max={180}
         onChange={(v) => onChange({ rotation: v })}
         format={(v) => `${Math.round(v)}°`}
       />
@@ -1549,7 +1557,7 @@ function ShapePanel({
   return (
     <div className="space-y-2">
       {l.shape === 'emoji' ? (
-        <div className="flex flex-wrap gap-1">
+        <div className="flex flex-wrap gap-1 max-h-40 overflow-y-auto">
           {EMOJIS.map((em) => (
             <button
               key={em}

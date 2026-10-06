@@ -49,10 +49,13 @@ export default function ActionButton({
   /** Replaces the cost line while the action is unavailable. */
   disabledReason?: string
   busy?: boolean
-  onClick: () => void
+  onClick: () => void | Promise<unknown>
 }): JSX.Element {
   const ref = useRef<HTMLButtonElement>(null)
   const [tip, setTip] = useState<{ x: number; y: number; below: boolean } | null>(null)
+  // A handler that returns a promise keeps the button locked until it settles.
+  const [pending, setPending] = useState(false)
+  const locked = useRef(false)
 
   const show = (): void => {
     const r = ref.current?.getBoundingClientRect()
@@ -69,17 +72,28 @@ export default function ActionButton({
         ref={ref}
         type="button"
         aria-label={label}
-        aria-disabled={disabled || busy}
-        disabled={disabled || busy}
+        aria-disabled={disabled || busy || pending}
+        aria-busy={busy || pending}
+        disabled={disabled || busy || pending}
         onClick={() => {
           hide()
-          onClick()
+          if (locked.current) return
+          const out = onClick()
+          if (out && typeof (out as Promise<unknown>).then === 'function') {
+            locked.current = true
+            setPending(true)
+            const done = (): void => {
+              locked.current = false
+              setPending(false)
+            }
+            void (out as Promise<unknown>).then(done, done)
+          }
         }}
         onMouseEnter={show}
         onMouseLeave={hide}
         onFocus={show}
         onBlur={hide}
-        className={`size-8 grid place-items-center rounded-lg transition-colors disabled:opacity-35 disabled:hover:bg-transparent disabled:cursor-not-allowed ${TONE[tone]} ${busy ? 'animate-pulse' : ''}`}
+        className={`size-8 grid place-items-center rounded-lg transition-colors disabled:opacity-35 disabled:hover:bg-transparent disabled:cursor-not-allowed ${TONE[tone]} ${busy || pending ? 'animate-pulse' : ''}`}
       >
         {icon}
       </button>

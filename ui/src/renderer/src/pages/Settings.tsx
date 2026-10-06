@@ -24,6 +24,7 @@ import {
   t
 } from '../lib/i18n'
 import AICard from '../components/AICard'
+import LibraryLocationCard from '../components/LibraryLocationCard'
 import UploadPostCard from '../components/UploadPostCard'
 import WoopSocialCard from '../components/WoopSocialCard'
 import YouTubeCard from '../components/YouTubeCard'
@@ -579,6 +580,7 @@ export default function Settings(): JSX.Element {
 
       <ExportFolderCard />
 
+      <LibraryLocationCard />
       <StorageCard />
       <VideoStorageCard />
 

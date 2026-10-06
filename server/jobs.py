@@ -18,7 +18,7 @@ import time
 import traceback
 from pathlib import Path
 
-from core import cancel, governor, progress, queue
+from core import cancel, governor, progress, queue, storage
 from core.cancel import CancelledError
 from core.paths import discard
 from core.prefetch import Prefetcher
@@ -169,7 +169,7 @@ class Worker(threading.Thread):
             # left alone — throwing away an hour of finished GPU work because
             # someone wants the queue to stop after this one would be its own
             # kind of broken.
-            if queue.is_paused(db):
+            if queue.is_paused(db) or storage.hold.is_set():
                 self._wake.wait(timeout=2.0)
                 self._wake.clear()
                 continue

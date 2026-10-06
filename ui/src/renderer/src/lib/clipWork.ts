@@ -19,6 +19,16 @@ export interface ClipWork {
 const QUICK_MS = 4_000 // while something is in flight: watch it
 const IDLE_MS = 20_000 // otherwise: only catch what an event missed
 
+/** Is this one clip waiting for or in the middle of a render (a re-render, a
+ *  caption or colour change)? Editors lock their Apply buttons on it: the
+ *  request that queued the work returns at once, so without this the same
+ *  button could be pressed again while the first render is still going. */
+export function useClipRendering(clipId: number): boolean {
+  const ids = useMemo(() => [clipId], [clipId])
+  const w = useClipWork(ids)[clipId]
+  return !!w && w.kind === 'render' && w.state !== 'failed'
+}
+
 /** Work in flight per clip id; clips with nothing going on are absent. */
 export function useClipWork(ids: number[]): Record<number, ClipWork> {
   const [work, setWork] = useState<Record<number, ClipWork>>({})

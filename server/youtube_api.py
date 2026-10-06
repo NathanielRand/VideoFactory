@@ -1055,6 +1055,9 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         try:
             _guard(d)
             clip = d.get_publishable(clip_id)
+            from server.publishing_api import creator_of
+
+            channel = creator_of(d, clip) if clip is not None else ""
         finally:
             d.close()
         if clip is None or not clip["path"]:
@@ -1069,7 +1072,7 @@ def install(app, *, config, db, data_dir, worker, publish_worker) -> None:
         targets = [_thumb_path(clip_id, f"gen{i}") for i in range(wanted)]
         for stale in targets:
             stale.unlink(missing_ok=True)
-        made = generate(source, clip["hook"] or clip["title"] or "", targets)
+        made = generate(source, clip["hook"] or clip["title"] or "", targets, channel=channel)
         return {"generated": len(made)}
 
     @app.get("/clips/{clip_id}/thumbnail/generated/{index}")

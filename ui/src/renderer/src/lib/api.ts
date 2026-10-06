@@ -51,7 +51,14 @@ import type { Capabilities, FanOut, PlatformRow, UploadPostStatus } from './uplo
 
 export const API_BASE = 'http://127.0.0.1:8765'
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+// Writes that are on the wire right now, by method + path + body. A second
+// identical write while the first is unanswered (a double click, a spammed
+// Cancel) joins the first instead of being sent again: the platform-wide net
+// under the per-button locks. Reads are never joined, and once an answer
+// arrives the next press is a new request.
+const inFlight = new Map<string, Promise<unknown>>()
+
+async function send<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...init
@@ -61,6 +68,32 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`${res.status} ${path}: ${body.slice(0, 200)}`)
   }
   return res.json() as Promise<T>
+}
+
+function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase()
+  if (method === 'GET' || typeof init?.body === 'object') return send<T>(path, init)
+  const key = `${method} ${path} ${init?.body ?? ''}`
+  const joined = inFlight.get(key)
+  if (joined) return joined as Promise<T>
+  const p = send<T>(path, init).finally(() => inFlight.delete(key))
+  inFlight.set(key, p)
+  return p
+}
+
+export type StorageMode = 'move' | 'fresh' | 'existing'
+
+export interface StorageVolume {
+  mount: string
+  label: string
+  device: string
+  filesystem: string
+  total_bytes: number
+  used_bytes: number
+  free_bytes: number
+  writable: boolean
+  removable: boolean
+  network: boolean
 }
 
 export const api = {
@@ -215,6 +248,47 @@ export const api = {
       total_bytes: number
     }>('/storage/videos'),
 
+  storageLocation: () =>
+    request<{
+      path: string
+      exists: boolean
+      problem: string | null
+      volume: StorageVolume | null
+      parts: { name: string; bytes: number }[]
+      total_bytes: number
+      models_bytes: number
+      move_bytes: number
+      restart_pending: boolean
+      pending_path: string | null
+      locked: boolean
+      fallback_from: string | null
+      fallback_reason: string | null
+    }>('/storage/location'),
+  storageVolumes: () =>
+    request<{ volumes: (StorageVolume & { current: boolean })[] }>('/storage/volumes'),
+  storageCheck: (path: string, mode: StorageMode) =>
+    request<{ ok: boolean; problems: string[]; library_bytes: number }>('/storage/check', {
+      method: 'POST',
+      body: JSON.stringify({ path, mode })
+    }),
+  storageSetLocation: (path: string, mode: StorageMode) =>
+    request<{ started: boolean; restart_required?: boolean }>('/storage/location', {
+      method: 'POST',
+      body: JSON.stringify({ path, mode })
+    }),
+  storageMove: () =>
+    request<{
+      status: 'idle' | 'running' | 'done' | 'error'
+      phase: string
+      done_bytes: number
+      total_bytes: number
+      error: string
+      new_path: string
+      old_path: string
+      rewritten: number
+    }>('/storage/move'),
+  storageResetLocation: () =>
+    request<{ restart_required: boolean }>('/storage/reset', { method: 'POST' }),
   storageCleanup: () =>
     request<{ files_removed: number; bytes_freed: number }>('/storage/cleanup', {
       method: 'POST'
@@ -223,11 +297,19 @@ export const api = {
     request<{ deleted: string }>(`/videos/${videoId}`, { method: 'DELETE' }),
   /** The reasons a clip can be flagged for, grouped for layout. */
   flagReasons: () =>
-    request<{ reasons: { id: string; label: string; group: 'moment' | 'framing' | 'other' }[] }>(
+    request<{
+      reasons: {
+        id: string
+        label: string
+        group: 'moment' | 'framing' | 'other'
+        /** An optional follow-up question that pins the problem down. */
+        detail?: { question: string; options: { id: string; label: string }[] }
+      }[]
+    }>(
       '/flags/reasons'
     ),
   /** Flag a clip that came out wrong; the server keeps what it decided for review. */
-  flagClip: (clipId: number, reasons: string[], note: string) =>
+  flagClip: (clipId: number, reasons: string[], note: string, details: Record<string, string> = {}) =>
     request<{
       id: number
       folder: string
@@ -237,7 +319,7 @@ export const api = {
       recut: { available: boolean; changes: string[] }
     }>(`/clips/${clipId}/flag`, {
       method: 'POST',
-      body: JSON.stringify({ reasons, note })
+      body: JSON.stringify({ reasons, note, details })
     }),
   /** Fix this clip from its own open flags (edges, framing) and render it again. */
   recutClip: (clipId: number) =>

@@ -7,6 +7,7 @@ import { useEvents } from '../lib/useEvents'
 import AddVideos from '../components/queue/AddVideos'
 import QueueItem from '../components/queue/QueueItem'
 import { t } from '../lib/i18n'
+import { useAction } from '../lib/useAction'
 
 /** The processing queue.
  *
@@ -26,7 +27,7 @@ export default function Queue({
 }): JSX.Element {
   const [snapshot, setSnapshot] = useState<QueueSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
+  const { busy, run: lock } = useAction()
   const [adding, setAdding] = useState(false)
   const [confirming, setConfirming] = useState<string | null>(null)
   // Live progress for the running video, shared with the global bar so both
@@ -74,16 +75,17 @@ export default function Queue({
     return () => clearInterval(id)
   }, [refresh])
 
+  // One queue-wide action at a time (Start, Pause, Clear...): a repeat press
+  // while one is working is dropped, and the buttons below read `busy`.
   const act = async (fn: () => Promise<unknown>): Promise<void> => {
-    setBusy(true)
-    try {
-      await fn()
-      await refresh()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
+    await lock(async () => {
+      try {
+        await fn()
+        await refresh()
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e))
+      }
+    })
   }
 
   const paused = snapshot?.paused ?? false

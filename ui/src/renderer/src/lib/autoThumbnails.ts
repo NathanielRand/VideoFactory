@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useRef } from 'react'
 import { autoThumbnail, thumbsApi } from './thumbnails'
 
 // This session's attempts: a clip whose thumbnail could not be made (no
@@ -17,16 +17,22 @@ let running = false
  *  The drawing happens on the page's main thread, so it waits for the page to
  *  settle, does one clip at a time, and leaves a gap between them. */
 export function useAutoThumbnails(clipIds: number[], onMade?: () => void): void {
-  const key = useMemo(() => [...new Set(clipIds)].sort((a, b) => a - b).join(','), [clipIds])
+  // The latest ids and callback, read by a loop that outlives any one render.
+  const ids = useRef<number[]>(clipIds)
+  const made = useRef(onMade)
+  ids.current = clipIds
+  made.current = onMade
 
   useEffect(() => {
-    if (!key) return
     let alive = true
-    const timer = setTimeout(async () => {
+    // Polled, not keyed on the list: a clip is in the list before its file is
+    // rendered, and a list that changed mid-run used to drop the run. Each pass
+    // asks the engine which listed clips are new and ready, and makes them.
+    const pass = async (): Promise<void> => {
       if (running) return
       running = true
       try {
-        const fresh = key.split(',').map(Number).filter((id) => id > 0 && !tried.has(id))
+        const fresh = [...new Set(ids.current)].filter((id) => id > 0 && !tried.has(id))
         if (!fresh.length) return
         const pending = await thumbsApi.pending(fresh).catch(() => [] as number[])
         for (const id of pending) {
@@ -34,7 +40,7 @@ export function useAutoThumbnails(clipIds: number[], onMade?: () => void): void 
           tried.add(id)
           try {
             await autoThumbnail(id)
-            onMade?.()
+            made.current?.()
           } catch {
             /* it stays without one; the publish flow offers to make it */
           }
@@ -43,11 +49,13 @@ export function useAutoThumbnails(clipIds: number[], onMade?: () => void): void 
       } finally {
         running = false
       }
-    }, 2000)
+    }
+    const first = setTimeout(pass, 1500)
+    const timer = setInterval(pass, 5000)
     return () => {
       alive = false
-      clearTimeout(timer)
+      clearTimeout(first)
+      clearInterval(timer)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key])
+  }, [])
 }

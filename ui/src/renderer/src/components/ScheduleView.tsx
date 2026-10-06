@@ -141,7 +141,7 @@ export default function ScheduleView({
               {t('Clear finished')} ({finished})
             </button>
           )}
-          <button className="btn-ghost !py-1 !px-3 text-sm" onClick={() => void refresh()}>
+          <button className="btn-ghost !py-1 !px-3 text-sm" disabled={busy} onClick={() => void refresh()}>
             {busy ? t('Checking…') : t('Refresh')}
           </button>
         </div>

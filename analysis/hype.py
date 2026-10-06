@@ -170,8 +170,12 @@ def _youtube_token_path() -> Path:
     if override:
         return Path(override) / "youtube_token.json"
 
+    from core import storage
     from core.paths import resolve_data_dir
 
+    chosen = storage.read_pointer()
+    if chosen is not None and storage.unavailable_reason(chosen, must_exist=True) is None:
+        return chosen / "youtube_token.json"
     return resolve_data_dir({}) / "youtube_token.json"
 
 

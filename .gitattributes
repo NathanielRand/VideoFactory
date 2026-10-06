@@ -10,3 +10,8 @@ vendor/** linguist-vendored
 *.model binary
 *.mp4  binary
 *.png  binary
+
+# Launchers must keep LF (sh) / CRLF (bat) regardless of checkout settings.
+*.sh  text eol=lf
+*.command text eol=lf
+*.bat text eol=crlf

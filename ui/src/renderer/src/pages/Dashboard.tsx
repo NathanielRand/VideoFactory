@@ -1,3 +1,4 @@
+import AsyncButton from '../components/AsyncButton'
 import AnalyticsSnapshot from '../components/AnalyticsSnapshot'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Assistant from '../components/Assistant'
@@ -546,14 +547,15 @@ export default function Dashboard({
                         {fmtTime(v.process_seconds)}
                       </td>
                       <td className="py-2 text-right">
-                        <button
+                        <AsyncButton
+                          busyLabel=""
                           className="text-muted hover:text-error px-1"
                           onClick={() => remove(v.video_id, v.title || v.video_id)}
                           aria-label={`Delete ${v.title || v.video_id}`}
                           title="Delete this video and its clips"
                         >
                           <Trash />
-                        </button>
+                        </AsyncButton>
                       </td>
                     </tr>
                     {expanded === v.video_id && (

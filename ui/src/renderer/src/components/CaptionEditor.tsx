@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useClipRendering } from '../lib/clipWork'
 import { api } from '../lib/api'
 import type { CaptionLine, CaptionStyle, Clip } from '../lib/types'
 import CaptionStyleControls, { DEFAULT_CAPTION_STYLE } from './CaptionStyleControls'
@@ -21,6 +22,7 @@ export default function CaptionEditor({
   const [burn, setBurn] = useState<boolean>(clip.render_opts?.captions ?? true)
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
+  const rendering = useClipRendering(clip.id)
   const [open, setOpen] = useState(false)
 
   useEffect(() => {
@@ -133,8 +135,8 @@ export default function CaptionEditor({
             )}
           </div>
 
-          <button className="btn-accent w-full" onClick={apply} disabled={busy || !dirty}>
-            {busy ? 'Queueing…' : 'Apply captions & style (re-render)'}
+          <button className="btn-accent w-full" onClick={apply} disabled={busy || rendering || !dirty}>
+            {busy ? 'Queueing…' : rendering ? 'Rendering…' : 'Apply captions & style (re-render)'}
           </button>
         </div>
       )}

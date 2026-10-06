@@ -40,6 +40,35 @@ REASONS: list[tuple[str, str, str]] = [
     ("other", "Something else", "other"),
 ]
 REASON_IDS = {r[0] for r in REASONS}
+
+# A follow-up question for a reason, to say how bad or where. One answer at most,
+# always optional. reason -> (question, [(option id, label)]). The ids are what
+# is stored and what creator.learning acts on, so they are not renamed.
+_SECONDS = [("0-3s", "0-3s"), ("3-9s", "3-9s"), ("9s+", "9s+")]
+DETAILS: dict[str, tuple[str, list[tuple[str, str]]]] = {
+    "starts_late": ("How much is missing?", _SECONDS),
+    "ends_early": ("How much is cut off?", _SECONDS),
+    "runs_long": ("How much is extra?", _SECONDS),
+    "mid_sentence": ("Where?", [("start", "At the start"), ("end", "At the end"), ("both", "Both")]),
+    "not_a_moment": ("What was wrong with it?", [
+        ("boring", "Nothing happens"), ("no_context", "Needs context to make sense"),
+        ("no_payoff", "Builds up, no payoff"), ("off_topic", "Not what this channel is about"),
+    ]),
+    "duplicate": ("What overlaps?", [("start", "The start"), ("end", "The end"), ("whole", "All of it")]),
+    "wrong_person": ("Who should it follow?", [
+        ("left", "Person on the left"), ("right", "Person on the right"), ("center", "Person in the middle"),
+    ]),
+    "subject_cut_off": ("Which side is cut off?", [
+        ("left", "Left"), ("right", "Right"), ("top", "Top (head)"), ("bottom", "Bottom"),
+    ]),
+    "crop_jumps": ("When?", [
+        ("start", "At the start"), ("cuts", "Around camera cuts"), ("throughout", "The whole clip"),
+    ]),
+    "captions": ("What is wrong with them?", [
+        ("words", "Wrong words"), ("timing", "Out of sync"), ("too_long", "Too much on screen"),
+        ("covers", "Covers something important"),
+    ]),
+}
 CONTEXT_SECONDS = 20.0
 MAX_TRANSCRIPT_CHARS = 6000
 
@@ -47,6 +76,19 @@ MAX_TRANSCRIPT_CHARS = 6000
 class FlagIn(BaseModel):
     reasons: list[str] = Field(min_length=1, max_length=len(REASONS))
     note: str = Field(default="", max_length=2000)
+    # reason id -> the option picked from DETAILS (optional, one per reason).
+    details: dict[str, str] = Field(default_factory=dict)
+
+
+def clean_details(raw: dict, reasons) -> dict[str, str]:
+    """Only answers to a ticked reason, and only options that exist: a stale or
+    hand-written value is dropped rather than failing the flag."""
+    out = {}
+    for reason, choice in (raw or {}).items():
+        spec = DETAILS.get(reason)
+        if reason in reasons and spec and choice in {o[0] for o in spec[1]}:
+            out[reason] = choice
+    return out
 
 
 def _frames(video: Path, times: list[float], out_dir: Path, prefix: str) -> list[str]:
@@ -109,7 +151,7 @@ def _snapshot(config: dict, data_dir: Path, clip, video) -> dict:
 def install(app, *, config, db, data_dir: Path, worker=None) -> None:
     folder = Path(data_dir) / "flags"
 
-    def _plan(d, clip, reasons: set) -> dict:
+    def _plan(d, clip, reasons: set, details: dict | None = None) -> dict:
         """What re-cutting this clip from these reasons would change: the same
         answer the Re-cut button acts on and the flag reply advertises."""
         from creator.learning import recut_plan
@@ -125,24 +167,62 @@ def install(app, *, config, db, data_dir: Path, worker=None) -> None:
             except (OSError, ValueError, KeyError, TypeError):
                 segments = []
         opts = json.loads(clip["render_opts"]) if clip["render_opts"] else {}
+        if "game" not in opts:
+            # Clips rendered before game profiles existed do not say which game
+            # they are, and the framing ladder starts somewhere else for one.
+            from genres import profiles as genres
+
+            row = d.conn.execute(
+                "SELECT title, channel_name FROM videos WHERE video_id = ?", (clip["video_id"],)
+            ).fetchone()
+            found = genres.detect(row["title"], row["channel_name"]) if row else None
+            if found:
+                opts = {**opts, "game": found.id}
         # Cuts and caption edits are stored as seconds from the clip's start, and
         # a render does not shift them when the start moves, so they would all
         # land 1.5s off. Leave the edges alone on such a clip and fix only what
         # does not depend on them.
-        edited = bool(opts.get("edit") or opts.get("caption_lines"))
+        # Dead air cut automatically is not the user's own work, so it must not
+        # stop Re-cut from moving the edges; see below for how it is handled.
+        auto = opts.get("auto_tighten") == "applied"
+        edited = bool((opts.get("edit") and not auto) or opts.get("caption_lines"))
         if edited:
             reasons = reasons - {"starts_late", "ends_early", "runs_long", "mid_sentence"}
         plan = recut_plan(
             reasons, float(clip["start_s"]), float(clip["end_s"]), opts, segments,
             float(video["duration"]) if video and video["duration"] else None,
             float((config.get("clips") or {}).get("max_duration", 60)),
+            details,
         )
         plan["edited"] = edited
+        if auto and (plan["start"] != float(clip["start_s"]) or plan["end"] != float(clip["end_s"])):
+            # The stored cuts are seconds from the OLD start; on a moved window
+            # they land in the wrong places. Drop them and cut the new window.
+            plan["render_opts"] = {**plan["render_opts"], "edit": None, "auto_tighten": "pending"}
         return plan
+
+    def _open_flags(d, clip_id: int) -> tuple[set, dict]:
+        """The reasons on this clip's open flags and the answers given for them.
+        The newest flag's answer wins when two flags answer the same reason."""
+        reasons: set = set()
+        details: dict = {}
+        for f in sorted(d.list_clip_flags(status="open", clip_id=clip_id), key=lambda r: r["id"]):
+            reasons |= set(json.loads(f["reasons"] or "[]"))
+            try:
+                details.update(json.loads(f["snapshot"] or "{}").get("details") or {})
+            except (ValueError, TypeError, AttributeError, KeyError, IndexError):
+                pass
+        return reasons, details
 
     @app.get("/flags/reasons")
     def flag_reasons():
-        return {"reasons": [{"id": i, "label": label, "group": g} for i, label, g in REASONS]}
+        return {"reasons": [
+            {"id": i, "label": label, "group": g,
+             **({"detail": {"question": DETAILS[i][0],
+                            "options": [{"id": o, "label": ol} for o, ol in DETAILS[i][1]]}}
+                if i in DETAILS else {})}
+            for i, label, g in REASONS
+        ]}
 
     @app.post("/clips/{clip_id}/flag")
     def flag_clip(clip_id: int, body: FlagIn):
@@ -158,7 +238,9 @@ def install(app, *, config, db, data_dir: Path, worker=None) -> None:
                 "SELECT title, channel_name FROM videos WHERE video_id = ?", (clip["video_id"],)
             ).fetchone()
             reasons = list(dict.fromkeys(body.reasons))
+            details = clean_details(body.details, set(reasons))
             snap = _snapshot(config, Path(data_dir), clip, video)
+            snap["details"] = details
             flag_id = d.add_clip_flag(clip_id, clip["video_id"], reasons, body.note.strip(), snap)
             # Say what this flag has done and will do, from the same counts the
             # learning reads, so the answer to "does this fix anything?" is not
@@ -175,9 +257,8 @@ def install(app, *, config, db, data_dir: Path, worker=None) -> None:
             # Whether the Re-cut button has anything to do, so the dialog only
             # offers it when it does (and says what it would change).
             try:
-                open_reasons = {r for f in d.list_clip_flags(status="open", clip_id=clip_id)
-                                for r in json.loads(f["reasons"] or "[]")}
-                changes = _plan(d, clip, open_reasons)["changes"]
+                open_reasons, open_details = _open_flags(d, clip_id)
+                changes = _plan(d, clip, open_reasons, open_details)["changes"]
                 recut = {"available": bool(changes), "changes": changes}
             except Exception:
                 recut = {"available": False, "changes": []}
@@ -198,7 +279,7 @@ def install(app, *, config, db, data_dir: Path, worker=None) -> None:
                 s = snap["clip"]["start"]
                 files["source"] = _frames(source, [s + span * f for f in (0.1, 0.5, 0.9)], out, "source")
             (out / "report.json").write_text(
-                json.dumps({"id": flag_id, "reasons": reasons, "note": body.note.strip(),
+                json.dumps({"id": flag_id, "reasons": reasons, "details": details, "note": body.note.strip(),
                             "frames": files, **snap}, indent=2),
                 encoding="utf-8",
             )
@@ -220,10 +301,10 @@ def install(app, *, config, db, data_dir: Path, worker=None) -> None:
             if clip is None:
                 raise HTTPException(404, "no such clip")
             flags = d.list_clip_flags(status="open", clip_id=clip_id)
-            reasons = {r for f in flags for r in json.loads(f["reasons"] or "[]")}
+            reasons, details = _open_flags(d, clip_id)
             if not reasons:
                 raise HTTPException(409, "This clip has no open flags to act on.")
-            plan = _plan(d, clip, reasons)
+            plan = _plan(d, clip, reasons, details)
             if not plan["changes"]:
                 edited = plan["edited"]
                 raise HTTPException(

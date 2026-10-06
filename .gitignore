@@ -277,3 +277,6 @@ _test_*.py
 /media.txt
 /seg.ts
 *.ts.tmp
+
+# Library location chosen in Settings > Storage (a checkout's pointer)
+.storage.json

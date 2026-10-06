@@ -3,7 +3,7 @@ import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import type { Clip } from '../lib/types'
 
-type Reason = { id: string; label: string; group: 'moment' | 'framing' | 'other' }
+type Reason = Awaited<ReturnType<typeof api.flagReasons>>['reasons'][number]
 
 const GROUPS: { id: Reason['group']; title: string }[] = [
   { id: 'moment', title: 'The moment' },
@@ -22,6 +22,8 @@ export default function FlagClipDialog({
 }): JSX.Element {
   const [reasons, setReasons] = useState<Reason[]>([])
   const [picked, setPicked] = useState<Set<string>>(new Set())
+  // reason id -> option id, for the follow-up question under a ticked reason.
+  const [details, setDetails] = useState<Record<string, string>>({})
   const [note, setNote] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -50,12 +52,20 @@ export default function FlagClipDialog({
       else n.add(id)
       return n
     })
+  // Picking the same answer again clears it: every follow-up is optional.
+  const answer = (reason: string, option: string): void =>
+    setDetails((d) => {
+      const n = { ...d }
+      if (n[reason] === option) delete n[reason]
+      else n[reason] = option
+      return n
+    })
 
   const send = async (): Promise<void> => {
     setBusy(true)
     setError('')
     try {
-      setSent(await api.flagClip(clip.id, [...picked], note))
+      setSent(await api.flagClip(clip.id, [...picked], note, details))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -151,14 +161,36 @@ export default function FlagClipDialog({
                 {reasons
                   .filter((r) => r.group === g.id)
                   .map((r) => (
-                    <label key={r.id} className="flex items-center gap-2 text-sm py-0.5">
-                      <input
-                        type="checkbox"
-                        checked={picked.has(r.id)}
-                        onChange={() => toggle(r.id)}
-                      />
-                      {t(r.label)}
-                    </label>
+                    <div key={r.id}>
+                      <label className="flex items-center gap-2 text-sm py-0.5">
+                        <input
+                          type="checkbox"
+                          checked={picked.has(r.id)}
+                          onChange={() => toggle(r.id)}
+                        />
+                        {t(r.label)}
+                      </label>
+                      {picked.has(r.id) && r.detail && (
+                        <div className="ml-6 mb-1 flex flex-wrap items-center gap-1.5">
+                          <span className="text-xs text-muted">{t(r.detail.question)}</span>
+                          {r.detail.options.map((o) => (
+                            <button
+                              key={o.id}
+                              type="button"
+                              aria-pressed={details[r.id] === o.id}
+                              className={`text-xs px-2 py-0.5 rounded-full border ${
+                                details[r.id] === o.id
+                                  ? 'bg-accent/20 border-accent text-accent'
+                                  : 'border-raised text-muted hover:bg-raised'
+                              }`}
+                              onClick={() => answer(r.id, o.id)}
+                            >
+                              {t(o.label)}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   ))}
               </fieldset>
             ))}

@@ -33,9 +33,9 @@ function ClipCardImpl({
   selected: boolean
   onClick: () => void
   /** Cull this clip straight from the grid, without opening it. */
-  onDelete?: () => void
+  onDelete?: () => void | Promise<unknown>
   /** Star or unstar the clip as exported, without opening it. */
-  onToggleExported?: () => void
+  onToggleExported?: () => void | Promise<unknown>
   /** Publish this one clip, without opening the editor first. */
   onPublish?: () => void
   /** Report this clip as wrong (bad start/end, bad framing). */
@@ -50,6 +50,21 @@ function ClipCardImpl({
   /** A render, translation or format job queued, running or just failed for this clip. */
   work?: ClipWork
 }): JSX.Element {
+  // The card's own buttons lock while their request is out, so a double click
+  // cannot delete or star twice and the card shows that it heard the click.
+  const [pending, setPending] = useState<'star' | 'delete' | null>(null)
+  const locked = useRef(false)
+  const guard = async (which: 'star' | 'delete', fn?: () => void | Promise<unknown>): Promise<void> => {
+    if (locked.current || !fn) return
+    locked.current = true
+    setPending(which)
+    try {
+      await fn()
+    } finally {
+      locked.current = false
+      setPending(null)
+    }
+  }
   const duration = Math.round(clip.end_s - clip.start_s)
   const name = clip.title || clip.hook || 'Untitled clip'
   const profile = clip.render_opts?.profile
@@ -199,6 +214,8 @@ function ClipCardImpl({
         <button
           aria-label={exported ? `Unstar ${name} (not exported)` : `Star ${name} as exported`}
           aria-pressed={exported}
+          aria-busy={pending === 'star'}
+          disabled={pending !== null}
           title={
             exported
               ? 'Exported. Click to unstar.'
@@ -206,7 +223,7 @@ function ClipCardImpl({
           }
           onClick={(e) => {
             e.stopPropagation()
-            onToggleExported()
+            void guard('star', onToggleExported)
           }}
           // Starred, the star sits in the corner on its own. On hover the trash
           // takes the corner, so the star steps in beside it. Unstarred, the
@@ -221,7 +238,7 @@ function ClipCardImpl({
                 }`
           }`}
         >
-          <Star className={exported ? 'fill-current' : ''} />
+          {pending === 'star' ? <span className="spinner" aria-hidden /> : <Star className={exported ? 'fill-current' : ''} />}
         </button>
       )}
       {onDelete && (
@@ -231,12 +248,13 @@ function ClipCardImpl({
           onClick={(e) => {
             e.stopPropagation()
             if (window.confirm(`Delete this clip and its file?\n\n"${name}"\n\nOnly this clip is removed — the video and your other clips stay. Can't be undone.`)) {
-              onDelete()
+              void guard('delete', onDelete)
             }
           }}
+          disabled={pending !== null}
           className="absolute top-2 right-2 z-10 p-1.5 rounded-md bg-black/60 text-white/80 opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-red-500 hover:text-white transition"
         >
-          <Trash />
+          {pending === 'delete' ? <span className="spinner" aria-hidden /> : <Trash />}
         </button>
       )}
       {onFlag && (

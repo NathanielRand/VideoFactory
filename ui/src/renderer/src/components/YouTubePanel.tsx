@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import AsyncButton from './AsyncButton'
 import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import type { Clip, StudioEvent } from '../lib/types'
@@ -83,6 +84,9 @@ export default function YouTubePanel({
 
   const [record, setRecord] = useState<PublishRecord | null>(null)
   const [jobId, setJobId] = useState<number | null>(null)
+  // The upload stops at its next safe point, not when the cancel is answered.
+  const [cancelRequested, setCancelRequested] = useState(false)
+  useEffect(() => setCancelRequested(false), [jobId])
   const [progress, setProgress] = useState<Progress | null>(null)
   const [result, setResult] = useState<StudioEvent | null>(null)
   const [notice, setNotice] = useState('')
@@ -176,6 +180,7 @@ export default function YouTubePanel({
     if (jobId === null) return
     try {
       await api.cancelPublish(jobId)
+      setCancelRequested(true)
     } catch {
       /* it may have finished in the meantime; the event stream will say */
     }
@@ -220,9 +225,14 @@ export default function YouTubePanel({
           />
         </div>
         <p className="text-xs text-muted tabular-nums">{pct}%</p>
-        <button className="btn-ghost w-full !py-1.5 text-xs" onClick={cancel}>
+        <AsyncButton
+          className="btn-ghost w-full !py-1.5 text-xs"
+          busyLabel={t('Cancelling…')}
+          holdWhile={cancelRequested}
+          onClick={cancel}
+        >
           {t('Cancel upload')}
-        </button>
+        </AsyncButton>
         <p className="text-[11px] text-muted">
           {t('You can keep editing other clips while this uploads.')}
         </p>

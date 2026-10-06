@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useClipRendering } from '../lib/clipWork'
 import { api } from '../lib/api'
 import type {
   CaptionLine,
@@ -155,13 +156,23 @@ function isDefault(e: EditData, duration: number): boolean {
   )
 }
 
+/** The crossfade actually used at each join of `keep`. Mirrors
+ *  EditList.overlap() in video_editor/timeline.py: never more than a third of
+ *  the shortest section. A crossfade overlaps the two sections, so every time
+ *  mapping below has to subtract it per join or the playhead drifts. */
+export function joinOverlap(keep: Range[] | undefined, transition: number | undefined): number {
+  if (!keep || keep.length < 2 || !transition || transition <= 0) return 0
+  const shortest = Math.min(...keep.map(([a, b]) => b - a))
+  return Math.max(0, Math.min(transition, shortest / 3))
+}
+
 /** original-timeline -> baked-preview-file time (edits already rendered). */
-function origToBaked(t: number, bakedKeep: Range[] | undefined): number {
+function origToBaked(t: number, bakedKeep: Range[] | undefined, overlap = 0): number {
   if (!bakedKeep) return t
   let offset = 0
   for (const [a, b] of bakedKeep) {
     if (t <= b) return offset + Math.max(0, t - a)
-    offset += b - a
+    offset += b - a - overlap
   }
   return offset
 }
@@ -182,11 +193,13 @@ const READOUT = 'absolute top-0 text-[10px] tabular-nums bg-black/70 text-white 
 function PlayheadMarker({
   videoRef,
   bakedKeep,
+  bakedOverlap,
   duration,
   frozen
 }: {
   videoRef: React.RefObject<HTMLVideoElement>
   bakedKeep: Range[] | undefined
+  bakedOverlap: number
   duration: number
   /** A baked draft preview has its own timeline, so the marker stays put. */
   frozen: boolean
@@ -201,7 +214,7 @@ function PlayheadMarker({
       raf = requestAnimationFrame(tick)
       const el = videoRef.current // read each frame: the element is replaced when a preview starts
       if (!el) return
-      const t = bakedToOrig(el.currentTime, bakedKeep)
+      const t = bakedToOrig(el.currentTime, bakedKeep, bakedOverlap)
       if (t === last) return // paused and not moving: no writes at all
       last = t
       const frac = t / Math.max(duration, 0.1)
@@ -213,7 +226,7 @@ function PlayheadMarker({
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [videoRef, bakedKeep, duration, frozen])
+  }, [videoRef, bakedKeep, bakedOverlap, duration, frozen])
 
   return (
     <div ref={box} className="absolute top-0 h-full pointer-events-none z-10" style={{ left: '0%' }}>
@@ -226,12 +239,12 @@ function PlayheadMarker({
   )
 }
 
-export function bakedToOrig(t: number, bakedKeep: Range[] | undefined): number {
+export function bakedToOrig(t: number, bakedKeep: Range[] | undefined, overlap = 0): number {
   if (!bakedKeep) return t
   let offset = 0
   for (const [a, b] of bakedKeep) {
     if (t - offset <= b - a) return a + (t - offset)
-    offset += b - a
+    offset += b - a - overlap
   }
   return bakedKeep[bakedKeep.length - 1]?.[1] ?? t
 }
@@ -275,6 +288,7 @@ export default function TimelineEditor({
 }): JSX.Element {
   const duration = clip.end_s - clip.start_s
   const baked = useMemo<EditData | null>(() => clip.render_opts?.edit ?? null, [clip.id])
+  const bakedOverlap = joinOverlap(baked?.keep, baked?.transition)
   const [edit, setEdit] = useState<EditData>(() => ({
     ...defaultEdit(duration),
     ...(clip.render_opts?.edit ?? {})
@@ -293,6 +307,7 @@ export default function TimelineEditor({
     setPlayheadState(t)
   }
   const [busy, setBusy] = useState(false)
+  const rendering = useClipRendering(clip.id)
   const [notice, setNotice] = useState('')
   // Layout override: Auto = the AI decides (tracking/letterbox), Letterbox =
   // force the full frame on a blurred backdrop, Center = static center crop.
@@ -417,7 +432,7 @@ export default function TimelineEditor({
     const tick = (): void => {
       raf = requestAnimationFrame(tick)
       const e = editRef.current
-      const tOrig = bakedToOrig(el.currentTime, baked?.keep)
+      const tOrig = bakedToOrig(el.currentTime, baked?.keep, bakedOverlap)
       playheadRef.current = tOrig
       // While playing, the rest of the editor only needs to know about every
       // quarter second; when paused (a seek, a step) it needs to know at once.
@@ -431,7 +446,7 @@ export default function TimelineEditor({
         for (const [a, b] of removedRef.current) {
           const alreadyBaked = bakedRemovedRef.current.some(([x, y]) => a >= x - 0.05 && b <= y + 0.05)
           if (!alreadyBaked && tOrig > a + 0.02 && tOrig < b - 0.02) {
-            el.currentTime = origToBaked(Math.min(b + 0.02, duration), baked?.keep)
+            el.currentTime = origToBaked(Math.min(b + 0.02, duration), baked?.keep, bakedOverlap)
             return
           }
         }
@@ -457,7 +472,7 @@ export default function TimelineEditor({
       el.volume = 1
       el.playbackRate = 1
     }
-  }, [baked, duration, videoRef, draftActive])
+  }, [baked, bakedOverlap, duration, videoRef, draftActive])
 
   const push = (next: EditData): void => {
     setHistory((h) => [...h.slice(-30), edit])
@@ -476,7 +491,7 @@ export default function TimelineEditor({
     if (!el) return
     const clamped = Math.max(0, Math.min(duration, t))
     scrubbing.current = true // keep the auto-skip from yanking the playhead back
-    el.currentTime = origToBaked(clamped, baked?.keep)
+    el.currentTime = origToBaked(clamped, baked?.keep, bakedOverlap)
     setPlayhead(clamped)
     if (!hold) window.setTimeout(() => (scrubbing.current = false), 250)
   }
@@ -828,6 +843,7 @@ export default function TimelineEditor({
           hook: hookPending,
           captions,
           bakedKeep: baked?.keep,
+          bakedOverlap,
           keep,
           burned:
             captions && captionsBurned && captionBase
@@ -1293,6 +1309,7 @@ export default function TimelineEditor({
             <PlayheadMarker
               videoRef={videoRef}
               bakedKeep={baked?.keep}
+              bakedOverlap={bakedOverlap}
               duration={duration}
               frozen={draftActive}
             />
@@ -1851,11 +1868,11 @@ export default function TimelineEditor({
 
       <button
         className="btn-accent w-full disabled:opacity-40"
-        disabled={busy || !dirty}
+        disabled={busy || rendering || !dirty}
         onClick={apply}
         title={dirty ? 'Re-render the clip with your changes' : 'No changes yet — edit something first'}
       >
-        {busy ? 'Queuing…' : dirty ? 'Apply edits (re-render)' : 'Apply edits — no changes yet'}
+        {busy ? 'Queuing…' : rendering ? 'Rendering…' : dirty ? 'Apply edits (re-render)' : 'Apply edits — no changes yet'}
       </button>
       {notice && <p className="text-xs text-muted">{notice}</p>}
       <p className="text-[11px] text-muted/70">

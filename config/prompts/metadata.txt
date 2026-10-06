@@ -14,7 +14,7 @@ Write metadata for this Short. Rules:
 - "description": 1-2 sentences describing the clip, also grounded in what is said. The first sentence names the source channel and contains the most important keyword, because it is what search results show.
 - "hashtags": 3-5 lowercase hashtags, each starting with #. Include the STANDING HASHTAG that fits this clip best (if there are any), then ones for the clip's own topic. Do not include #shorts (it is added automatically).
 - "keywords": 8-12 lowercase search phrases (2-4 words each) a viewer would actually type into YouTube search to find this in the clip: the topic, the people or game named, the moment. Plain words, no # signs, most important first.
-- "first_comment": one short question or prompt (under 150 characters) that invites viewers to reply, about what happens in the clip, in the audience's own voice. No links, no hashtags.
+- "first_comment": a short witty line (3-10 words) a viewer would actually type, about one specific thing in the clip, following the FIRST COMMENT rules above. No links, no hashtags.
 - "alt_titles": 2 other titles in the clip, each taking a different angle (a question, a bold claim, a named person). Same rules as the title.
 
 Respond with ONLY valid JSON in exactly this shape, no other text:

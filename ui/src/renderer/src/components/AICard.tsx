@@ -43,6 +43,7 @@ export default function AICard({ onOpenModels }: { onOpenModels?: () => void }):
   }, [])
 
   const run = async (fn: () => Promise<AIStatus | null>, done = ''): Promise<boolean> => {
+    if (busy) return false
     setBusy(true)
     setError('')
     setNotice('')

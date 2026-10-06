@@ -6,6 +6,7 @@ Without a progress hook the UI's bar sits still during a long VOD download
 aborts promptly if the video is cancelled.
 """
 
+import os
 from pathlib import Path
 
 from core import cancel, progress
@@ -29,6 +30,26 @@ def _ffmpeg_dir() -> str | None:
     if resolved == "ffmpeg" or not Path(resolved).exists():
         return None
     return str(Path(resolved).parent)
+
+
+def cookie_opts() -> dict:
+    """Optional YouTube sign-in for yt-dlp, from settings.yaml's `youtube:` block.
+
+    YouTube sometimes answers anonymous requests with "Sign in to confirm
+    you're not a bot" (common on shared, VPN or datacenter IPs). The only fix
+    is to hand yt-dlp a signed-in session. Off by default: downloads stay
+    anonymous unless the creator opts in. main.load_config exports the two
+    settings as environment variables so every source sees them.
+    """
+    opts: dict = {}
+    cookie_file = os.environ.get("VF_YT_COOKIES_FILE", "").strip()
+    browser = os.environ.get("VF_YT_COOKIES_FROM_BROWSER", "").strip()
+    if cookie_file and Path(cookie_file).exists():
+        opts["cookiefile"] = cookie_file
+    elif browser:
+        # yt-dlp's CLI form is "chrome" or "firefox:profile"; the API wants a tuple.
+        opts["cookiesfrombrowser"] = tuple(browser.split(":", 1))
+    return opts
 
 
 def progress_opts(video_id: str | None) -> dict:

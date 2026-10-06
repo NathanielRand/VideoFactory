@@ -386,7 +386,7 @@ export default function AddVideos({
    *  `force` re-runs videos that were refused for having been clipped before. */
   const generate = async (force = false, only?: Slot[]): Promise<void> => {
     const picked = only ?? ready
-    if (picked.length === 0) return
+    if (picked.length === 0 || busy) return // Enter in a URL box skips the button's lock
     setBusy(true)
     setError(null)
     setAdded(null)

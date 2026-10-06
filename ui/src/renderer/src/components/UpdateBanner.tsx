@@ -1,3 +1,4 @@
+import AsyncButton from './AsyncButton'
 import { useEffect, useState } from 'react'
 
 /** "813 MB" or "6.2 GB": update downloads span both. */
@@ -98,12 +99,13 @@ export default function UpdateBanner(): JSX.Element | null {
         <span className="text-xs text-muted">
           Video Factory will close and reopen. Finish anything that&apos;s rendering first.
         </span>
-        <button
+        <AsyncButton
           className="btn-accent !py-1 ml-auto shrink-0"
-          onClick={() => void window.studio.update.install()}
+          busyLabel="Restarting…"
+          onClick={() => window.studio.update.install()}
         >
           Restart &amp; install
-        </button>
+        </AsyncButton>
       </div>
     )
   }
@@ -128,12 +130,13 @@ export default function UpdateBanner(): JSX.Element | null {
           >
             Skip this version
           </button>
-          <button
+          <AsyncButton
             className="btn-accent !py-1"
-            onClick={() => void window.studio.update.download()}
+            busyLabel="Starting…"
+            onClick={() => window.studio.update.download()}
           >
             Download
-          </button>
+          </AsyncButton>
         </div>
       </div>
       {notesOpen && s.notes && (

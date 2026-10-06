@@ -413,6 +413,32 @@ until transcription finishes. Accepts `video_id` or `url`; `400` with neither.
 A cancelled download can leave a `.part` file in `data/downloads/`. See
 `POST /storage/cleanup`.
 
+## Storage location
+
+The library (source videos, clips, transcripts, the database) lives in one folder.
+These endpoints report where, which drive that is, and move it. A change takes
+effect after a restart, never live; until then the engine claims no new work.
+
+| Endpoint | |
+|---|---|
+| `GET /storage/location` | Path, the drive under it (label, filesystem, removable/network, total/used/free), bytes per folder, `models_bytes` (the AI models, which stay where they are), `move_bytes` (what a move copies), `pending_path`, `restart_pending`, `locked`, and `fallback_from` when the chosen drive is missing. |
+| `GET /storage/volumes` | Every drive with free space; `current` marks the one in use. |
+| `POST /storage/check` | `{path, mode}` -> `{ok, problems[], library_bytes}`. Dry run of the refusals below. |
+| `POST /storage/location` | `{path, mode}`, mode `move` (copy, rewrite stored paths, verify), `fresh` (start empty) or `existing` (use a library already there). `move` runs in the background: `{started: true}`. |
+| `GET /storage/move` | Progress of a move: `status` (`idle`/`running`/`done`/`error`), `phase`, `done_bytes`, `total_bytes`, `error`. |
+| `POST /storage/reset` | Back to the default location on the next start. |
+
+Refused with `400`: target not writable or on a disconnected drive, not enough free
+space (library plus 2 GB), target inside the library or the library inside it,
+target not empty (`move`), no `state.db` there (`existing`). `409` while videos are
+processing, while a move is running, or when `VIDEO_FACTORY_DATA_DIR` pins the
+location (Docker).
+
+A move never deletes the old folder and a failed move changes nothing. `models/`,
+`previews/` and `posters/` are not copied. The choice is stored in `storage.json`
+in the per-user app folder (installed) or `.storage.json` beside the code
+(checkout), and is overridden by `VIDEO_FACTORY_DATA_DIR`.
+
 ## The queue
 
 ### `GET /queue`
@@ -553,8 +579,10 @@ granularity as `{"words": [{"start", "end", "word"}]}`, and returns
 
 ### Flagging a clip, and what it teaches
 
-`POST /clips/{clip_id}/flag` with `{"reasons": ["starts_late"], "note": "..."}`
-(reasons from `GET /flags/reasons`) stores the flag with a snapshot of what the
+`POST /clips/{clip_id}/flag` with `{"reasons": ["ends_early"], "details": {"ends_early": "3-9s"}, "note": "..."}`
+(reasons from `GET /flags/reasons`; `details` is optional, one answer per ticked
+reason, from that reason's `detail.options`: how much is missing (0-3s / 3-9s / 9s+),
+which edge, which side, and so on. Re-cut uses them to size the fix) stores the flag with a snapshot of what the
 pipeline decided. The reply says what it has done so far:
 
 ```json

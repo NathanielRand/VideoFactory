@@ -5,6 +5,7 @@
 // the clips the AI already found, or any range picked by scrubbing the source.
 // Every edit autosaves; the server re-validates and reports a `problem`.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import AsyncButton from '../components/AsyncButton'
 import { api } from '../lib/api'
 import CompilationVersions from '../components/CompilationVersions'
 import CreditControls from '../components/CreditControls'
@@ -292,7 +293,10 @@ export default function Compilations({
     setSegments((s) => [...s, { credit: true, ...seg }])
   }
 
+  const creating = useRef(false)
   const create = async (): Promise<void> => {
+    if (creating.current) return // Enter in the title box skips the button's own lock
+    creating.current = true
     try {
       const c = await compilationsApi.create(newTitle || t('Untitled compilation'), newTemplate || null)
       setNewTitle('')
@@ -300,6 +304,8 @@ export default function Compilations({
       setSelectedId(c.id)
     } catch (e) {
       setError(String((e as Error).message))
+    } finally {
+      creating.current = false
     }
   }
 
@@ -409,9 +415,9 @@ export default function Compilations({
                 </option>
               ))}
             </select>
-            <button className="btn-accent w-full sm:w-auto xl:w-full shrink-0" onClick={() => void create()}>
+            <AsyncButton className="btn-accent w-full sm:w-auto xl:w-full shrink-0" busyLabel={t('Creating…')} onClick={create}>
               {t('New compilation')}
-            </button>
+            </AsyncButton>
           </div>
         </div>
         <ul className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-1 gap-1">
@@ -502,7 +508,7 @@ export default function Compilations({
                   >
                     ✎
                   </button>
-                  <button
+                  <AsyncButton
                     className="text-xs text-muted hover:text-red-400 shrink-0"
                     aria-label={`${t('Delete')} ${tp.name}`}
                     onClick={async () => {
@@ -512,7 +518,7 @@ export default function Compilations({
                     }}
                   >
                     ✕
-                  </button>
+                  </AsyncButton>
                 </div>
               )
             })}
@@ -525,9 +531,9 @@ export default function Compilations({
               <span title={unused.map((f) => f.name).join('\n')}>
                 {unused.length} {t('unused video(s)')} · {(unused.reduce((n, f) => n + f.bytes, 0) / 1e6).toFixed(0)} MB
               </span>
-              <button type="button" className="text-accent hover:underline shrink-0" onClick={() => void cleanUnused()}>
+              <AsyncButton className="text-accent hover:underline shrink-0" busyLabel={t('Cleaning up…')} onClick={cleanUnused}>
                 {t('Clean up…')}
-              </button>
+              </AsyncButton>
             </div>
           </div>
         )}

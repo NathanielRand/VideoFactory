@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from core import storage
 from core.state import StateDB
 from server import youtube_service as service
 from server.events import broadcaster
@@ -69,7 +70,7 @@ class PublishWorker(threading.Thread):
             while not self._stop.is_set():
                 self._run_due_verifications(db)
                 self._refresh_provider_posts(db)
-                job = db.claim_next_publish_job()
+                job = None if storage.hold.is_set() else db.claim_next_publish_job()
                 if job is None:
                     self._wake.wait(timeout=2.0)
                     self._wake.clear()

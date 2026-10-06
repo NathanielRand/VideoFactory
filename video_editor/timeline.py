@@ -44,6 +44,7 @@ def _clean_ranges(raw, duration: float) -> list[tuple[float, float]]:
 class EditList:
     duration: float                      # the clip's original duration
     keep: list[tuple[float, float]] | None = None
+    transition: float = 0.0              # crossfade seconds between kept sections
     mutes: list[tuple[float, float]] = field(default_factory=list)
     volume: float = 1.0
     mute_all: bool = False
@@ -91,9 +92,14 @@ class EditList:
                 "duck": bool(m.get("duck", True)),
             }
 
+        try:
+            transition = max(0.0, min(0.6, float(d.get("transition", 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            transition = 0.0
         edit = cls(
             duration=duration,
             keep=keep,
+            transition=transition if keep else 0.0,
             mutes=_clean_ranges(d.get("mutes"), duration),
             volume=volume,
             mute_all=bool(d.get("mute_all", False)),
@@ -118,8 +124,24 @@ class EditList:
             and self.music is None
         )
 
+    def overlap(self) -> float:
+        """The crossfade actually used at each join, in seconds.
+
+        Asked-for `transition`, but never more than a third of the shortest kept
+        section, so a crossfade can not swallow a short section whole. 0 means a
+        hard cut. Everything that depends on the timeline (final length, caption
+        and credit timing, the filter graph) must use THIS number.
+        """
+        if not self.keep or len(self.keep) < 2 or self.transition <= 0:
+            return 0.0
+        shortest = min(b - a for a, b in self.keep)
+        return round(max(0.0, min(self.transition, shortest / 3.0)), 3)
+
     def final_duration(self) -> float:
-        base = self.duration if self.keep is None else sum(b - a for a, b in self.keep)
+        if self.keep is None:
+            base = self.duration
+        else:
+            base = sum(b - a for a, b in self.keep) - self.overlap() * (len(self.keep) - 1)
         return base / self.speed
 
     def remap(self, t: float) -> float | None:
@@ -127,10 +149,11 @@ class EditList:
         if self.keep is None:
             return t
         offset = 0.0
+        step = self.overlap()
         for a, b in self.keep:
             if a <= t <= b:
                 return offset + (t - a)
             if t < a:
                 return None
-            offset += b - a
+            offset += (b - a) - step
         return None

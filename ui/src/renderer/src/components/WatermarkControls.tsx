@@ -1,4 +1,5 @@
 import { api } from '../lib/api'
+import AsyncButton from './AsyncButton'
 import { CAPTION_FONTS, assFontSize } from './CaptionStyleControls'
 import { Folder, Rotate } from './icons'
 import type { CtaConfig, WatermarkConfig } from '../lib/types'
@@ -298,10 +299,10 @@ export default function WatermarkControls({
             {withImage && (
               <Field label="Logo">
                 <div className="flex items-center gap-2 min-w-0">
-                  <button className="btn-ghost !py-1.5 !px-3 text-sm shrink-0" onClick={upload}>
+                  <AsyncButton className="btn-ghost !py-1.5 !px-3 text-sm shrink-0" busyLabel="Uploading…" onClick={upload}>
                     <Folder className="mr-1.5" />
                     {config.image_asset ? 'Replace logo' : 'Upload logo (PNG)'}
-                  </button>
+                  </AsyncButton>
                   {config.image_asset && <span className="text-xs text-muted truncate">✓ added</span>}
                 </div>
               </Field>

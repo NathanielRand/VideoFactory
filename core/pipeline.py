@@ -13,6 +13,7 @@ import re
 import threading
 from pathlib import Path
 
+import genres.profiles as genres
 from analysis.fusion import find_clips
 from analysis.metadata import ClipMetadata, generate_metadata_batch
 from core import cancel, governor, progress
@@ -251,6 +252,17 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
 
             audio_raw = extract_audio_features(video.path)
             visual_raw = extract_visual_features(video.path)
+            # Gameplay announces its moments on screen (a kill popup, a feed
+            # that ticks over); read those instead of leaning on loudness.
+            profile = genres.detect(video.title, video.channel)
+            if profile is not None and profile.activity and video.duration > 75:
+                from genres.events import hud_activity
+
+                hud = hud_activity(video.path, profile).get("hud")
+                if hud is not None and hud.size:
+                    visual_raw["hud"] = hud
+                    print(f"      {profile.name}: read {int((hud > 0.5).sum())} on-screen "
+                          f"event(s) from the interface")
             signals_out["signals"] = (audio_raw, visual_raw)
         except Exception as e:
             print(f"      (background signal extraction failed, will retry in analysis: {e})")
@@ -472,7 +484,7 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
 
     # A crop the user's flags keep asking for becomes this creator's default.
     learned_crop = (creator_prefs or {}).get("crop")
-    learned_opts = {"crop": learned_crop} if learned_crop else None
+    learned_opts = {"auto_tighten": "pending", **({"crop": learned_crop} if learned_crop else {})}
     if learned_crop:
         print(f"      Using '{learned_crop}' framing by default (learned from your flags)")
 
@@ -731,6 +743,9 @@ def _render_files(
     # When false the tracking path below is entered exactly as before.
     podcast = bool(opts.get("podcast") or config["clips"].get("podcast"))
     canvas = CANVASES[variant] if variant else ((1920, 1080) if landscape else (1080, 1920))
+    # Which game's interface this is (genres/profiles.py), if any. Resolved once:
+    # framing aims at the crosshair and tightening reads the on-screen events.
+    game = None if (landscape or podcast) else genres.for_source(source, config, opts.get("game"))
 
     # Color: preset filter (per-clip wins over job/config default) + manual
     # brightness/saturation/contrast adjustments.
@@ -750,6 +765,37 @@ def _render_files(
         from video_editor.timeline import EditList
 
         edit = EditList.from_dict(opts["edit"], duration=candidate.duration)
+
+    # Cut the dead air out of a NEW clip and join what is left with a short
+    # crossfade (analysis/tighten.py). Only on first generation, which marks its
+    # options "pending": the result is stored as an ordinary edit, so the editor
+    # shows the cuts and can undo them, and a later re-render reuses (or, once
+    # undone, leaves alone) what is stored instead of cutting again.
+    if opts.get("auto_tighten") == "pending":
+        opts = {**opts, "auto_tighten": "none"}
+        if (edit is None and not landscape and not podcast
+                and config["clips"].get("auto_tighten", True)):
+            from analysis import tighten
+            from video_editor.timeline import EditList
+
+            progress.step("Cutting dead air", 0.03, 0.06)
+            try:
+                words = [w for seg in segments if seg.words for w in seg.words]
+                plan = tighten.auto_plan(
+                    source, candidate.start, candidate.end, words, game,
+                    floor=float(config["clips"].get("min_duration", 0) or 0),
+                )
+            except Exception as e:  # never cost a clip for a nicety
+                print(f"      (dead-air cut skipped: {str(e)[:160]})")
+                plan = None
+            if plan:
+                stored = {"keep": plan["keep"], "transition": plan["transition"]}
+                tight = EditList.from_dict(stored, duration=candidate.duration)
+                if tight is not None:
+                    edit = tight
+                    opts = {**opts, "edit": stored, "auto_tighten": "applied"}
+                    print(f"      Cut {plan['removed_seconds']:.1f}s of dead air "
+                          f"({plan['cuts']} cut(s), crossfaded)")
 
     ass_path = None
     # Per-clip style wins; otherwise the job/config default chosen at generate time.
@@ -867,7 +913,13 @@ def _render_files(
                 from video.tracker import compute_tracking  # lazy: imports torch
 
                 crop_mode = opts.get("crop", "track")
-                if crop_mode == "center":
+                # Gameplay is framed around where the player aims, not around
+                # the people in it (genres/profiles.py).
+                if crop_mode == "lock" and game is None:
+                    crop_mode = "track"        # nothing to lock to: follow the subject
+                if crop_mode == "lock":
+                    tracking = {"mode": "track", "path": [(0.0, game.focus_x)]}
+                elif crop_mode == "center":
                     tracking = {"mode": "track", "path": [(0.0, 0.5)]}
                 elif tracking_cache is not None and "tracking" in tracking_cache:
                     tracking = copy.deepcopy(tracking_cache["tracking"])
@@ -886,6 +938,19 @@ def _render_files(
                         # content. Cropping tight to the detected person (the
                         # automatic letterbox behavior) threw away the game side.
                         tracking["region"] = None
+                    if (game is not None and tracking["mode"] != "split"
+                            and opts.get("crop") in (None, "bias_left", "bias_right")):
+                        # The people the tracker found are the soldiers in the
+                        # game, and the automatic letterbox is not an answer
+                        # for a full-frame shooter: frame what the player aims
+                        # at. A facecam layout (split) is a real finding and stays.
+                        #
+                        # Only when no framing was CHOSEN (or a nudge was asked
+                        # for, which moves from the crosshair). An explicit
+                        # "track" is the plain subject tracker, so that Re-cut
+                        # can offer it as a genuinely different picture.
+                        print(f"      {game.name} footage: framing on the crosshair")
+                        tracking = {"mode": "track", "path": [(0.0, game.focus_x)]}
                     if tracking["mode"] == "track" and crop_mode in ("bias_left", "bias_right"):
                         shift = -0.12 if crop_mode == "bias_left" else 0.12
                         tracking["path"] = [(t, x + shift) for t, x in tracking["path"]]
@@ -955,11 +1020,13 @@ def _render_files(
             # Persist podcast (a video-level job flag) per clip, so an editor
             # re-render keeps the letterbox instead of falling back to tracking.
             **({"podcast": True} if podcast else {}),
+            # Which game profile framed it, so a re-cut knows what angles exist.
+            **({"game": game.id} if game is not None else {}),
             # Persist the resolved branding so a later re-render reapplies it,
             # even when it came from the job/config default (not per-clip opts).
             **({"watermark": wm_cfg} if wm_cfg else {}),
         }
-    ) if (opts or caption_style or filter_name != "none" or wm_cfg) else ""
+    ) if (opts or caption_style or filter_name != "none" or wm_cfg or game is not None) else ""
     return final_path, render_opts_json
 
 

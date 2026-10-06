@@ -178,3 +178,29 @@ def test_a_rerender_moves_the_thumbnail_to_the_new_clip_and_never_asks_for_anoth
     worker._rerender_clip(db, {"clip_id": new_id, "start": 2.0})
     newer = db.conn.execute("SELECT id FROM clips WHERE video_id = 'v1'").fetchone()["id"]
     assert (folder / f"clip_{newer}_chosen.jpg").exists() and not (folder / f"clip_{newer}_design.json").exists()
+
+
+def test_pressing_re_render_twice_queues_one_job(tmp_path):
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    from main import BUNDLED_CONFIG, load_config
+    from server.api import create_app
+
+    data_dir = tmp_path / "data"
+    config = load_config(BUNDLED_CONFIG)
+    config["paths"]["data_dir"] = str(data_dir)
+    app = create_app(config, tmp_path / "settings.yaml")
+    db = StateDB(data_dir / "state.db")
+    db.upsert_video("v1", title="T", channel_name="c", duration=100)
+    clip_id = db.add_clip("v1", 1.0, 5.0, 70, "hook", path=str(tmp_path / "c.mp4"), title="A clip")
+    client = TestClient(app, base_url="http://127.0.0.1")
+
+    first = client.post(f"/clips/{clip_id}/render", json={"start": 0.5}).json()["job_id"]
+    again = client.post(f"/clips/{clip_id}/render", json={"start": 0.5}).json()["job_id"]
+    assert again == first                                    # the same request is the same job
+    other = client.post(f"/clips/{clip_id}/render", json={"start": 0.7}).json()["job_id"]
+    assert other != first                                    # a different request still queues
+    assert db.conn.execute("SELECT COUNT(*) FROM jobs WHERE type = 'render'").fetchone()[0] == 2
+    db.conn.close()

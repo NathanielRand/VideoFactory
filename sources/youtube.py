@@ -18,7 +18,7 @@ import yt_dlp
 from defusedxml import ElementTree as ET
 
 from core.models import DownloadedVideo
-from sources.ytdlp_common import progress_opts
+from sources.ytdlp_common import cookie_opts, progress_opts
 
 RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
 _ATOM_NS = {
@@ -59,7 +59,7 @@ def resolve_channel(query: str) -> dict:
         raise ValueError(f"Can't interpret {query!r} as a channel handle, URL, or ID")
 
     # yt-dlp resolves any YouTube page to its channel without the Data API.
-    opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "playlist_items": "1"}
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "playlist_items": "1", **cookie_opts()}
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
@@ -133,6 +133,16 @@ def _friendly_message(error: str) -> str | None:
     # have: it downloads anonymously on purpose. yt-dlp's own text points at
     # two wiki pages about exporting cookies, which reads like a crash rather
     # than like a video YouTube will not hand over. Retrying never helps.
+    if "confirm you’re not a bot" in error or "confirm you're not a bot" in error:
+        return (
+            "YouTube is asking this connection to prove it is not a bot, which "
+            "it does for some networks (VPNs, shared or datacenter IPs). Fix: "
+            "sign in to YouTube in Chrome/Firefox, then in settings.yaml set "
+            "youtube.cookies_from_browser to \"chrome\" (or \"firefox\"), or "
+            "point youtube.cookies_file at an exported cookies.txt, and "
+            "restart. Twitch, Kick and local files are not affected."
+        )
+
     if "confirm your age" in error or "age-restricted" in error.lower():
         return (
             "YouTube will not serve this video to anyone who is not signed "
@@ -165,7 +175,7 @@ def download(url: str, output_dir: Path) -> DownloadedVideo:
     # Refuse live streams BEFORE downloading: a live URL would start an
     # open-ended real-time capture instead of fetching a finished file.
     with _friendly_errors():
-        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as probe:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, **cookie_opts()}) as probe:
             probe_info = probe.extract_info(url, download=False)
     if probe_info.get("is_live"):
         raise ValueError(
@@ -192,6 +202,7 @@ def download(url: str, output_dir: Path) -> DownloadedVideo:
         "no_warnings": True,
         "progress": True,
         **progress_opts(extract_video_id(url)),
+        **cookie_opts(),
     }
 
     with _friendly_errors():

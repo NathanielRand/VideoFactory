@@ -178,6 +178,7 @@ export default function EditorView({
           style: { ...translated.style, font: translated.font ?? translated.style.font }
         },
         bakedKeep: liveOverlay?.bakedKeep,
+        bakedOverlap: liveOverlay?.bakedOverlap,
         keep: liveOverlay?.keep ?? [],
         burned:
           clip.render_opts?.captions !== false && translated.source.length > 0

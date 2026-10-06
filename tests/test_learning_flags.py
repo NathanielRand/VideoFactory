@@ -235,18 +235,57 @@ def test_recut_leaves_edges_alone_on_a_hand_edited_clip(tmp_path):
     d.close()
 
 
-def test_a_framing_complaint_steps_toward_a_framing_that_shows_more():
+def test_a_framing_complaint_tries_a_real_angle_and_letterbox_comes_last():
+    """A flag used to answer "wrong angle" with a letterbox, which is a way of
+    not choosing one. Each press now tries a different real framing, never
+    repeats one, and reaches letterbox only when everything else is spent."""
     faults = {"subject_cut_off"}
-    a = learning.recut_plan(faults, 22.0, 41.0, {}, _segs(), 100.0, 60.0)
-    assert a["render_opts"] == {"crop": "letterbox"} and a["changes"] == ["framing set to letterbox"]
-    b = learning.recut_plan(faults, 22.0, 41.0, {"crop": "letterbox"}, _segs(), 100.0, 60.0)
-    assert b["render_opts"] == {"crop": "center"}                       # press again: the next step
-    c = learning.recut_plan(faults, 22.0, 41.0, {"crop": "center"}, _segs(), 100.0, 60.0)
-    assert c["changes"] == []                                           # out of steps: says so, does not loop
-    assert learning.recut_plan({"wrong_angle"}, 22.0, 41.0, {}, _segs(), 100.0, 60.0)["render_opts"]
-    # A specific ask beats the guess.
+    opts: dict = {}
+    seen = []
+    for _ in range(4):
+        plan = learning.recut_plan(faults, 22.0, 41.0, opts, _segs(), 100.0, 60.0)
+        seen.append(plan["render_opts"]["crop"])
+        opts = {**opts, **plan["render_opts"]}
+    assert seen == ["center", "bias_left", "bias_right", "letterbox"]
+    assert seen[0] != "letterbox"                      # never the first answer
+
+    spent = learning.recut_plan(faults, 22.0, 41.0, opts, _segs(), 100.0, 60.0)
+    assert spent["changes"] == [] and spent["render_opts"] == {}    # honest, and does not loop
+    assert "tried" in spent["note"]
+
+    # A specific ask beats the guess, and the user's own letterbox is honoured.
     d = learning.recut_plan({"subject_cut_off", "needs_tight"}, 22.0, 41.0, {"crop": "letterbox"}, _segs(), 100.0, 60.0)
     assert d["render_opts"] == {"crop": "track"}
+    w = learning.recut_plan({"needs_wide"}, 22.0, 41.0, {}, _segs(), 100.0, 60.0)
+    assert w["render_opts"] == {"crop": "letterbox"}
+
+
+def test_game_footage_is_already_on_the_lock_so_every_press_is_a_new_picture():
+    """A Wardogs clip with no framing chosen IS framed on the crosshair. The
+    ladder must not spend presses re-offering that (as `lock`, or as `center`,
+    which is the same x), or the user flags "wrong angle" and gets the same
+    picture back."""
+    faults = {"wrong_angle"}
+    opts: dict = {"game": "wardogs"}
+    assert learning.current_framing(opts) == "lock"
+    seen = []
+    for _ in range(4):
+        plan = learning.recut_plan(faults, 22.0, 41.0, opts, _segs(), 100.0, 60.0)
+        seen.append(plan["render_opts"]["crop"])
+        opts = {**opts, **plan["render_opts"]}
+    assert seen == ["track", "bias_left", "bias_right", "letterbox"]
+    assert "lock" not in seen and "center" not in seen
+    assert len(set(seen)) == len(seen)
+
+    # An explicit lock (chosen in the editor) is where it starts from, too.
+    first = learning.recut_plan(faults, 22.0, 41.0, {"game": "wardogs", "crop": "lock"}, _segs(), 100.0, 60.0)
+    assert first["render_opts"]["crop"] == "track"
+
+
+def test_non_game_footage_keeps_the_plain_ladder():
+    assert learning.framing_ladder({}) == ["track", "center", "bias_left", "bias_right"]
+    assert learning.current_framing({}) == "track"
+    assert learning.framing_ladder({"game": "none"}) == ["track", "center", "bias_left", "bias_right"]
 
 
 def test_the_flag_reply_says_whether_recut_can_do_anything(tmp_path):
@@ -276,6 +315,36 @@ def test_the_flag_reply_says_whether_recut_can_do_anything(tmp_path):
     none = c.post(f"/clips/{clip_id}/flag", json={"reasons": ["captions"]}).json()
     assert none["recut"] == {"available": False, "changes": []}         # nothing to offer: the dialog hides the button
     some = c.post(f"/clips/{clip_id}/flag", json={"reasons": ["subject_cut_off"]}).json()
-    assert some["recut"] == {"available": True, "changes": ["framing set to letterbox"]}
+    assert some["recut"] == {"available": True, "changes": ["framing set to center"]}
     r = c.post(f"/clips/{clip_id}/recut")
-    assert r.status_code == 200 and r.json()["changes"] == ["framing set to letterbox"]
+    assert r.status_code == 200 and r.json()["changes"] == ["framing set to center"]
+
+
+# ---- how much / where: the follow-up answers on a flag ------------------------
+
+
+def test_recut_size_follows_the_answer_to_how_much():
+    segs = _segs()   # 5s segments
+    small = learning.recut_plan({"ends_early"}, 22.0, 41.0, {}, segs, 100.0, 60.0, {"ends_early": "0-3s"})
+    big = learning.recut_plan({"ends_early"}, 22.0, 41.0, {}, segs, 100.0, 60.0, {"ends_early": "9s+"})
+    assert small["end"] < big["end"] and big["end"] >= 41.0 + 11.0
+    # No answer keeps the old single-step behaviour.
+    assert learning.recut_plan({"ends_early"}, 22.0, 41.0, {}, segs, 100.0, 60.0)["end"] == 45.0
+
+
+def test_mid_sentence_answer_only_moves_that_edge():
+    segs = _segs()
+    plan = learning.recut_plan({"mid_sentence"}, 22.0, 41.0, {}, segs, 100.0, 60.0, {"mid_sentence": "end"})
+    assert plan["start"] == 22.0 and plan["end"] == 45.0
+
+
+def test_a_side_answer_picks_the_framing_instead_of_guessing():
+    plan = learning.recut_plan({"wrong_person"}, 22.0, 41.0, {}, _segs(), 100.0, 60.0, {"wrong_person": "right"})
+    assert plan["render_opts"] == {"crop": "bias_right"}
+
+
+def test_unknown_detail_answers_are_dropped():
+    from server.flags_api import clean_details
+
+    got = clean_details({"ends_early": "3-9s", "starts_late": "bogus", "captions": "timing", "nope": "x"}, {"ends_early", "starts_late"})
+    assert got == {"ends_early": "3-9s"}   # captions not ticked, starts_late's answer invalid

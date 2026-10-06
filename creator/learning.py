@@ -322,13 +322,53 @@ def flag_feedback(db: StateDB, creator_id: int | None, reasons) -> dict:
 
 # ---- fixing the flagged clip itself -----------------------------------------
 
-RECUT_STEP = 1.5   # seconds a single flag moves an edge
+RECUT_STEP = 1.5   # seconds a single flag moves an edge, when no size was given
+# What the answer to "how much?" moves an edge by: past the middle of each band,
+# so the fix lands beyond the problem instead of just short of it.
+DETAIL_SECONDS = {"0-3s": 2.5, "3-9s": 6.5, "9s+": 11.0}
+# Where a "who / which side" answer points the crop, as framing names the
+# renderer understands.
+DETAIL_FRAMING = {"left": "bias_left", "right": "bias_right", "center": "center"}
 # Complaints about who or what is in the picture, none of which names a fix.
 FRAMING_FAULTS = {"subject_cut_off", "wrong_person", "wrong_angle"}
 
 
+def _profile(opts: dict | None):
+    from genres import profiles
+
+    game = (opts or {}).get("game")
+    return profiles.get(game) if game and game != "none" else None
+
+
+def framing_ladder(opts: dict | None) -> list[str]:
+    """The framings worth trying for this clip, best guess first. Each one is
+    a different picture, or it does not belong here.
+
+    Footage with a game profile (genres/profiles.py) starts with the profile's
+    own answer, where the player aims. Then the plain subject tracker, which
+    follows whoever is on screen. A fixed centre only if the profile does not
+    already aim at the middle (it would be the same picture as the lock), and
+    a nudge to either side of the crosshair. Letterbox is deliberately absent:
+    see recut_plan.
+    """
+    profile = _profile(opts)
+    if profile is None:
+        return ["track", "center", "bias_left", "bias_right"]
+    centre_is_lock = abs(profile.focus_x - 0.5) < 0.01
+    return ["lock", "track", *([] if centre_is_lock else ["center"]), "bias_left", "bias_right"]
+
+
+def current_framing(opts: dict | None) -> str:
+    """What a clip is framed with right now. A game clip with no framing chosen
+    is on the profile's lock, not on "track": that is what the renderer does."""
+    chosen = (opts or {}).get("crop")
+    if chosen:
+        return chosen
+    return "lock" if _profile(opts) is not None else "track"
+
+
 def recut_plan(reasons, start: float, end: float, opts: dict, segments: list,
-               video_duration: float | None, max_duration: float) -> dict:
+               video_duration: float | None, max_duration: float, details: dict | None = None) -> dict:
     """The corrections one clip's own flags ask for, applied to that clip.
 
     Unlike preferences(), this needs no minimum count: the user pointed at THIS
@@ -337,7 +377,11 @@ def recut_plan(reasons, start: float, end: float, opts: dict, segments: list,
     {'start', 'end', 'render_opts', 'changes'}; changes is empty when nothing
     the flags said can be acted on."""
     reasons = set(reasons)
+    details = details or {}
     new_start, new_end, changes = start, end, []
+
+    def step(reason: str) -> float:
+        return DETAIL_SECONDS.get(details.get(reason), RECUT_STEP)
 
     def seg_start(t: float) -> float:
         for s in segments:
@@ -357,20 +401,23 @@ def recut_plan(reasons, start: float, end: float, opts: dict, segments: list,
         return max(ends) if ends else None
 
     if "starts_late" in reasons:
-        new_start = seg_start(max(0.0, new_start - RECUT_STEP))
+        new_start = seg_start(max(0.0, new_start - step("starts_late")))
         changes.append(f"starts {start - new_start:.1f}s earlier")
     if "ends_early" in reasons:
-        new_end = seg_end(new_end + RECUT_STEP)
+        new_end = seg_end(new_end + step("ends_early"))
         if video_duration:
             new_end = min(new_end, float(video_duration))
         changes.append(f"ends {new_end - end:.1f}s later")
     elif "runs_long" in reasons:
-        cut = sentence_end_before(new_end - RECUT_STEP)
+        cut = sentence_end_before(new_end - step("runs_long"))
         if cut is not None:
             new_end = cut
             changes.append(f"ends {end - new_end:.1f}s sooner")
     if "mid_sentence" in reasons:
-        s2, e2 = seg_start(new_start), seg_end(new_end)
+        # "Where?" says which edge; unanswered, both are fitted as before.
+        where = details.get("mid_sentence", "both")
+        s2 = seg_start(new_start) if where in ("start", "both") else new_start
+        e2 = seg_end(new_end) if where in ("end", "both") else new_end
         if (s2, e2) != (new_start, new_end):
             new_start, new_end = s2, e2
             changes.append("edges moved to whole sentences")
@@ -381,20 +428,41 @@ def recut_plan(reasons, start: float, end: float, opts: dict, segments: list,
         changes = [c for c in changes if not c.startswith(("starts", "ends", "edges"))]
 
     render_opts: dict = {}
-    current = (opts or {}).get("crop", "track")
+    note = ""
+    current = current_framing(opts)
     target = None
     for reason, mode in (("needs_wide", "letterbox"), ("crop_jumps", "center"), ("needs_tight", "track")):
         if reason in reasons and current != mode:
             target = mode
             break
+    if target is None:
+        # An answer to "who / which side" is a direction, so use it before guessing.
+        for reason in ("wrong_person", "subject_cut_off"):
+            mode = DETAIL_FRAMING.get(details.get(reason, ""))
+            if reason in reasons and mode and current != mode:
+                target = mode
+                break
     if target is None and reasons & FRAMING_FAULTS:
         # "The subject is cut off / the wrong person / the wrong angle" does not
-        # say which framing is right, only that this one is not. Step toward one
-        # that shows more: following the subject, then the whole frame, then a
-        # fixed centre crop. Each press of Re-cut moves one step, so it can be
-        # walked to whichever reads best.
-        target = {"track": "letterbox", "letterbox": "center"}.get(current)
+        # say which framing is right, only that this one is not. So try a
+        # different real framing, one per press of Re-cut, and remember which
+        # have been tried so a press never lands on one that was already wrong.
+        #
+        # Letterbox is NOT a step on this ladder. It shows the whole frame
+        # because nothing was found, which is the opposite of an answer, and it
+        # used to be the first thing a flag produced. It is the fallback once
+        # every real framing has been tried, and otherwise only when the user
+        # asks for it (needs_wide).
+        tried = list(dict.fromkeys([*(opts or {}).get("framing_tried", []), current]))
+        target = next((m for m in framing_ladder(opts) if m not in tried), None)
+        if target is None and "letterbox" not in tried:
+            target = "letterbox"
+            changes.append("every other framing has been tried, so this is the whole frame")
+        elif target is None:
+            note = "Every framing has been tried. Adjust the layout by hand in the editor."
+        if target:
+            render_opts["framing_tried"] = tried
     if target:
         render_opts["crop"] = target
         changes.append(f"framing set to {target}")
-    return {"start": new_start, "end": new_end, "render_opts": render_opts, "changes": changes}
+    return {"start": new_start, "end": new_end, "render_opts": render_opts, "changes": changes, "note": note}

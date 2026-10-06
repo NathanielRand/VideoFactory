@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('studio', {
   readClipboardKey: (): Promise<string> => ipcRenderer.invoke('read-clipboard-key'),
   getDownloadsPath: (): Promise<string> => ipcRenderer.invoke('get-downloads-path'),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke('pick-folder'),
+  // Library location (Settings > Storage): its own picker, and a restart.
+  pickLibraryFolder: (): Promise<string | null> => ipcRenderer.invoke('pick-library-folder'),
+  relaunch: (): Promise<boolean> => ipcRenderer.invoke('relaunch'),
   /** Give the window keyboard focus back after a native dialog (alert/confirm). */
   refocus: (): Promise<boolean> => ipcRenderer.invoke('refocus'),
   showInFolder: (path: string): Promise<boolean> => ipcRenderer.invoke('show-in-folder', path),

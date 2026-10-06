@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import AsyncButton from './AsyncButton'
 import { api } from '../lib/api'
 import { getExportFolder, pickExportFolder, setExportFolder } from '../lib/exportFolder'
 import { Folder } from './icons'
@@ -579,15 +580,17 @@ export default function MultilingualExport({
       {transModel && (
         <p className="text-xs text-muted border-t border-raised/60 pt-2">
           {t('Translating with')} <code>{transModel}</code>{' '}
-          <button
+          <AsyncButton
             className="text-accent hover:underline"
+            busyLabel={t('Switching…')}
+            onError={(e) => window.alert(e instanceof Error ? e.message : String(e))}
             onClick={async () => {
               await api.patchSettings({ translation_model: '' })
               setTransModel('')
             }}
           >
             {t('use the clipping model instead')}
-          </button>
+          </AsyncButton>
         </p>
       )}
       {canDub && picked.some((c) => langs.find((l) => l.code === c)?.can_dub) && (

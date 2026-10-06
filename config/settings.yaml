@@ -79,6 +79,8 @@ clips:
   min_duration: 10      # seconds — clips land on sentence boundaries, so real
   max_duration: 60      # lengths vary naturally across this 10-60s range
                         # (turn on the 60s+ toggle for TikTok-length clips)
+  auto_tighten: true    # cut dead air from new clips and crossfade the joins;
+                        # the cuts show in the editor and can be undone
   vertical: true        # true 9:16 1080x1920 with YOLOv8 subject tracking
   captions: true        # burn word-synced captions into the clips
 
@@ -157,6 +159,13 @@ upload:
                          # per Google Cloud project, so this is now a self-imposed
                          # pacing limit, not a technical one.
   client_secret: config/client_secret.json   # from Google Cloud Console
+
+youtube:
+  # Only needed if downloads fail with "Sign in to confirm you're not a bot".
+  # Use ONE: a browser you are signed in to YouTube with (close it first on
+  # Windows if it errors), or an exported cookies.txt. Blank = anonymous.
+  cookies_from_browser: ""   # e.g. "chrome", "firefox", "edge"
+  cookies_file: ""           # e.g. "C:/Users/you/cookies.txt"
 
 feedback:
   # Where the in-app Feedback Hub sends reports (a Cloudflare Worker that

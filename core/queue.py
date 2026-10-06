@@ -349,6 +349,13 @@ def _item(row) -> dict:
     # The settings snapshot, with the url lifted out: the UI displays one and
     # edits the other, and should never have to parse payload JSON itself.
     item["url"] = payload.pop("url", "")
+    # A cancel is cooperative: it lands at the next checkpoint, which can be
+    # minutes away. Until then the job is still "running" but already told to
+    # stop, and the screen has to say so instead of offering Cancel again.
+    from core import cancel
+
+    item["cancelling"] = bool(item.get("status") == "running" and item.get("video_id")
+                              and cancel.is_cancelled(item["video_id"]))
     item["settings"] = payload
     item.pop("payload", None)
     return item

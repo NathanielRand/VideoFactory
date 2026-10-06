@@ -598,6 +598,21 @@ ipcMain.handle('pick-folder', async () => {
   return result.canceled ? null : result.filePaths[0]
 })
 
+// The library location is read once at startup, so changing it ends in a
+// restart. Quitting runs before-quit, which stops the engine and Ollama first.
+ipcMain.handle('pick-library-folder', async () => {
+  const result = await dialog.showOpenDialog({
+    title: 'Choose where Video Factory keeps its library',
+    properties: ['openDirectory', 'createDirectory']
+  })
+  return result.canceled ? null : result.filePaths[0]
+})
+ipcMain.handle('relaunch', () => {
+  app.relaunch()
+  app.quit()
+  return true
+})
+
 // Local page: reveal a finished file, or open a destination folder. Only a
 // file that exists is revealed, and only a directory is opened: openPath on
 // a file would run it, which a path from the renderer must never do.

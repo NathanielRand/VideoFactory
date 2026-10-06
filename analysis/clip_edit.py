@@ -15,7 +15,7 @@ from llm.base import LLMBackend
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "config" / "prompts" / "edit_clip.txt"
 
-_CROP_MODES = {"track", "center", "bias_left", "bias_right"}
+_CROP_MODES = {"track", "center", "bias_left", "bias_right", "lock"}
 _POSITIONS = {"bottom", "middle", "top"}
 
 MIN_DURATION = 5.0

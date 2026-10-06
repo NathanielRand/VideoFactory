@@ -246,3 +246,12 @@ def test_a_rerender_keeps_the_thumbnail_and_never_asks_for_another(tmp_path):
     # A clip that never had one is not handed one by being re-rendered.
     carry_over(tmp_path, b, 503)
     assert not (folder / "clip_503_chosen.jpg").exists() and (folder / "clip_503_auto.done").exists()
+
+
+def test_handle_text_credits_the_channel_as_an_at_handle():
+    from video.thumbnail import handle_text
+
+    assert handle_text("Some Creator") == "@SomeCreator"
+    assert handle_text("@already") == "@already"
+    assert handle_text("") == ""
+    assert handle_text("   ") == ""

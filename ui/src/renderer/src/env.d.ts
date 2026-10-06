@@ -53,6 +53,10 @@ interface Window {
     readClipboardKey: () => Promise<string>
     getDownloadsPath: () => Promise<string>
     pickFolder: () => Promise<string | null>
+    /** Folder picker for the library location (not the export folder). */
+    pickLibraryFolder?: () => Promise<string | null>
+    /** Restart the app, e.g. to start on a new library location. */
+    relaunch?: () => Promise<boolean>
     refocus: () => Promise<boolean>
     /** Reveal a file in Explorer / Finder. False when it is not there. */
     showInFolder?: (path: string) => Promise<boolean>

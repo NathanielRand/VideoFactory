@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import AsyncButton from '../components/AsyncButton'
 import BrandingPreview from '../components/BrandingPreview'
 import CaptionStyleControls, { DEFAULT_CAPTION_STYLE } from '../components/CaptionStyleControls'
 import CreditControls from '../components/CreditControls'
@@ -323,9 +324,9 @@ export default function Branding(): JSX.Element {
                   <button className="btn-ghost !py-1 text-xs" onClick={() => startNew(current)}>
                     {t('Duplicate')}
                   </button>
-                  <button className="text-xs text-muted hover:text-red-400 px-1" onClick={remove}>
+                  <AsyncButton className="text-xs text-muted hover:text-red-400 px-1" busyLabel={t('Deleting…')} onClick={remove}>
                     {t('Delete')}
-                  </button>
+                  </AsyncButton>
                 </>
               )}
             </div>

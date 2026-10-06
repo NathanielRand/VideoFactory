@@ -61,10 +61,8 @@ py -3.11 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt ruff pytest httpx2
 ollama pull gemma:7b          # the model the scoring is tuned on (8 GB VRAM)
 
-cd ui
 corepack enable
-pnpm install
-pnpm run dev                   # Electron + the backend (uses ..\.venv automatically)
+node start.mjs                 # installs UI deps on first run, then Electron + the backend (uses .venv automatically)
 ```
 
 FFmpeg must be on `PATH` (`winget install Gyan.FFmpeg`). The `cu130` PyTorch build
@@ -80,10 +78,8 @@ python3.11 -m venv .venv
 ollama serve &                 # or open the Ollama app
 ollama pull gemma:7b
 
-cd ui
 corepack enable
-pnpm install
-pnpm run dev
+node start.mjs                 # installs UI deps on first run, then launches the app
 ```
 
 Tracking uses the Apple GPU (Metal). Speaker detection and speech recognition run
@@ -104,10 +100,8 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt ruff pytest httpx2
 ollama pull gemma:7b
 
-cd ui
 corepack enable
-pnpm install
-pnpm run dev
+node start.mjs                 # installs UI deps on first run, then launches the app
 ```
 
 On Linux the hardware encoder is NVENC, AMF or QSV where the driver exists; VAAPI is
@@ -115,6 +109,10 @@ not used. Details and the Ubuntu 24.04 AppImage quirk: [docs/LINUX.md](docs/LINU
 
 ### Running it
 
+- Launch with `node start.mjs` (or `npm start`) from the repo root. It runs `pnpm install`
+  when needed. Prefer no terminal? Double-click `start.bat` (Windows), `start.command`
+  (macOS) or `start.sh` (Linux; some file managers need "Run as a program" enabled).
+  The Python setup above is still a one-time step.
 - The processing queue **starts paused** on purpose. Press Start once you've added videos.
 - Backend only: `python main.py serve` (with the venv's Python), then
   `GET http://127.0.0.1:8765/health/preflight`.

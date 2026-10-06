@@ -87,6 +87,16 @@ def find_clips(
 
     audio_excitement = _combine([_pct(audio_raw[k]) for k in ("spike", "burst", "noisiness") if k in audio_raw])
     visual_activity = _combine([_pct(visual_raw[k]) for k in ("motion", "scene_cut", "flash") if k in visual_raw])
+    hud = visual_raw.get("hud")
+    if hud is not None and hud.size:
+        # Interface events (genres/events.py) are already 0..1 and mean "the
+        # game just announced something", so they lift the visual channel
+        # directly instead of being re-ranked against everything else.
+        n = max(visual_activity.size, hud.size)
+        visual_activity = np.maximum(
+            np.pad(visual_activity, (0, n - visual_activity.size)),
+            np.pad(hud, (0, n - hud.size)),
+        )
     combined = _combine([a for a in (audio_excitement, visual_activity) if a.size])
 
     events = _build_events(audio_excitement, visual_activity, visual_raw)
@@ -494,6 +504,9 @@ def _build_events(
             parts.append("high visual activity")
         if sec < scene_cut.size and scene_cut[sec] >= 2:
             parts.append("rapid scene cuts")
+        hud = visual_raw.get("hud")
+        if hud is not None and sec < hud.size and hud[sec] > 0.5:
+            parts.append("ON-SCREEN GAME EVENT (kill/cash popup)")
         if parts:
             events.append((float(sec), " + ".join(parts)))
     if len(events) > max_events:  # keep the most spread-out subset

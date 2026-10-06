@@ -6,6 +6,8 @@ import { etaSeconds, formatEta } from '../../lib/jobProgress'
 import { describeOptions, jobLabel, ranFor, sourceOf } from '../../lib/queue'
 import QueueItemSettings from './QueueItemSettings'
 import { t } from '../../lib/i18n'
+import { useAction } from '../../lib/useAction'
+import AsyncButton from '../AsyncButton'
 
 const ICON: Record<string, string> = {
   running: '▶',
@@ -46,23 +48,19 @@ export default function QueueItem({
   onChanged: () => void
   onOpenInStudio?: (videoId: string) => void
 }): JSX.Element {
-  const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const { busy, error: actionError, run: lock } = useAction()
+  const [logError, setLogError] = useState<string | null>(null)
+  const error = actionError ?? logError
 
-  const run = async (fn: () => Promise<unknown>): Promise<void> => {
-    setBusy(true)
-    setError(null)
-    try {
+  // Every button on the row goes through one lock: while any of them is working
+  // the others wait, and a repeat press of the same one is dropped.
+  const run = (fn: () => Promise<unknown>): Promise<void> =>
+    lock(async () => {
       await fn()
       onChanged()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
-  }
+    }).then(() => undefined)
 
   const chips = describeOptions(job.settings)
   const source = sourceOf(job.url)
@@ -154,7 +152,9 @@ export default function QueueItem({
               clips one way and the rest another. */}
           {running && (
             <p className="text-xs text-muted mt-1.5">
-              {t('Settings are locked while this video processes.')}
+              {job.cancelling
+                ? t('Cancelling: this video stops at the next safe point, so the current step finishes first.')
+                : t('Settings are locked while this video processes.')}
             </p>
           )}
           {error && <p className="text-sm text-error mt-1">{error}</p>}
@@ -204,14 +204,23 @@ export default function QueueItem({
           )}
 
           {running && (
-            <button
+            // The server answers a cancel at once but the job only stops at its
+            // next checkpoint, so the button stays locked on the server's word
+            // (job.cancelling), not on the request having returned.
+            <AsyncButton
               className="btn-ghost !px-2 !py-1"
-              disabled={busy || !job.video_id}
-              title={t('Stop this video (finishes the clip it is on)')}
+              disabled={!job.video_id}
+              holdWhile={!!job.cancelling}
+              busyLabel={t('Cancelling…')}
+              title={
+                job.cancelling
+                  ? t('Stopping at the next safe point')
+                  : t('Stop this video (finishes the clip it is on)')
+              }
               onClick={() => run(() => api.cancelProcessing(job.video_id))}
             >
-              {busy ? t('Cancelling…') : t('Cancel')}
-            </button>
+              {t('Cancel')}
+            </AsyncButton>
           )}
 
           {(job.status === 'failed' || job.status === 'cancelled') && (
@@ -221,7 +230,7 @@ export default function QueueItem({
               title={t('Put this video back in the queue with the same settings')}
               onClick={() => run(() => api.retryJob(job.id))}
             >
-              {t('Retry')}
+              {busy ? t('Retrying…') : t('Retry')}
             </button>
           )}
 
@@ -248,7 +257,7 @@ export default function QueueItem({
                   const res = await api.jobLog(job.id)
                   setLog(res.log)
                 } catch (e) {
-                  setError(e instanceof Error ? e.message : String(e))
+                  setLogError(e instanceof Error ? e.message : String(e))
                 }
               }}
             >

@@ -31,7 +31,14 @@ export default function ClipBulkBar({
   onPublish: (clips: Clip[], when: 'now' | 'schedule') => void
   publishReady: boolean
 }): JSX.Element {
-  const [busy, setBusy] = useState('')
+  const [busy, setBusyState] = useState('')
+  // A ref beside the state: two presses in one frame both see the old `busy`,
+  // so the state alone would let the second one start a second batch.
+  const working = useRef(false)
+  const setBusy = (label: string): void => {
+    working.current = label !== ''
+    setBusyState(label)
+  }
   const [note, setNote] = useState('')
   const [exportOpen, setExportOpen] = useState(false)
   const [brandOpen, setBrandOpen] = useState(false)
@@ -50,6 +57,7 @@ export default function ClipBulkBar({
     label: string,
     fn: (c: Clip) => Promise<unknown>
   ): Promise<{ ok: Clip[]; failed: number }> => {
+    if (working.current) return { ok: [], failed: 0 }
     setBusy(label)
     setNote('')
     const ok: Clip[] = []
@@ -68,6 +76,7 @@ export default function ClipBulkBar({
   const failNote = (failed: number): string => (failed ? ` ${failed} failed.` : '')
 
   const rerender = async (): Promise<void> => {
+    if (working.current) return
     if (
       !window.confirm(
         `Re-render ${n} clip${s}?\n\nEach one is rendered again with its current settings. Clips set to follow a branding profile pick up the profile's latest watermark, credit and captions. This can take a while.`
@@ -81,6 +90,7 @@ export default function ClipBulkBar({
 
   const applyProfile = async (profileId: number | null): Promise<void> => {
     setBrandOpen(false)
+    if (working.current) return
     const name = profiles.find((p) => p.id === profileId)?.name ?? 'no branding'
     if (!window.confirm(`Set ${n} clip${s} to “${name}” and re-render ${n === 1 ? 'it' : 'them'}?`)) return
     const { ok, failed } = await each('branding', (c) =>
@@ -92,6 +102,7 @@ export default function ClipBulkBar({
 
   const applyPlaylist = async (playlistId: string, title: string): Promise<void> => {
     setPlaylistOpen(false)
+    if (working.current) return
     setBusy('playlist')
     setNote('')
     try {
@@ -113,6 +124,7 @@ export default function ClipBulkBar({
   }
 
   const remove = async (): Promise<void> => {
+    if (working.current) return
     if (
       !window.confirm(
         `Delete ${n} clip${s} and ${n === 1 ? 'its file' : 'their files'}?\n\nThe videos and your other clips stay. This can't be undone.`
@@ -127,6 +139,7 @@ export default function ClipBulkBar({
 
   const exportLocal = async (): Promise<void> => {
     setExportOpen(false)
+    if (working.current) return
     setBusy('export')
     setNote('')
     try {
@@ -148,6 +161,7 @@ export default function ClipBulkBar({
   }
 
   const markExported = async (exported: boolean): Promise<void> => {
+    if (working.current) return
     const { ok, failed } = await each('star', (c) => api.patchClip(c.id, { exported }))
     setNote(`${exported ? 'Starred' : 'Unstarred'} ${ok.length} clip${ok.length === 1 ? '' : 's'}.${failNote(failed)}`)
     onChanged()

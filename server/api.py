@@ -9,6 +9,7 @@ Python or the filesystem directly.
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import threading
@@ -1322,6 +1323,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         if not vid:
             raise HTTPException(400, "provide video_id or a resolvable url")
         cancel.request_cancel(vid)
+        broadcaster.publish({"type": "queue"})   # the row flips to "Cancelling" at once
         return {"cancelling": vid}
 
     def _log_feedback(d: StateDB, row, action: str, extra: dict | None = None) -> None:
@@ -1459,6 +1461,107 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         print(f"  Housekeeping: freed {result['bytes_freed']/1e9:.2f} GB "
               f"across {result['files_removed']} file(s)")
         return result
+
+    # ---- where the library lives ---------------------------------------------
+
+    from core import storage as storage_mod
+
+    move_state = storage_mod.MoveState()
+
+    @app.get("/storage/location")
+    def storage_location():
+        """Where the library is, which drive that is, and what is in it."""
+        pointer = storage_mod.read_pointer()
+        from_env = bool(os.environ.get("VIDEO_FACTORY_DATA_DIR"))
+        return {
+            **storage_mod.describe(data_dir),
+            **storage_mod.breakdown(data_dir),
+            "export_note": "Exported clips go to the export folder, not the library.",
+            "restart_pending": storage_mod.hold.is_set(),
+            # What the next start will use, when that is not what is running now.
+            "pending_path": (str(pointer) if pointer and pointer.resolve() != data_dir else None),
+            # Docker and the like pin the location from outside; changing it here would do nothing.
+            "locked": from_env,
+            "fallback_from": config["paths"].get("storage_fallback_from"),
+            "fallback_reason": config["paths"].get("storage_fallback_reason"),
+        }
+
+    @app.get("/storage/volumes")
+    def storage_volumes():
+        """Every drive the library could be kept on, with free space."""
+        current = storage_mod.volume_for(data_dir)
+        out = storage_mod.volumes()
+        for v in out:
+            v["current"] = bool(current and current["mount"] == v["mount"])
+        return {"volumes": out}
+
+    @app.post("/storage/check")
+    def storage_check(body: dict):
+        """Whether the library could go to `path`, and why not."""
+        mode = body.get("mode", "move")
+        target = Path(str(body.get("path", "")))
+        lib = storage_mod.breakdown(data_dir)["move_bytes"] if mode == "move" else 0
+        problems = storage_mod.check_target(data_dir, target, lib, mode)
+        return {"ok": not problems, "problems": problems, "library_bytes": lib}
+
+    def _busy() -> bool:
+        d = db()
+        try:
+            n = d.conn.execute("SELECT COUNT(*) FROM jobs WHERE status = 'running'").fetchone()[0]
+            n += d.conn.execute("SELECT COUNT(*) FROM publish_jobs WHERE status = 'running'").fetchone()[0]
+        finally:
+            d.close()
+        return n > 0
+
+    @app.post("/storage/location")
+    def storage_set_location(body: dict):
+        """Switch the library: move it, start an empty one, or use one that exists.
+
+        Takes effect after a restart, never live. A move copies and leaves the
+        old folder in place.
+        """
+        if os.environ.get("VIDEO_FACTORY_DATA_DIR"):
+            raise HTTPException(409, "The location is set by the environment this app was started in.")
+        mode = body.get("mode", "move")
+        if mode not in ("move", "fresh", "existing"):
+            raise HTTPException(400, "mode must be move, fresh or existing")
+        if move_state.snapshot()["status"] == "running":
+            raise HTTPException(409, "A move is already running.")
+        if _busy():
+            raise HTTPException(409, "Videos are still processing. Wait for them to finish, then try again.")
+
+        target = Path(str(body.get("path", "")))
+        lib = storage_mod.breakdown(data_dir)["move_bytes"] if mode == "move" else 0
+        problems = storage_mod.check_target(data_dir, target, lib, mode)
+        if problems:
+            raise HTTPException(400, " ".join(problems))
+        target = target.resolve()
+
+        if mode == "move":
+            move_state.reset()
+            threading.Thread(
+                target=storage_mod.move_library, args=(data_dir, target, move_state), daemon=True
+            ).start()
+            return {"started": True}
+
+        if mode == "fresh":
+            target.mkdir(parents=True, exist_ok=True)
+        storage_mod.write_pointer(target)
+        storage_mod.hold.set()
+        return {"started": False, "restart_required": True, "path": str(target)}
+
+    @app.get("/storage/move")
+    def storage_move_status():
+        return move_state.snapshot()
+
+    @app.post("/storage/reset")
+    def storage_reset_location():
+        """Go back to the default location on the next start."""
+        if os.environ.get("VIDEO_FACTORY_DATA_DIR"):
+            raise HTTPException(409, "The location is set by the environment this app was started in.")
+        storage_mod.write_pointer(None)
+        storage_mod.hold.set()
+        return {"restart_required": True}
 
     @app.delete("/videos/{video_id}")
     def delete_video(video_id: str):
@@ -1858,7 +1961,15 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
                 payload["end"] = body.end
             if body.render_opts:
                 payload["render_opts"] = body.render_opts
-            job_id = d.add_job("render", json.dumps(payload))
+            text = json.dumps(payload)
+            # The same request while it is still waiting is the same request: a
+            # double press, or a second tab, must not render the clip twice.
+            dup = d.conn.execute(
+                "SELECT id FROM jobs WHERE type = 'render' AND status = 'queued' AND payload = ?", (text,)
+            ).fetchone()
+            if dup:
+                return {"job_id": dup["id"]}
+            job_id = d.add_job("render", text)
             _log_feedback(
                 d, row,
                 "timestamps_adjusted"
@@ -1868,6 +1979,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
         finally:
             d.close()
         worker.notify()
+        broadcaster.publish({"type": "queue"})   # clip cards and editors see the work at once
         return {"job_id": job_id}
 
     preview_tracking = TrackingCache()
@@ -1903,6 +2015,10 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
         opts = json.loads(row["render_opts"]) if row["render_opts"] else {}
         opts["edit"] = body.edit  # pending edit (None = cleared)
+        # Whatever is in the editor now is the user's. An automatic edit is only
+        # ever made once, and a Re-cut must not throw hand edits away as if they
+        # were automatic.
+        opts["auto_tighten"] = "none"
         if body.caption_lines is not None:
             opts["caption_lines"] = body.caption_lines
         if body.crop:
@@ -1930,7 +2046,7 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             # branding, so tuning those re-previews without redoing it.
             tracking = preview_tracking.for_key(TrackingCache.key(
                 clip_id, source, row["start_s"], row["end_s"], opts.get("edit"),
-                opts.get("crop") or "track", bool(opts.get("podcast") or config["clips"].get("podcast")),
+                opts.get("crop") or "auto", bool(opts.get("podcast") or config["clips"].get("podcast")),
                 config["tracking"]["detector"], config["tracking"]["sample_fps"],
             ))
             rendered, _ = _render_files(

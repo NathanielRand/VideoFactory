@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useClipRendering } from '../lib/clipWork'
 import { api } from '../lib/api'
 import { getExportFolder, pickExportFolder, setExportFolder } from '../lib/exportFolder'
 import { Folder, Scissors } from './icons'
@@ -78,6 +79,7 @@ export default function ClipEditor({
     getExportFolder().then(setFolder)
   }, [])
   const [busy, setBusy] = useState<string | null>(null)
+  const rendering = useClipRendering(clip.id)
   const [notice, setNotice] = useState<string | null>(null)
 
   // ---- branding: a profile, with any part this clip sets for itself ----
@@ -368,8 +370,8 @@ export default function ClipEditor({
         <button className="btn-accent" onClick={saveMetadata} disabled={busy !== null}>
           {busy === 'save' ? 'Saving…' : 'Save metadata'}
         </button>
-        <button className="btn-ghost" onClick={rerender} disabled={busy !== null}>
-          {busy === 'render' ? 'Queueing…' : 'Re-render'}
+        <button className="btn-ghost" onClick={rerender} disabled={busy !== null || rendering}>
+          {busy === 'render' ? 'Queueing…' : rendering ? 'Rendering…' : 'Re-render'}
         </button>
         <input
           className="input !w-44"
@@ -447,8 +449,8 @@ export default function ClipEditor({
       />
       {bProfile !== 'processed' && (
         <div className="flex items-center gap-3 -mt-2">
-          <button className="btn-accent" onClick={applyBranding} disabled={busy !== null}>
-            {busy === 'branding' ? 'Queueing…' : 'Apply branding & re-render'}
+          <button className="btn-accent" onClick={applyBranding} disabled={busy !== null || rendering}>
+            {busy === 'branding' ? 'Queueing…' : rendering ? 'Rendering…' : 'Apply branding & re-render'}
           </button>
           <span className="text-xs text-muted">
             Burned into the clip, so it takes a re-render. The profile is re-read each time.

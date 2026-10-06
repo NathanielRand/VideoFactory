@@ -59,6 +59,7 @@ _force_utf8_io()
 
 import yaml
 
+from core import storage
 from core.paths import resolve_data_dir, user_config_path
 from core.pipeline import process_video
 from core.scheduler import run_daemon
@@ -99,6 +100,13 @@ def load_config(path: Path) -> dict:
     if privacy in ("public", "unlisted", "private"):
         config.setdefault("upload", {})["privacy"] = privacy
 
+    # YouTube sign-in for yt-dlp (opt-in; see sources.ytdlp_common.cookie_opts).
+    yt = config.get("youtube") or {}
+    for key, var in (("cookies_from_browser", "VF_YT_COOKIES_FROM_BROWSER"),
+                     ("cookies_file", "VF_YT_COOKIES_FILE")):
+        if str(yt.get(key) or "").strip():
+            os.environ[var] = str(yt[key]).strip()
+
     # Environment overrides. Containers cannot edit settings.yaml — Ollama
     # lives at a service name rather than localhost, and the data directory
     # is a mounted volume. These let a compose file say so without anyone
@@ -115,6 +123,21 @@ def load_config(path: Path) -> dict:
     data_dir = os.environ.get("VIDEO_FACTORY_DATA_DIR")
     if data_dir:
         config.setdefault("paths", {})["data_dir"] = data_dir
+    else:
+        # A location the user picked in Settings > Storage. It beats
+        # settings.yaml, but not the environment (Docker pins its own).
+        chosen = storage.read_pointer()
+        if chosen is not None:
+            why = storage.unavailable_reason(chosen, must_exist=True)
+            if why is None:
+                config.setdefault("paths", {})["data_dir"] = str(chosen)
+            else:
+                # An unplugged drive. Do NOT create a library on it: on macOS and
+                # Linux that would make a folder on the system disk. Run on the
+                # default location and say so; the pointer stays, so reconnecting
+                # the drive and restarting brings the real library back.
+                config.setdefault("paths", {})["storage_fallback_from"] = str(chosen)
+                config["paths"]["storage_fallback_reason"] = why
 
     config.setdefault("paths", {})["data_dir"] = str(resolve_data_dir(config))
     # Where a cloud backend finds the user's own API key (llm/providers/keys).

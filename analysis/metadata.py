@@ -221,10 +221,9 @@ def suggest_first_comment(*, title: str, description: str, content: str, llm,
     again once, then dropped, so the standing comment is used instead."""
     context = (_CONTEXT_HEAD + creator_context + "\n\n") if creator_context else ""
     prompt = (
-        "Write the first comment the channel will post under this video. It must be one "
-        "short question (under 150 characters) about something specific that happens in "
-        "the video, which viewers will want to answer. No links, no hashtags, no emoji "
-        "spam, no quotation marks.\n\n"
+        "Write the first comment the channel will post under this video, following the "
+        "FIRST COMMENT rules below exactly. Short and witty, about one specific thing that "
+        "happens in the video.\n\n"
         f"{voice_rules(channel, audience)}\n\n{context}"
         f"TITLE: {title}\nDESCRIPTION: {description}\n\nWHAT HAPPENS:\n{content[:2500]}\n\n"
         'Respond with ONLY valid JSON: {"first_comment": "..."}'
@@ -302,8 +301,26 @@ def voice_rules(channel: str = "", audience: str = "") -> str:
         "- Keep it natural: no slang this audience would not use, nothing dated or cringey, "
         "at most one or two slang terms per field. Slang changes how a thing is said, never "
         "what happened: every fact still has to come from the clip.",
+        comment_rules(who),
     ]
     return "\n".join(lines)
+
+
+def comment_rules(who: str = "the creator") -> str:
+    """How the first comment is written: short, dry, human. Piling on slang
+    and hype is what made earlier ones read as a bot, so this asks for less."""
+    return "\n".join([
+        "FIRST COMMENT (first_comment) - what a funny viewer would type, not a brand:",
+        "- 3 to 10 words. One line. Lowercase is fine, no ending period unless it helps the joke.",
+        "- Witty and dry, one specific detail from the clip: an understated reaction, a deadpan "
+        "observation, or a tiny question. Like \"the confidence before that was unreal\", "
+        f"\"{who} really said that with a straight face\", \"bro had a plan\".",
+        "- Plain words. Skip slang unless it is exactly how the clip sounds; never force it. "
+        "No emoji, or one at most. No exclamation marks.",
+        "- Never: asking viewers to comment, \"what do you think\", \"who else\", \"thoughts\", "
+        "\"favorite part\", hype words (amazing, epic, insane), or explaining the joke.",
+        "- Only what the clip shows. Do not invent an outcome, score or name.",
+    ])
 
 
 def _unvoiced(meta: ClipMetadata, llm, channel: str, audience: str, ask_model: bool = True) -> bool:
