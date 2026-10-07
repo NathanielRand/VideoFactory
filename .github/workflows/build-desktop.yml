@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: ui/package.json
 
@@ -78,7 +78,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -dv "$app" 2>&1 | grep -E "Signature|Authority|flags" || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: video-factory-${{ runner.os }}
           path: |
