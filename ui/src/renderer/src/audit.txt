@@ -1,0 +1,68 @@
+components\AICard.tsx:303: onClick={() => void window.studio.openExternal(provider.pricing_url)} 
+components\AICard.tsx:381: onClick={() => void window.studio.openExternal(provider.key_url)} 
+components\ChannelVideos.tsx:500: onClick={() => setDesigning(v.publish_id)} /
+components\ClipBulkBar.tsx:217: onClick={() => void applyProfile(p.id)} 
+components\ClipBulkBar.tsx:225: onClick={() => void applyProfile(null)} 
+components\ClipBulkBar.tsx:240: onClick={() => void applyPlaylist(p.id, p.title)} 
+components\ClipBulkBar.tsx:252: onClick={() => void applyPlaylist('', '')} 
+components\ClipBulkBar.tsx:263: onClick={() => void exportLocal()} 
+components\ClipBulkBar.tsx:307: onClick={() => void markExported(true)}
+components\ClipBulkBar.tsx:310: onClick={() => void markExported(false)}
+components\ClipCard.tsx:109: onClick={onClick} onMouseEnter={startHover} onMouseLeave={endHover} onFocus={startHover} onBlur={endHover} ari
+components\ClipCard.tsx:199: onClick={(e) => { e.stopPropagation() onToggleExported() }} // Starred, the star sits in the corner on its own
+components\ClipCard.tsx:228: onClick={(e) => { e.stopPropagation() if (window.confirm(`Delete this clip and its file?\n\n"${name}"\n\nOnly 
+components\ClipEditor.tsx:233: onClick={() => setShowBranding((v) => !v)} title="Draw the branding this clip will be re-rendered with over th
+components\ClipEditor.tsx:384: onClick={async () => { const chosen = await pickExportFolder() if (chosen) setFolder(chosen) }} title="Choose 
+components\ClipPlayer.tsx:399: onClick={() => void toggleFullscreen()} aria-label="Fullscreen" className="p-1 hover:text-accent"
+components\CreditControls.tsx:682: onClick={() => void pickImage()}
+components\FeedbackHub.tsx:438: onClick={async () => { if (diagPreview) { setDiagPreview(null) return } const d = await api.feedbackDiagnostic
+components\LibraryLocationCard.tsx:156: onClick={async () => { await api.storageResetLocation() setSaved(true) }} 
+components\LibraryLocationCard.tsx:265: onClick={() => void window.studio.relaunch?.()} 
+components\MultilingualExport.tsx:368: onClick={async () => { const chosen = await pickExportFolder() if (chosen) setFolder(chosen) }} aria-label="Ch
+components\MultilingualExport.tsx:582: onClick={async () => { await api.patchSettings({ translation_model: '' }) setTransModel('') }} 
+components\PublishAllDialog.tsx:466: onClick={() => void window.studio.openExternal(x.url)} 
+components\PublishAllDialog.tsx:478: onClick={() => setAnyway((cur) => { const next = new Set(cur) if (next.has(c.id)) next.delete(c.id) else next.
+components\PublishAllDialog.tsx:585: onClick={() => { onClose() window.dispatchEvent(new Event('open-publish-schedule')) }} 
+components\ScheduleCalendar.tsx:260: onClick={() => setStart(addDays(start, -span))} aria-label={t('Earlier')}
+components\ScheduleCalendar.tsx:266: onClick={() => setStart(addDays(start, span))} aria-label={t('Later')}
+components\ScheduleView.tsx:144: onClick={() => void refresh()}
+components\ScheduleView.tsx:176: onClick={() => void window.studio.openExternal(p.post_url)} 
+components\SetupWizard.tsx:262: onClick={startPull}
+components\ThumbnailStudio.tsx:559: onClick={() => void applyTemplate(tpl.id)} title={tpl.needsCutout ? t('Uses the AI subject cut-out') : ''} 
+components\ThumbnailStudio.tsx:842: onClick={() => void recut(layer.id)}
+components\TimelineEditor.tsx:1181: onClick={() => { push(defaultEdit(duration)) setLayout('track') setCaptionStyle({ ...DEFAULT_CAPTION_STYLE, ..
+components\TimelineEditor.tsx:1319: onClick={() => trimToPlayhead('start')} title="Set the clip's START to the playhead (I)" 
+components\TimelineEditor.tsx:1739: onClick={async () => { const path = await window.studio.pickAudioFile() if (path) { push({ ...edit, music: { p
+components\UpdateBanner.tsx:101: onClick={() => void window.studio.update.install()} 
+components\UpdateBanner.tsx:125: onClick={() => void window.studio.update.skip(s.version ?? '')} 
+components\UpdateBanner.tsx:131: onClick={() => void window.studio.update.download()} 
+components\UploadPostCard.tsx:306: onClick={() => void removeKey()}
+components\VideoPlayer.tsx:470: onClick={() => void toggleFullscreen()} aria-label="Fullscreen" className="p-1 hover:text-accent"
+components\WatermarkControls.tsx:301: onClick={upload}
+components\WoopSocialCard.tsx:248: onClick={() => void removeKey()}
+components\YouTubePanel.tsx:223: onClick={cancel}
+components\delivery\DestinationRow.tsx:105: onClick={() => void window.studio?.openFolder?.(dest.target)}
+components\delivery\TransferList.tsx:74: onClick={() => void window.studio?.showInFolder?.(x.result)}
+components\queue\AddVideos.tsx:849: onClick={() => window.dispatchEvent( new CustomEvent('open-compilation', { detail: imported.compilation }) ) }
+components\queue\QueueItem.tsx:248: onClick={async () => { if (log !== null) { setLog(null) return } try { const res = await api.jobLog(job.id) se
+components\watch\WatchCard.tsx:468: onClick={() => setShowEarlier(!showEarlier)} title={t('Videos that were already there when you started watchin
+components\watch\WatchCard.tsx:588: onClick={() => void window.studio?.openExternal(item.url)} 
+components\watch\WatchLive.tsx:116: onClick={() => void window.studio?.openExternal(e.url as string)} 
+components\watch\WatchSchedule.tsx:119: onClick={() => set({ day_start: '' })} title={t('Start as soon as possible instead')} 
+pages\Branding.tsx:225: onClick={() => startNew()} title={t('New profile')} aria-label={t('New profile')} 
+pages\Branding.tsx:323: onClick={() => startNew(current)}
+pages\Branding.tsx:326: onClick={remove}
+pages\Cloud.tsx:111: onClick={() => void window.studio?.openExternal(url)}
+pages\Cloud.tsx:212: onClick={() => window.dispatchEvent(new CustomEvent('open-local'))} title={t('Pick finished videos and send th
+pages\Cloud.tsx:273: onClick={() => void window.studio?.openExternal(GET_IT[id])} 
+pages\Compilations.tsx:412: onClick={() => void create()}
+pages\Compilations.tsx:505: onClick={async () => { if (!window.confirm(`${t('Delete the template')} “${tp.name}”? ${t('Compilations made w
+pages\Compilations.tsx:528: onClick={() => void cleanUnused()}
+pages\Compilations.tsx:965: onClick={() => void pickBumper(which)}
+pages\Dashboard.tsx:521: onClick={() => toggleExpand(v.video_id)} aria-expanded={expanded === v.video_id} aria-label={`Show generated c
+pages\Dashboard.tsx:549: onClick={() => remove(v.video_id, v.title || v.video_id)} aria-label={`Delete ${v.title || v.video_id}`} title
+pages\Dashboard.tsx:690: onClick={() => void window.studio.openExternal(publishUrl)} className="btn-accent shrink-0 text-lg px-8 py-3.5
+pages\Library.tsx:317: onClick={() => void remove(v)} 
+pages\Local.tsx:141: onClick={() => void window.studio?.openFolder?.(summary.data_dir)} 
+pages\Local.tsx:344: onClick={() => void window.studio?.showInFolder?.(f.path)} 
+pages\Settings.tsx:128: onClick={async () => { const chosen = await pickExportFolder() if (chosen) setFolder(chosen) }} 

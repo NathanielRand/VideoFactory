@@ -679,28 +679,83 @@ function drawBackground(
   return r
 }
 
-// A solid-colour copy of the cut-out's shape, for the sticker outline. Cached:
-// it is the same image and colour on every frame of a drag.
-const silhouettes = new WeakMap<Picture, Map<string, HTMLCanvasElement>>()
-function silhouette(img: Picture, color: string): HTMLCanvasElement {
-  let byColor = silhouettes.get(img)
-  if (!byColor) {
-    byColor = new Map()
-    silhouettes.set(img, byColor)
+interface StickerEdge {
+  canvas: HTMLCanvasElement
+  /** Working-resolution pixels per source pixel. */
+  k: number
+  /** Padding around the image, in working pixels. */
+  pad: number
+}
+
+// The sticker outline: the cut-out's shape grown by `r` source pixels, filled
+// with one colour, with the edge rounded off. Growing by stamping offset copies
+// leaves a scalloped rim and keeps every ragged bit of the matte, so the grown
+// shape is blurred and re-thresholded: bumps smaller than the blur melt away
+// while the overall width stays put. Cached, because a drag reuses it every frame.
+const stickerEdges = new WeakMap<Picture, Map<string, StickerEdge>>()
+const EDGE_MAX_SIDE = 1024
+function stickerEdge(img: Picture, color: string, r: number): StickerEdge {
+  const k = Math.min(1, EDGE_MAX_SIDE / Math.max(img.width, img.height))
+  const rw = Math.max(0.5, Math.round(r * k * 2) / 2)
+  const key = `${color}|${rw}`
+  let cache = stickerEdges.get(img)
+  if (!cache) {
+    cache = new Map()
+    stickerEdges.set(img, cache)
   }
-  let c = byColor.get(color)
-  if (!c) {
-    c = document.createElement('canvas')
-    c.width = img.width
-    c.height = img.height
-    const x = c.getContext('2d')!
-    x.drawImage(img, 0, 0)
-    x.globalCompositeOperation = 'source-in'
-    x.fillStyle = color
-    x.fillRect(0, 0, c.width, c.height)
-    byColor.set(color, c)
+  const hit = cache.get(key)
+  if (hit) return hit
+
+  const sigma = Math.max(1.5, rw * 0.3)
+  const pad = Math.ceil(rw + sigma * 3) + 2
+  const w = Math.max(1, Math.round(img.width * k))
+  const h = Math.max(1, Math.round(img.height * k))
+
+  // Shape in solid colour.
+  const shape = document.createElement('canvas')
+  shape.width = w
+  shape.height = h
+  const sx = shape.getContext('2d')!
+  sx.drawImage(img, 0, 0, w, h)
+  sx.globalCompositeOperation = 'source-in'
+  sx.fillStyle = color
+  sx.fillRect(0, 0, w, h)
+
+  // Grow it: stamps spaced under a pixel apart on the rim, plus an inner ring
+  // so thin parts fill in.
+  const grown = document.createElement('canvas')
+  grown.width = w + pad * 2
+  grown.height = h + pad * 2
+  const gx = grown.getContext('2d')!
+  const steps = Math.min(180, Math.max(24, Math.ceil(Math.PI * 2 * rw)))
+  for (const f of [0.5, 1]) {
+    for (let i = 0; i < steps; i++) {
+      const a = (i / steps) * Math.PI * 2
+      gx.drawImage(shape, pad + Math.cos(a) * rw * f, pad + Math.sin(a) * rw * f)
+    }
   }
-  return c
+  gx.drawImage(shape, pad, pad)
+
+  // Round it: blur, then pull the soft alpha back to a crisp antialiased edge.
+  const soft = document.createElement('canvas')
+  soft.width = grown.width
+  soft.height = grown.height
+  const bx = soft.getContext('2d', { willReadFrequently: true })!
+  bx.filter = `blur(${sigma}px)`
+  bx.drawImage(grown, 0, 0)
+  bx.filter = 'none'
+  const px = bx.getImageData(0, 0, soft.width, soft.height)
+  const d = px.data
+  for (let i = 3; i < d.length; i += 4) {
+    const t = Math.min(1, Math.max(0, (d[i] / 255 - 0.42) / 0.16))
+    d[i] = Math.round(t * t * (3 - 2 * t) * 255)
+  }
+  bx.putImageData(px, 0, 0)
+
+  const edge = { canvas: soft, k, pad }
+  if (cache.size >= 8) cache.clear()
+  cache.set(key, edge)
+  return edge
 }
 
 /** Where the opaque part of a cut-out sits, as fractions of the image.
@@ -785,12 +840,16 @@ function drawCutout(
   ctx.translate(cx, cy)
   ctx.rotate((layer.rotation * Math.PI) / 180)
   if (layer.outline && layer.outline.width > 0) {
-    const s = silhouette(img, layer.outline.color)
-    const r = layer.outline.width
-    for (let i = 0; i < 16; i++) {
-      const a = (i / 16) * Math.PI * 2
-      ctx.drawImage(s, -w / 2 + Math.cos(a) * r, -h / 2 + Math.sin(a) * r, w, h)
-    }
+    // Width is in canvas pixels; the edge is built in source pixels.
+    const e = stickerEdge(img, layer.outline.color, (layer.outline.width * img.width) / w)
+    const m = w / (img.width * e.k) // drawn pixels per working pixel
+    ctx.drawImage(
+      e.canvas,
+      -w / 2 - e.pad * m,
+      -h / 2 - e.pad * m,
+      e.canvas.width * m,
+      e.canvas.height * m
+    )
   }
   if (layer.glow) {
     ctx.shadowColor = layer.glow.color
