@@ -100,6 +100,54 @@ export interface ChannelVideo {
   publish_id: number | null
 }
 
+/** One finding of the monetization linter (publish/compliance.py). */
+export interface AuditFinding {
+  code: string
+  field: 'title' | 'description' | 'tags'
+  message: string
+  fixable: boolean
+}
+
+export interface AuditText {
+  title: string
+  description: string
+  tags: string[]
+}
+
+/** One video of the audit report (publish/audit.audit_item): the text as it is
+ *  on YouTube, and what would replace it. */
+export interface AuditVideo extends AuditText {
+  video_id: string
+  privacy: string
+  genre: string
+  findings: AuditFinding[]
+  score: number
+  changes: ('title' | 'description' | 'tags')[]
+  proposed: AuditText | null
+  /** What only a rewrite can fix: machine-sounding or stuffed wording. */
+  manual: AuditFinding[]
+  rewritten: boolean
+}
+
+export interface AuditReport {
+  at: string
+  channel_id: string
+  summary: { checked: number; clean: number; fixable: number; needs_rewrite: number }
+  videos: AuditVideo[]
+}
+
+export interface AuditView {
+  report: AuditReport | null
+  /** Video ids changed by an apply and not yet undone. */
+  applied: string[]
+}
+
+export interface AuditResult {
+  video_id: string
+  status: 'updated' | 'restored' | 'skipped' | 'deferred' | 'failed'
+  message: string
+}
+
 export interface Playlist {
   id: string
   title: string

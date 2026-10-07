@@ -67,10 +67,12 @@ def test_a_tag_with_a_space_costs_two_extra_characters():
     assert len(clamp_tags(spaced)) < 3, "quoting pushes these over the 500-char budget"
 
 
-def test_hashtags_are_capped_at_five():
-    """Five is our rule. Fifteen is where YouTube ignores every one of them."""
+def test_hashtags_are_capped_at_three():
+    """Three is the compliance default (config `compliance.max_hashtags`): a pile
+    of hashtags reads as spam to the Partner Program, and fifteen is where YouTube
+    ignores every one of them."""
     text = description_with_hashtags("Body", [f"#t{i}" for i in range(40)])
-    assert text.count("#") == 5
+    assert text.count("#") == 3
 
 
 def test_the_creator_tag_leads_and_survives_the_cap():
@@ -79,7 +81,7 @@ def test_the_creator_tag_leads_and_survives_the_cap():
     text = description_with_hashtags(
         "Body", [f"#t{i}" for i in range(40)], creator="creatorname"
     )
-    assert text.count("#") == 5
+    assert text.count("#") == 3
     assert text.splitlines()[-1].split(" ")[0] == "#creatorname"
 
 

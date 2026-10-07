@@ -110,6 +110,7 @@ def generate(db, comp: dict, llm=None, *, footer: str = "", audience: str = "") 
         ClipMetadata,
         _clean_title,
         _from_parsed,
+        _naturalized,
         _parse,
         _unvoiced,
         first_person,
@@ -123,7 +124,7 @@ def generate(db, comp: dict, llm=None, *, footer: str = "", audience: str = "") 
         description=(
             f"The best moments from {', '.join(channels[:3])}." if channels else ""
         ),
-        hashtags=[f"#{''.join(c for c in ch if c.isalnum()).lower()}" for ch in channels[:3]] + ["#compilation"],
+        hashtags=[f"#{''.join(c for c in ch if c.isalnum()).lower()}" for ch in channels[:2]],
     )
     meta = fallback
     if llm is not None and f["labels"]:
@@ -145,6 +146,7 @@ def generate(db, comp: dict, llm=None, *, footer: str = "", audience: str = "") 
                 # the creator talking ("my brother exposes me"); the post is
                 # about them, not by them.
                 _unvoiced(meta, llm, ", ".join(channels[:3]), audience)
+                _naturalized(meta, llm, ", ".join(channels[:3]), audience, fallback.title)
                 if first_person(meta.title):
                     meta.title = fallback.title
             else:
@@ -153,16 +155,20 @@ def generate(db, comp: dict, llm=None, *, footer: str = "", audience: str = "") 
             print(f"  Compilation metadata: the model failed ({type(e).__name__}: {e}); using plain text.")
             meta = fallback
 
+    from publish import compliance
+
     keywords = list(meta.keywords)
     for ch in channels:
         if ch.lower() not in {k.lower() for k in keywords}:
             keywords.append(ch.lower())
+    meta.title = compliance.sanitize(meta.title, "").title
+    meta.hashtags = meta.hashtags[: compliance.rules().max_hashtags]
     return {
         "title": meta.title,
         "summary": meta.description,
         "description": compose_description(meta.description, f, footer),
         "hashtags": meta.hashtags,
-        "keywords": keywords[:15],
+        "keywords": compliance.fix_tags(keywords, meta.title, " ".join(meta.hashtags)),
         # The standing comment is used unless this one is picked.
         "first_comment": "",
         "suggested_comment": meta.first_comment,

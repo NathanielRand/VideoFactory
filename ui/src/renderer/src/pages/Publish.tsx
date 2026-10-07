@@ -1,6 +1,7 @@
 import QuotaMeter from '../components/QuotaMeter'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import AnalyticsSnapshot from '../components/AnalyticsSnapshot'
+import ChannelAudit from '../components/ChannelAudit'
 import ChannelVideos from '../components/ChannelVideos'
 import CompilationPublishDialog from '../components/CompilationPublishDialog'
 import PublishAllDialog from '../components/PublishAllDialog'
@@ -368,6 +369,8 @@ export default function Publish({
       )}
 
       <ChannelVideos />
+
+      <ChannelAudit />
 
       <PublishingDefaultsCard />
 

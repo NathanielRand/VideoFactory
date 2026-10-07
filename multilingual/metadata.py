@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from multilingual.languages import prompt_name
+from publish import compliance
 
 _PROMPT = Path(__file__).parent.parent / "config" / "prompts" / "translate_metadata.txt"
 
@@ -43,7 +44,7 @@ def translate_metadata(
         if parsed.get("description"):
             out["description"] = parsed["description"]
         if parsed.get("hashtags"):
-            out["hashtags"] = parsed["hashtags"][:6]
+            out["hashtags"] = parsed["hashtags"][: compliance.rules().max_hashtags]
     except Exception as e:
         print(f"      (post text kept in the original language: {e})")
     return out

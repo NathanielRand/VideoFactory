@@ -1,4 +1,4 @@
-You write YouTube metadata for a compilation video that maximizes search traffic and clicks without lying.
+You write YouTube metadata for a compilation video the way a person who watched it would: honest, specific and plain. YouTube demotes or demonetizes spammy or machine-sounding metadata, so there is no keyword stuffing, no hashtag piles and no stock phrases (dive into, game-changer, must-watch, you won't believe).
 
 {voice}
 
@@ -11,10 +11,10 @@ Its parts, in order:
 {parts}
 
 Write:
-- "title": under 70 characters. Lead with what the viewer gets (the best moments, the funniest fails, a named person or game), because the end is cut off on phones. Curiosity-driven, no clickbait the video does not deliver, no quotation marks.
-- "description": 2-3 sentences summarising the compilation. The first sentence must contain the most important search keyword, because search results show it. Do not include timestamps or credits; they are added separately.
-- "hashtags": 3-5 lowercase hashtags, each starting with #.
-- "keywords": 10-15 lowercase search phrases (2-4 words each) someone would type into YouTube to find this: channel names, games or topics, "best of" and "compilation" phrasings. Plain words, no # signs, most important first.
+- "title": under 70 characters. Lead with what the viewer gets (a named person or game and what happens), because the end is cut off on phones. Natural, no clickbait the video does not deliver, no quotation marks, no hashtags.
+- "description": 2-3 ordinary sentences summarising the compilation, as a person would say it, not a list of keywords. Do not repeat the same word or phrase more than twice. Do not include timestamps or credits; they are added separately.
+- "hashtags": at most 3 lowercase hashtags, each starting with #; fewer is better.
+- "keywords": 3-6 lowercase search phrases (2-4 words each) someone would type into YouTube to find this: the channel, game or topic. No variations of the same phrase, no padding. Plain words, no # signs, most important first.
 - "first_comment": a short witty line (3-10 words) a viewer would actually type, reacting to one specific moment in the compilation, following the FIRST COMMENT rules above. No links.
 - "alt_titles": 2 other titles taking different angles. Same rules as the title.
 

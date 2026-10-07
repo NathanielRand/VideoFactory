@@ -38,6 +38,8 @@ import type {
   Word
 } from './types'
 import type {
+  AuditResult,
+  AuditView,
   ChannelVideo,
   Playlist,
   PublishJobRow,
@@ -668,6 +670,30 @@ export const api = {
     if (opts.fresh) q.set('fresh', 'true')
     return request<{ channel_id: string | null; videos: ChannelVideo[] }>(`/youtube/channel-videos?${q}`)
   },
+  /** Metadata audit of the channel's videos (publish/audit.py). Reading and
+   *  rewriting change nothing on YouTube; apply and undo do, and say so. */
+  youtubeAuditLast: (channelId?: string) =>
+    request<AuditView>(`/youtube/audit${channelId ? `?channel_id=${encodeURIComponent(channelId)}` : ''}`),
+  youtubeAuditRun: (channelId?: string, limit = 200) =>
+    request<AuditView>('/youtube/audit', {
+      method: 'POST',
+      body: JSON.stringify({ channel_id: channelId ?? null, limit })
+    }),
+  youtubeAuditRewrite: (videoIds: string[], channelId?: string) =>
+    request<AuditView & { rewritten: number }>('/youtube/audit/rewrite', {
+      method: 'POST',
+      body: JSON.stringify({ channel_id: channelId ?? null, video_ids: videoIds })
+    }),
+  youtubeAuditApply: (videoIds: string[], channelId?: string) =>
+    request<AuditView & { results: AuditResult[] }>('/youtube/audit/apply', {
+      method: 'POST',
+      body: JSON.stringify({ channel_id: channelId ?? null, video_ids: videoIds, confirm: true })
+    }),
+  youtubeAuditUndo: (videoIds: string[], channelId?: string) =>
+    request<AuditView & { results: AuditResult[] }>('/youtube/audit/undo', {
+      method: 'POST',
+      body: JSON.stringify({ channel_id: channelId ?? null, video_ids: videoIds, confirm: true })
+    }),
   youtubeUploads: (limit = 20) =>
     request<{ uploads: PublishRecord[] }>(`/youtube/uploads?limit=${limit}`),
 

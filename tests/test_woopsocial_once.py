@@ -327,8 +327,9 @@ def test_a_daily_schedule_keeps_to_the_chosen_time(db):
 def test_hashtags_the_model_ran_together_are_split():
     from analysis.metadata import _clean_hashtags
 
+    # Split on every #, then held to the hashtag limit (three).
     assert _clean_hashtags(["#creatorname#drama#apology", "#Late Night"]) == [
-        "#creatorname", "#drama", "#apology", "#late", "#night"]
+        "#creatorname", "#drama", "#apology"]
 
 
 def test_an_old_clip_with_run_together_hashtags_posts_them_separately(db, tmp_path, woop):

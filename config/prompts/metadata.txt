@@ -1,4 +1,4 @@
-You write YouTube Shorts metadata that maximizes clicks without lying.
+You write YouTube Shorts metadata the way a person who watched the clip would: honest, specific and plain. The channel is monetized, and YouTube demotes or demonetizes spammy or machine-sounding metadata, so there is no keyword stuffing, no hashtag piles, and no stock phrases (dive into, game-changer, must-watch, you won't believe, buckle up).
 
 Below is the transcript of one short clip, taken from a longer video titled "{video_title}".
 
@@ -10,10 +10,10 @@ STANDING HASHTAGS (the channel always uses these): {always_on}
 ACCURACY COMES FIRST. Use only what is said in the transcript, plus the channel name above. Names, numbers, places and things must appear in the transcript. If you are not sure something is true, leave it out. Build the title and description around ONE specific thing that happens or is said in the clip (an event, a quote, a named object), never a general summary. Never make vague hype the point of the TITLE (insane, crazy, epic, unbelievable, shocking, ultimate) unless the clip says that word. In the description and first_comment such words are fine as tone, the way this audience would say them, as long as the sentence still names the specific thing that happens. Do not use words from the video title unless the clip itself is about them.
 
 Write metadata for this Short. Rules:
-- "title": under 90 characters, punchy, curiosity-driven, built from what is actually said in the clip. No clickbait that the clip doesn't deliver. No quotation marks.
-- "description": 1-2 sentences describing the clip, also grounded in what is said. The first sentence names the source channel and contains the most important keyword, because it is what search results show.
-- "hashtags": 3-5 lowercase hashtags, each starting with #. Include the STANDING HASHTAG that fits this clip best (if there are any), then ones for the clip's own topic. Do not include #shorts (it is added automatically).
-- "keywords": 8-12 lowercase search phrases (2-4 words each) a viewer would actually type into YouTube search to find this in the clip: the topic, the people or game named, the moment. Plain words, no # signs, most important first.
+- "title": under 90 characters, specific and natural, built from what is actually said in the clip. No clickbait that the clip doesn't deliver. No quotation marks.
+- "description": 1-2 sentences describing the clip, also grounded in what is said. Write it as ordinary sentences a person would say, not a list of keywords. The first sentence says what happens and names the source channel once. Do not repeat the same word or phrase more than twice.
+- "hashtags": at most 3 lowercase hashtags, each starting with #; fewer is better, and none is fine if nothing fits. Include the STANDING HASHTAG that fits this clip best (if there are any), then at most one for the clip's own topic. Never put a hashtag in the title or the description sentences. Do not include #shorts.
+- "keywords": 3-6 lowercase search phrases (2-4 words each) a viewer would actually type into YouTube search to find this: the people or game named and the moment. Each must add something the title does not already say: no variations of the same phrase, no words repeated across phrases. Plain words, no # signs, most important first.
 - "first_comment": a short witty line (3-10 words) a viewer would actually type, about one specific thing in the clip, following the FIRST COMMENT rules above. No links, no hashtags.
 - "alt_titles": 2 other titles in the clip, each taking a different angle (a question, a bold claim, a named person). Same rules as the title.
 

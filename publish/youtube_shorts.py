@@ -506,6 +506,40 @@ class YouTubeShortsPublisher(Publisher):
             raise PublishError("YouTube has no such video on this channel.")
         return got[0]
 
+    def update_metadata(self, video_id: str, *, title: str, description: str, tags: list[str],
+                        current: dict | None = None) -> None:
+        """Change a published video's title, description and tags.
+
+        videos.update with part=snippet REPLACES the whole snippet: anything
+        left out is reset, the category and language included. So the current
+        snippet is read first (or passed as `current`, a videos.list item) and
+        sent back whole, with only these three fields changed, and only the
+        fields the API accepts (see publish.audit.WRITABLE). 50 units, plus 1
+        for the read. Needs the full YouTube permission, like delete: without
+        it this raises AuthRequired with an "Update permissions" message.
+        """
+        from publish.audit import WRITABLE
+
+        svc = self.service(PLAYLIST_SCOPES)
+        try:
+            item = current or svc.videos().list(part="snippet", id=video_id).execute().get("items", [None])[0]
+            if not item:
+                raise PublishError("YouTube has no such video on this channel.")
+            snippet = {k: v for k, v in (item.get("snippet") or {}).items() if k in WRITABLE}
+            snippet["title"] = title
+            snippet["description"] = description
+            if tags:
+                snippet["tags"] = list(tags)
+            else:
+                snippet.pop("tags", None)
+            if not snippet.get("categoryId"):
+                raise PublishError("YouTube did not return this video's category, so it cannot be updated safely.")
+            svc.videos().update(part="snippet", body={"id": video_id, "snippet": snippet}).execute()
+        except PublishError:
+            raise
+        except Exception as e:
+            raise _wrap(e) from e
+
     def delete_video(self, video_id: str) -> None:
         """Delete a video from the channel. Permanent: its views, likes and
         comments go with it. 50 units; needs the full YouTube permission

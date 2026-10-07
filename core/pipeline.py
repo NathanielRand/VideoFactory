@@ -417,15 +417,23 @@ def process_video(url: str, config: dict, db: StateDB, force: bool = False) -> l
     required = config["clips"].get("required_hashtags") or []
     if required:
         from analysis.metadata import _clean_hashtags
+        from publish import compliance
 
         extra = _clean_hashtags(required)
+        rules = compliance.rules()
         for meta in metas:
-            have = {t.casefold() for t in meta.hashtags}
-            meta.hashtags = meta.hashtags + [t for t in extra if t.casefold() not in have]
+            # Required tags lead, so they survive the monetization cap on
+            # hashtags (publish/compliance.py); the model's own fill what is left.
+            have = {t.casefold() for t in extra}
+            meta.hashtags = (extra + [t for t in meta.hashtags if t.casefold() not in have])[: rules.max_hashtags]
             # "titles AND descriptions must have it in them", so the tag goes
-            # on the title too, not just the tag list. YouTube rejects a title
-            # over 100 characters, so a tag that will not fit is left to the
-            # description rather than costing the clip its upload.
+            # on the title too, not just the tag list: unless the monetization
+            # rules forbid hashtags in titles (the default), where it is left
+            # to the description. YouTube rejects a title over 100 characters,
+            # so a tag that will not fit is left out rather than costing the
+            # clip its upload.
+            if not rules.hashtags_in_title:
+                continue
             for tag in extra:
                 if tag.casefold() in meta.title.casefold():
                     continue

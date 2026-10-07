@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Monetization-safe text** (`publish/compliance.py`, settings: `compliance:` in
+  `config/settings.yaml`). Hashtag spam, hashtags in titles, keyword stuffing and
+  machine-sounding wording can disqualify a video or channel from the YouTube
+  Partner Program. One linter now holds every title, description and tag list to
+  the same limits, and the limits are settings with conservative defaults (YouTube
+  publishes no numbers): at most 3 hashtags, none in the title, at most 8 hidden
+  tags that do not repeat the title or a hashtag, no repeated-word stuffing, a
+  `tone` check (`standard` / `strict` / `off`, per genre via `genre_overrides`).
+  - New and edited uploads are fixed at the last gate (`build_insert_body`,
+    translations included); generation prompts, the voice rules, hashtag and keyword
+    caps, and the Publish-page SEO grade were rewritten to match. Machine-sounding
+    output is rewritten once, then replaced by the clip's hook or dropped.
+  - Hashtags are no longer copied into the hidden tags, "| Channel #Tag" titles
+    lose the tag, and a keyword-filled tag list no longer scores higher.
+  - **Metadata audit** on the Publish page: checks every video on the channel,
+    shows the fix for each, can propose rewording for the rest (prose only, never
+    links or timestamps), applies only what is shown, skips videos edited since,
+    and can undo. Applying needs the full YouTube permission; 51 quota units each.
+    API: `GET/POST /youtube/audit`, `POST /youtube/audit/rewrite|apply|undo`.
+
 - **Clip generation**:
   - Game profiles (`genres/profiles.py`, first one: Wardogs). Footage is framed
     on the crosshair instead of on the soldiers the tracker finds, and the

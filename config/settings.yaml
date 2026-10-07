@@ -167,6 +167,23 @@ youtube:
   cookies_from_browser: ""   # e.g. "chrome", "firefox", "edge"
   cookies_file: ""           # e.g. "C:/Users/you/cookies.txt"
 
+compliance:
+  # Monetization-safe text (publish/compliance.py). YouTube's 2027 Partner
+  # Program rules disqualify hashtag spam, keyword stuffing and copy that reads
+  # as machine-written. YouTube does not publish exact numbers, so these are
+  # conservative defaults of ours: loosen one if you know better. Every title,
+  # description and tag list is held to them before it goes out, and
+  # Publish -> Audit checks videos already on your channel against them.
+  max_hashtags: 3            # title + description together, each counted once
+  hashtags_in_title: false   # a hashtag inside the title itself
+  max_tags: 8                # hidden tags (the search keywords field)
+  max_tag_chars: 200         # total characters across the hidden tags
+  max_word_repeats: 4        # one word this many times in a description is stuffing
+  max_word_share: 0.12       # ...or this share of all the words in the video's text
+  max_emoji: 2
+  tone: standard             # machine-sounding copy: standard (2 signals fail), strict (1), off
+  genre_overrides: {}        # e.g. {gaming: {tone: strict}, music: {max_hashtags: 2}}
+
 feedback:
   # Where the in-app Feedback Hub sends reports (a Cloudflare Worker that
   # files them as GitHub Issues — users need no account; see

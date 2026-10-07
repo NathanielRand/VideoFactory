@@ -701,6 +701,12 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
 
     flags_api.install(app, config=config, db=db, data_dir=data_dir, worker=worker)
 
+    # Audit the videos already on the channel against the monetization rules,
+    # and fix them: its own module, like the YouTube routes it sits beside.
+    from server import audit_api
+
+    audit_api.install(app, config=config, db=db, data_dir=data_dir)
+
     # Proposed changes from a creator's flags, approved or refused one by one.
     from server import review_api
 

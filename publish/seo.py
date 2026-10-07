@@ -10,9 +10,10 @@ Four jobs, each a pure function:
   hashtag habits, and its own point at which the text is cut off in the feed.
   Sending the YouTube description everywhere wasted the first line on
   platforms that show only the first line.
-* `keywords_for` builds YouTube's hidden tags: search phrases, not hashtags.
-  They used to be the clip's hashtags with the # removed, which spends the
-  500-character budget on words already in the description.
+* `keywords_for` builds YouTube's hidden tags: a few search phrases, not
+  hashtags and not a filled budget. They used to be the clip's hashtags with
+  the # removed, then every phrase that fit in 500 characters; both are the
+  keyword stuffing the Partner Program rules penalise (publish/compliance.py).
 * `chapters` and `credits` write the two blocks a compilation's description
   needs: timestamps (YouTube turns them into chapters, which search indexes)
   and a line crediting every source channel.
@@ -25,7 +26,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from publish.metadata import TAGS_BUDGET, clamp_tags
+from publish import compliance
+from publish.metadata import clamp_tags
 
 
 # Per platform: the whole caption's limit, how much shows before "more", how
@@ -145,12 +147,16 @@ def keywords_for(
     hashtags: list[str] | None = None,
     creator: str = "",
     channel_keywords: list[str] | None = None,
+    title: str = "",
 ) -> list[str]:
-    """YouTube tags: search phrases first, then the creator, then the rest.
+    """YouTube tags: search phrases first, then the creator, then the channel's.
 
-    Order is priority. `clamp_tags` drops whatever runs past the 500-character
-    budget from the end, so the phrases people actually search lead and the
-    hashtag words, the least useful here, come last.
+    Order is priority. The list is held to the compliance limits (a handful of
+    tags, no repeats, none that only echo the title), so the phrases people
+    actually search lead and the rest is dropped from the end. Hashtags are no
+    longer added as tags: the same word in the description AND the tags is the
+    repetition the 2027 rules read as stuffing. `hashtags` is kept so callers
+    that pass them still work: it is only used to drop tags that repeat one.
     """
     seen: set[str] = set()
     out: list[str] = []
@@ -167,9 +173,7 @@ def keywords_for(
         add(creator)
     for k in channel_keywords or []:
         add(k)
-    for h in hashtags or []:
-        add(h)
-    return clamp_tags(out)
+    return clamp_tags(compliance.fix_tags(out, title, " ".join(_hashtag(h) for h in hashtags or [])))
 
 
 # ---- compilations ------------------------------------------------------------
@@ -268,8 +272,12 @@ def check(
     long_form: bool = False,
     has_thumbnail: bool = False,
     has_playlist: bool = False,
+    genre: str = "",
 ) -> Report:
-    """Grade a YouTube draft out of 100 against what search and the feed reward.
+    """Grade a YouTube draft out of 100: first against the monetization rules
+    (publish/compliance.py), then against what search and the feed reward.
+    Keyword counts are not rewarded: more tags and a keyword in every line is
+    the stuffing those rules penalise.
 
     Each rule is a small, explainable thing a creator can fix, not a mystery
     score: every point lost comes with the sentence that says how to earn it.
@@ -293,21 +301,26 @@ def check(
         tips.append(Tip("good", "The whole title shows on phones."))
 
     main = keywords[0] if keywords else ""
-    if not keywords:
-        lose(15, "warn", "Add search keywords: the phrases someone would type to find this.")
-    elif _words(main) and not (_words(main) & _words(title)):
-        lose(10, "warn", f"Use your main keyword (\"{main}\") in the title.")
-    else:
-        tips.append(Tip("good", "The title uses your main keyword."))
+    if main and _words(main) and not (_words(main) & _words(title)):
+        lose(4, "warn", f"Say what the video is about in the title (\"{main}\"): once, in plain words.")
+    elif main:
+        tips.append(Tip("good", "The title says what the video is about."))
 
-    first_line = description.strip().split("\n", 1)[0][:150]
+    # What the 2027 Partner Program rules read as spam comes first: these cost
+    # real money, where a missing keyword only costs a little reach. Each
+    # finding comes from the same linter the generators and the upload gate use.
+    # Hashtags passed in separately (the publish box keeps them apart from the
+    # description until upload) count too, so they are checked as part of it.
+    seen = {h.lower() for h in compliance.hashtags_in(f"{title} {description}")}
+    loose = " ".join(t for t in tags if t.lower() not in seen)
+    for f in compliance.check(title, f"{description} {loose}".strip(), keywords, genre=genre):
+        lose(compliance.cost(f), "bad" if f.code in _MONEY else "warn", f.message)
+
     if not description.strip():
-        lose(15, "warn", "Add a description. Its first line shows in search results.")
-    elif main and _words(main) and not (_words(main) & _words(first_line)):
-        lose(8, "warn", "Put your main keyword in the description's first sentence.")
+        lose(10, "warn", "Add a description: a sentence or two, in plain words. Its first line shows in search results.")
     if long_form:
         if len(description) < 200:
-            lose(8, "warn", "Long videos rank better with a fuller description: 200+ characters.")
+            lose(8, "warn", "Long videos rank better with a fuller description: 200+ characters of real sentences.")
         if not re.search(r"^0:00\b", description, re.M):
             lose(10, "warn", "Add chapters (timestamps starting at 0:00). YouTube indexes them in search.")
         else:
@@ -317,15 +330,9 @@ def check(
         if not has_playlist:
             lose(4, "warn", "Add it to a playlist, so one video leads viewers into the next.")
 
-    if not tags:
-        lose(6, "warn", "Add 3 hashtags. The first three show above the title.")
-    elif len(tags) > 15:
-        lose(20, "bad", "More than 15 hashtags and YouTube ignores all of them.")
-    else:
-        tips.append(Tip("good", f"{min(len(tags), 3)} hashtag(s) will show above the title."))
-
-    budget = sum(len(k) for k in keywords)
-    if keywords and budget < TAGS_BUDGET // 5:
-        lose(4, "warn", "Add a few more keyword variations, including the creator's name.")
-
     return Report(score=max(0, score), tips=tips)
+
+
+# Findings that put monetization at risk, as against reach advice.
+_MONEY = frozenset({"hashtag-in-title", "too-many-hashtags", "machine-tone", "keyword-repeat",
+                    "keyword-share", "keyword-list", "too-many-tags", "tags-echo-title"})

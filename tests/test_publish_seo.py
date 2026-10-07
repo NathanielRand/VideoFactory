@@ -46,10 +46,11 @@ def test_hashtags_are_capped_and_deduplicated_per_platform():
 def test_keywords_put_search_phrases_first_and_fit_the_budget():
     tags = seo.keywords_for(keywords=["speedrun world record", "mario 64"], creator="Some Streamer",
                             channel_keywords=["gaming clips"], hashtags=["#mario", "#Mario 64"])
-    assert tags[:4] == ["speedrun world record", "mario 64", "Some Streamer", "gaming clips"]
-    assert tags.count("mario 64") == 1  # the hashtag duplicate folds away
+    # "mario 64" is also a hashtag, so it is not repeated as a tag; hashtags are
+    # never added as tags (the same word in both is read as stuffing).
+    assert tags == ["speedrun world record", "Some Streamer", "gaming clips"]
     big = seo.keywords_for(keywords=[f"phrase number {i}" for i in range(100)])
-    assert sum(len(t) + 2 for t in big) <= 520
+    assert len(big) <= 8 and sum(len(t) + 2 for t in big) <= 520   # a handful, not a filled budget
 
 
 # ---- chapters and credits --------------------------------------------------------
@@ -86,14 +87,16 @@ def test_credits_list_each_channel_once():
 def test_check_rewards_a_well_built_long_video():
     good = seo.check(
         title="Best speedrun fails compilation",
-        description="The best speedrun fails of the year, all in one place. " * 5 + "\n0:00 Start\n1:00 Mid\n2:00 End",
-        keywords=["speedrun fails", "mario speedrun", "gaming compilation"] * 20,
+        description=("Ten speedrunners lose a world record on the last jump, and the clips run in order "
+                     "of how close they got. Each run is credited to its channel below, so you can "
+                     "watch the full streams.\n\n0:00 Start\n1:00 Mid\n2:00 End"),
+        keywords=["mario speedrun", "gaming compilation"],
         hashtags=["speedrun", "fails", "gaming"],
         long_form=True, has_thumbnail=True, has_playlist=True,
     )
     assert good.score >= 90
     bad = seo.check(title="x" * 90, long_form=True)
-    assert bad.score < 50
+    assert bad.score <= 50   # no keywords is no longer a penalty: more of them is not better
     assert any("chapters" in t.message for t in bad.tips)
 
 
@@ -223,7 +226,8 @@ def test_compilation_facts_build_chapters_and_credits(tmp_path):
     assert meta["chapters"].splitlines() == ["0:00 The clutch play", "0:40 Stream two", "1:10 Stream one"]
     assert "• Ann https://y/@ann" in meta["credits"] and "• Bob" in meta["credits"]
     assert meta["description"].endswith("Discord: x")
-    assert "ann" in meta["keywords"] and "#compilation" in meta["hashtags"]
+    # The channel is the hashtag, so it is not also a tag; no "#compilation" padding.
+    assert "#ann" in meta["hashtags"] and "#compilation" not in meta["hashtags"]
 
 
 def test_compilation_youtube_uploads_skip_the_clip_foreign_key(tmp_path):
@@ -261,7 +265,7 @@ def test_tags_and_first_comment_use_clip_and_channel_defaults(tmp_path):
     publishing_api.save_settings(d, {"channel_keywords": ["ann clips"], "first_comment": "Discord: x",
                                      "hashtags": ["#annfam"]})
     clip = d.get_clip(clip_id)
-    assert publishing_api.youtube_tags(d, clip) == ["clutch play", "Ann", "ann clips", "clutch"]
+    assert publishing_api.youtube_tags(d, clip) == ["clutch play", "Ann", "ann clips"]
     assert publishing_api.youtube_tags(d, clip, ["typed"]) == ["typed"]
     # The video's own comment REPLACES the standing one; it does not stack.
     assert publishing_api.first_comment_for(d, clip) == "Who won?"

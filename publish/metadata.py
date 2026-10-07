@@ -9,14 +9,14 @@ API rejects the whole upload for a title of 101 characters, and losing a
 finished render to that would be an unkind way to find out.
 """
 
+from publish import compliance
 from publish.base import DESCRIPTION_MAX, TAGS_BUDGET, TITLE_MAX, PublishRequest
 
-# Five is ours, not YouTube's. A description reads better with a handful of
-# real tags than a wall of them, and YouTube only shows the first three above
-# the title anyway. Fifteen is the cliff: past that it ignores EVERY hashtag on
-# the video rather than the excess, so five sits well clear of it instead of
-# near it.
-MAX_HASHTAGS = 5
+# How many hashtags a description gets is `compliance.rules().max_hashtags`
+# (config/settings.yaml, `compliance:`), three by default. YouTube only shows
+# the first three above the title anyway, fifteen is the cliff past which it
+# ignores EVERY hashtag on the video, and under the 2027 Partner Program rules a
+# pile of them reads as spam. This module used to hard-code five.
 
 # Angle brackets are rejected outright in titles and descriptions.
 _FORBIDDEN = str.maketrans({"<": "", ">": ""})
@@ -169,7 +169,7 @@ def description_with_hashtags(
 ) -> str:
     """Put the clip's hashtags in the description, the creator's tag first.
 
-    First because the list is cut at MAX_HASHTAGS, so whatever must survive
+    First because the list is cut at the hashtag limit, so whatever must survive
     has to lead. Duplicates fold together case-insensitively: a generated
     "#creatorname" and a channel called "CreatorName" are one tag, not two.
     """
@@ -187,7 +187,7 @@ def description_with_hashtags(
     body = _strip_our_last_tag_line(description, {tag.lower() for tag in unique})
     if not unique:
         return clamp_description(_strip_our_last_tag_line(description, set()))
-    line = " ".join(unique[:MAX_HASHTAGS])
+    line = " ".join(unique[: compliance.rules().max_hashtags])
     return clamp_description(f"{body}\n\n{line}" if body else line)
 
 
@@ -199,12 +199,21 @@ def build_insert_body(request: PublishRequest) -> dict:
     anything but a private video, and a caller that forgets would get a
     confusing 400 instead of a scheduled video.
     """
+    # The last gate before text leaves the app: whatever was generated, edited
+    # in the publish box or prefilled from an earlier publish is held to the
+    # monetization rules here (publish/compliance.py). Only the fixes that need
+    # no judgement are made; wording that still fails is the editor's check to
+    # report, because refusing an upload over it would lose a finished render.
+    genre = compliance.CATEGORY_GENRES.get(str(request.category_id), "")
+    clean = compliance.sanitize(
+        clamp_title(request.title), request.description, clamp_tags(request.tags), genre=genre
+    )
     snippet: dict = {
-        "title": clamp_title(request.title),
-        "description": clamp_description(request.description),
+        "title": clamp_title(clean.title),
+        "description": clamp_description(clean.description),
         "categoryId": str(request.category_id),
     }
-    tags = clamp_tags(request.tags)
+    tags = clamp_tags(clean.tags)
     if tags:
         snippet["tags"] = tags
     if request.default_language:
@@ -236,8 +245,21 @@ def build_insert_body(request: PublishRequest) -> dict:
     if request.recording_date:
         body["recordingDetails"] = {"recordingDate": request.recording_date}
     if request.localizations:
-        body["localizations"] = request.localizations
+        body["localizations"] = _clean_localizations(request.localizations, genre)
     return body
+
+
+def _clean_localizations(localizations: dict, genre: str = "") -> dict:
+    """Each translated title and description under the same rules as the
+    original: a translation is a second chance to put hashtags in a title."""
+    out: dict = {}
+    for lang, entry in localizations.items():
+        if not isinstance(entry, dict):
+            out[lang] = entry
+            continue
+        clean = compliance.sanitize(entry.get("title", ""), entry.get("description", ""), [], genre=genre)
+        out[lang] = {**entry, "title": clamp_title(clean.title), "description": clamp_description(clean.description)}
+    return out
 
 
 def parts_for(request: PublishRequest) -> str:

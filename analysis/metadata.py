@@ -12,6 +12,7 @@ from pathlib import Path
 
 from core.models import ClipCandidate, Segment
 from llm.base import LLMBackend, generate_json
+from publish import compliance
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "config" / "prompts" / "metadata.txt"
 
@@ -100,6 +101,7 @@ def generate_metadata(
     meta = _from_parsed(parsed, fallback)
     meta = _checked(meta, candidate, segments, clip_text, llm, channel, always_on, [video_title], audience=audience)
     _unvoiced(meta, llm, channel, audience)
+    _naturalized(meta, llm, channel, audience, fallback.title, clip_text)
     return _anchored(meta, channel, always_on, clip_text)
 
 
@@ -180,6 +182,9 @@ def generate_metadata_batch(
                         ask_model=ask, audience=audience)
         ask = repairs < MAX_REPAIRS
         repairs += 1 if _unvoiced(meta, llm, channel, audience, ask_model=ask) else 0
+        ask = repairs < MAX_REPAIRS
+        repairs += 1 if _naturalized(meta, llm, channel, audience, _fallback(c, video_title, channel).title,
+                                     texts[i], ask_model=ask) else 0
         results[i] = _anchored(meta, channel, always_on, texts[i], i)
     return results
 
@@ -241,7 +246,8 @@ def suggest_first_comment(*, title: str, description: str, content: str, llm,
 
 
 def clean_keywords(raw) -> list[str]:
-    """Search phrases: plain words, no #, no duplicates, at most 15."""
+    """Search phrases: plain words, no #, no duplicates, within the hidden-tag
+    limit (compliance `max_tags`)."""
     if not isinstance(raw, list):
         return []
     out: list[str] = []
@@ -249,7 +255,7 @@ def clean_keywords(raw) -> list[str]:
         phrase = re.sub(r"\s+", " ", re.sub(r"[#<>\"]", "", str(entry))).strip(" ,.").lower()
         if phrase and len(phrase) <= 60 and phrase not in out:
             out.append(phrase)
-    return out[:15]
+    return out[: compliance.rules().max_tags]
 
 
 def _clean_comment(raw) -> str:
@@ -294,13 +300,17 @@ def voice_rules(channel: str = "", audience: str = "") -> str:
         (f"- {audience.strip()} Write for them."
          if (audience or "").strip()
          else "- No audience data yet: take the register from how the creator talks in the clip."),
-        "- Write the way this audience writes in comments, not the way a press release does: their "
-        "slang, their tone, their casing and punctuation, even small grammar habits (dropped "
-        "apostrophes, fragments, a trailing \"lol\") where they fit. Match the energy of the clip. "
-        "Spell the way its biggest country does (color or colour).",
-        "- Keep it natural: no slang this audience would not use, nothing dated or cringey, "
-        "at most one or two slang terms per field. Slang changes how a thing is said, never "
-        "what happened: every fact still has to come from the clip.",
+        "- Write like a person describing a clip to a friend, not like a press release or an "
+        "assistant: plain, specific words, normal spelling and punctuation, short sentences. Take "
+        "the clip's own vocabulary where it fits, but never imitate typos or dropped apostrophes "
+        "and never force slang. Match the energy of the clip. Spell the way its biggest country "
+        "does (color or colour).",
+        "- Keep it natural: at most one slang term per field, and only if the clip itself sounds "
+        "like that. Slang changes how a thing is said, never what happened: every fact still has "
+        "to come from the clip.",
+        "- Avoid stock phrases that read as machine-written (dive into, game-changer, must-watch, "
+        "you won't believe, buckle up, whether you're...), em dashes, exclamation marks, and "
+        "hashtags in the title or description text.",
         comment_rules(who),
     ]
     return "\n".join(lines)
@@ -361,6 +371,57 @@ def _unvoiced(meta: ClipMetadata, llm, channel: str, audience: str, ask_model: b
     return asked
 
 
+def _naturalized(meta: ClipMetadata, llm, channel: str, audience: str, fallback_title: str = "",
+                 text: str = "", ask_model: bool = True) -> bool:
+    """Take the machine-sounding wording out of the title, description and
+    first comment, in place (publish/compliance.py has the signals).
+
+    A title or description that trips the check is rewritten once with the
+    problem named. If that still trips it (or no model call is left) a title
+    becomes the clip's own hook and a description or first comment is dropped:
+    an empty description is a normal state, a stock-phrase one is not. The
+    rewrite is held to the same accuracy and voice checks as any title. True
+    when a model call was made."""
+    meta.alt_titles = [t for t in meta.alt_titles if not compliance.machine_signals(t)]
+    if compliance.machine_signals(meta.first_comment):
+        meta.first_comment = ""
+    bad = {f.field: f.message for f in compliance.tone_problems(meta.title, meta.description)}
+    if not bad:
+        return False
+    fixed: dict = {}
+    asked = False
+    if ask_model:
+        asked = True
+        try:
+            fields = {"title": meta.title, "description": meta.description}
+            prompt = (
+                "Rewrite these so they read like a person wrote them: plain, specific words, "
+                "no stock phrases, no em dashes, no hashtags, no exclamation marks. Same facts, "
+                "same length or shorter, nothing added.\n"
+                + "".join(f"- The {k} {v}\n" for k, v in bad.items())
+                + f"\n{voice_rules(channel, audience)}\n\n"
+                + "\n".join(f"{k.upper()}: {fields[k]}" for k in bad)
+                + '\n\nRespond with ONLY valid JSON: {"title": "...", "description": "..."}'
+                + "\n(Copy a field unchanged if it was not listed above.)"
+            )
+            fixed = _parse(generate_json(llm, prompt, {
+                "type": "object",
+                "properties": {"title": {"type": "string"}, "description": {"type": "string"}},
+                "required": ["title", "description"], "additionalProperties": False,
+            })) or {}
+        except Exception:
+            fixed = {}
+    if "title" in bad:
+        new = _clean_title(fixed.get("title") or "")
+        ok = (new and not compliance.machine_signals(new) and not first_person(new)
+              and not _ungrounded(new, text, channel, [], meta))
+        meta.title = new if ok else (fallback_title or meta.title)
+    if "description" in bad:
+        new = str(fixed.get("description") or "").strip()
+        meta.description = new if new and not compliance.machine_signals(new) and not first_person(new) else ""
+    return asked
+
+
 def _fallback(candidate: ClipCandidate, video_title: str, channel: str = "") -> ClipMetadata:
     """What a clip carries when the model could not write its metadata.
 
@@ -407,7 +468,7 @@ def _clean_title(title: str) -> str:
 
 
 def _clean_hashtags(tags) -> list[str]:
-    """One hashtag per entry, at most five.
+    """One hashtag per entry, at most the compliance limit (three by default).
 
     The model sometimes answers with several run together in one string,
     "#creatorname#drama#apology", and keeping that as one tag put it into
@@ -422,7 +483,7 @@ def _clean_hashtags(tags) -> list[str]:
             tag = f"#{word}"
             if word and tag != "#shorts" and tag not in cleaned:
                 cleaned.append(tag)
-    return cleaned[:5]
+    return cleaned[: compliance.rules().max_hashtags]
 
 
 # ---- accuracy: what the model wrote against what was said ------------------------------
@@ -605,7 +666,7 @@ def _anchored(meta: ClipMetadata, channel: str, always_on, text: str = "", index
     tag = pick_always_on(always_on, f"{meta.title} {text}", index)
     if tag:
         tags = [f"#{tag}"] + [h for h in meta.hashtags if h.lower() != f"#{tag}"]
-        meta.hashtags = tags[:5]
+        meta.hashtags = tags[: compliance.rules().max_hashtags]
     title_low = meta.title.casefold()
     standing = [_bare_tag(t) for t in always_on or []]
     if channel and channel.casefold() not in title_low and not any(t and t in title_low.replace(" ", "") for t in standing):
@@ -614,4 +675,16 @@ def _anchored(meta: ClipMetadata, channel: str, always_on, text: str = "", index
             meta.title = meta.title + suffix
     if channel and meta.description and channel.casefold() not in meta.description.casefold():
         meta.description = f"{channel}: {meta.description}"
+    return _compliant(meta)
+
+
+def _compliant(meta: ClipMetadata) -> ClipMetadata:
+    """The fixes that need no judgement, last, so nothing added above (the
+    always-on tag, the channel) can push the copy back over a limit: no hashtag
+    in the title, hashtags within the limit, hidden tags that are not echoes of
+    the title or of a hashtag. Wording is `_naturalized`'s job, earlier."""
+    meta.title = compliance.sanitize(meta.title, "").title
+    meta.hashtags = meta.hashtags[: compliance.rules().max_hashtags]
+    meta.keywords = compliance.fix_tags(meta.keywords, meta.title, " ".join(meta.hashtags))
+    meta.alt_titles = [t for t in (compliance.sanitize(a, "").title for a in meta.alt_titles) if t]
     return meta

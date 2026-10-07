@@ -42,8 +42,10 @@ DEFAULTS = {
     # playlist, a link to that playlist.
     "link_source": True,
     "link_playlist": True,
-    # Every title ends "| <source channel> #Tag" (publish/metadata.decorate_title).
-    # The tag is `title_hashtag`, or the first always-on hashtag when that is empty.
+    # Every title ends "| <source channel>" (publish/metadata.decorate_title), and
+    # "#Tag" too only where config `compliance.hashtags_in_title` allows it (off
+    # by default: it can cost monetization). The tag is `title_hashtag`, or the
+    # first always-on hashtag when that is empty.
     "title_channel": True,
     "title_hashtag_on": True,
     "title_hashtag": "",
@@ -133,13 +135,17 @@ def title_for(db, clip, title: str) -> str:
 
     A compilation has no single source, so it gets the hashtag only. Whatever
     goes wrong reading the settings, the title goes out as it was given."""
+    from publish import compliance
     from publish.metadata import clamp_title, decorate_title
 
     try:
         s = load_settings(db)
         channel = creator_of(db, clip) if s.get("title_channel", True) else ""
         tag = ""
-        if s.get("title_hashtag_on", True):
+        # Not under the monetization rules (publish/compliance.py): a hashtag
+        # in the title can cost monetization, so the setting is honoured only
+        # where the creator has allowed hashtags in titles.
+        if s.get("title_hashtag_on", True) and compliance.rules().hashtags_in_title:
             own = str(s.get("title_hashtag") or "").strip()
             always = [h for h in (s.get("hashtags") or []) if str(h).strip()]
             tag = own or (str(always[0]) if always else "")
@@ -560,7 +566,9 @@ def install(app, *, config, db, data_dir: Path) -> StatsPoller:
         if "channel_keywords" in patch:
             patch["channel_keywords"] = clean_keywords(patch["channel_keywords"])
         if "hashtags" in patch:
-            patch["hashtags"] = seo.unique_hashtags(patch["hashtags"])[:10]
+            from publish import compliance
+
+            patch["hashtags"] = seo.unique_hashtags(patch["hashtags"])[: compliance.rules().max_hashtags]
         if "fixed_times" in patch:
             from publish.slots import _clock
 
@@ -764,7 +772,9 @@ def install(app, *, config, db, data_dir: Path) -> StatsPoller:
             comp = _comp(d, comp_id)
             meta = {**(comp.get("publish_meta") or {}), **body.model_dump()}
             meta["keywords"] = clean_keywords(meta["keywords"])
-            meta["hashtags"] = seo.unique_hashtags(meta["hashtags"])[:15]
+            from publish import compliance
+
+            meta["hashtags"] = seo.unique_hashtags(meta["hashtags"])[: compliance.rules().max_hashtags]
             if meta["canvas"] and meta["canvas"] not in (comp.get("outputs") or {}):
                 raise HTTPException(400, "That format has not been rendered for this compilation.")
             store.set_publish_meta(d, comp_id, meta)
