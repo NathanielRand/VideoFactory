@@ -71,17 +71,35 @@ def generate_metadata(
     always_on: list[str] | tuple[str, ...] = (),
     audience: str = "",
     creator_context: str = "",
+    avoid: list[str] | tuple[str, ...] = (),
+    must_generate: bool = False,
 ) -> ClipMetadata:
+    """Metadata for one clip.
+
+    avoid: wording already on offer (the current title, description, keywords),
+    which the model is told not to repeat: how a "regenerate" gets something
+    new. must_generate: raise instead of falling back to hook-based metadata,
+    so a caller that asked for new copy is not handed the fallback as if the
+    model had written it."""
     clip_text = " ".join(
         s.text for s in segments if s.end > candidate.start and s.start < candidate.end
     )
     fallback = _fallback(candidate, video_title, channel)
     if not clip_text:
+        if must_generate:
+            raise RuntimeError("There is no speech in this clip to write from.")
         return _anchored(fallback, channel, always_on, clip_text)
 
     template = PROMPT_PATH.read_text(encoding="utf-8")
     if creator_context:
         template = template.replace("CLIP TRANSCRIPT:", _CONTEXT_HEAD + creator_context + "\n\nCLIP TRANSCRIPT:")
+    used = [str(a).strip() for a in avoid if str(a or "").strip()]
+    if used:
+        template = template.replace(
+            "CLIP TRANSCRIPT:",
+            "ALREADY USED (write something clearly different: another angle, other words):\n"
+            + "\n".join(f"- {u[:300]}" for u in used) + "\n\nCLIP TRANSCRIPT:",
+        )
     prompt = (
         template
         .replace("{voice}", voice_rules(channel, audience))
@@ -96,6 +114,8 @@ def generate_metadata(
     except Exception:
         parsed = None
     if parsed is None:
+        if must_generate:
+            raise RuntimeError("The AI model did not give usable metadata. Try again.")
         return _anchored(fallback, channel, always_on, clip_text)
 
     meta = _from_parsed(parsed, fallback)

@@ -139,6 +139,17 @@ class ClipPatch(BaseModel):
     exported: bool | None = None  # the clip's star; exporting also sets it
 
 
+class RegenerateIn(BaseModel):
+    """Which parts of a clip's copy to write again, and what the editor holds
+    right now (unsaved edits included), so the new text is checked against it."""
+
+    fields: list[str]                    # title, description, keywords
+    title: str | None = None
+    description: str | None = None
+    hashtags: list[str] | None = None
+    keywords: list[str] | None = None
+
+
 class ClipsPlaylistIn(BaseModel):
     clip_ids: list[int]
     playlist_id: str = ""  # "" clears
@@ -1798,6 +1809,103 @@ def create_app(config: dict, settings_path: Path) -> FastAPI:
             return _clip_json(d.get_clip(clip_id))
         finally:
             d.close()
+
+    @app.post("/clips/{clip_id}/regenerate")
+    def regenerate_clip_copy(clip_id: int, body: RegenerateIn):
+        """New title, description and/or search keywords for one clip, written
+        again from what is said in it. Returns the text WITHOUT saving it: the
+        editor shows it and Save keeps it.
+
+        The description is only the clip's own caption. Paragraphs carrying
+        links, timestamps or credits (a source line, a standing block) are kept
+        exactly where they are. Runs the model, so it can take a while."""
+        from analysis.metadata import generate_metadata
+        from core.models import ClipCandidate, Segment
+        from llm.stages import metadata_backend
+        from publish import audit as audit_mod
+        from publish import compliance
+        from server.publishing_api import load_settings
+
+        wanted = [f for f in dict.fromkeys(body.fields) if f in ("title", "description", "keywords")]
+        if not wanted:
+            raise HTTPException(400, "Choose title, description or keywords.")
+        d = db()
+        try:
+            row = d.get_clip(clip_id)
+            if row is None:
+                raise HTTPException(404, "no such clip")
+            video = d.conn.execute(
+                "SELECT title, channel_name, creator_id FROM videos WHERE video_id = ?", (row["video_id"],)
+            ).fetchone()
+            transcript_path = data_dir / "transcripts" / f"{row['video_id']}.json"
+            if not transcript_path.exists():
+                raise HTTPException(409, "This clip's transcript is not on disk, so there is nothing to write from.")
+            segments = [Segment(**s) for s in json.loads(transcript_path.read_text(encoding="utf-8"))["segments"]]
+            candidate = ClipCandidate(start=row["start_s"], end=row["end_s"], score=row["score"],
+                                      hook=row["hook"] or "")
+            channel = (video["channel_name"] if video else "") or ""
+            creator_context = ""
+            try:
+                from creator import retrieval
+
+                if video and video["creator_id"] is not None:
+                    ctx = retrieval.context_for(d, video["creator_id"])
+                    creator_context = ctx.summary if ctx else ""
+            except Exception:
+                creator_context = ""
+            always_on = [str(t) for t in (load_settings(d).get("hashtags") or [])]
+            try:
+                from analysis import audience
+
+                audience_text = audience.for_run(d, config, data_dir)
+            except Exception:
+                audience_text = ""
+            current_title = body.title if body.title is not None else (row["title"] or "")
+            current_desc = body.description if body.description is not None else (row["description"] or "")
+            current_kw = body.keywords if body.keywords is not None else json.loads(row["keywords"] or "[]")
+            hashtags = body.hashtags if body.hashtags is not None else json.loads(row["hashtags"] or "[]")
+            alts = json.loads(row["alt_titles"] or "[]") if "alt_titles" in row.keys() else []
+        finally:
+            d.close()
+
+        used: list[str] = []
+        if "title" in wanted:
+            used += [current_title, *alts]
+        if "description" in wanted:
+            used.append(current_desc)
+        if "keywords" in wanted:
+            used.append(", ".join(current_kw))
+        try:
+            meta = generate_metadata(
+                candidate, segments, (video["title"] if video else "") or "", metadata_backend(config["llm"]),
+                channel=channel, always_on=always_on, audience=audience_text,
+                creator_context=creator_context, avoid=used, must_generate=True,
+            )
+        except Exception as e:
+            raise HTTPException(503, f"The AI model could not write new text: {e}") from e
+
+        out: dict = {}
+        title = meta.title if "title" in wanted else current_title
+        if "title" in wanted:
+            out["title"] = title
+            out["alt_titles"] = meta.alt_titles
+        if "description" in wanted:
+            # Only the caption is replaced; what the description carries besides
+            # (links, timestamps, credits) stays where it is.
+            parts = audit_mod.split_description(current_desc)
+            texts, placed = [], False
+            for text, locked in parts:
+                if locked or not text.strip():
+                    texts.append(text)
+                elif not placed:
+                    texts.append(meta.description)
+                    placed = True
+            if not placed:
+                texts.insert(0, meta.description)
+            out["description"] = "\n\n".join(t for t in texts if t.strip()).strip()
+        if "keywords" in wanted:
+            out["keywords"] = compliance.fix_tags(meta.keywords, title, " ".join(hashtags))
+        return out
 
     def _clip_captions(row) -> list[dict]:
         """Current caption lines for a clip: the user-corrected override when

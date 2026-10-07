@@ -360,6 +360,24 @@ export const api = {
     }
   ) =>
     request<Clip>(`/clips/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  /** New title, description and/or search keywords, written again from what is
+   *  said in the clip. Returns the text without saving it; the editor's Save
+   *  keeps it. Only the caption part of the description is replaced. */
+  regenerateClip: (
+    id: number,
+    body: {
+      fields: ('title' | 'description' | 'keywords')[]
+      /** What the editor holds right now, unsaved edits included. */
+      title?: string
+      description?: string
+      hashtags?: string[]
+      keywords?: string[]
+    }
+  ) =>
+    request<{ title?: string; alt_titles?: string[]; description?: string; keywords?: string[] }>(
+      `/clips/${id}/regenerate`,
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
   /** Choose (or clear with '') the YouTube playlist for many clips at once. */
   setClipsPlaylist: (clipIds: number[], playlistId: string) =>
     request<{ updated: number }>('/clips/playlist', {

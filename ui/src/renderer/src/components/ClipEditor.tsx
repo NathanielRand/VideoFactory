@@ -17,6 +17,7 @@ import BrandingSection, { type ProfileChoice } from './BrandingSection'
 import { DEFAULT_CAPTION_STYLE } from './CaptionStyleControls'
 import { DEFAULT_WATERMARK } from './WatermarkControls'
 import { FirstCommentField, VideoHashtagsField } from './PublishExtras'
+import AsyncButton from './AsyncButton'
 import ThumbnailCard from './ThumbnailCard'
 import PlaylistSelect, { useChannelPlaylists } from './PlaylistSelect'
 import ClipBrandingOverlay from './ClipBrandingOverlay'
@@ -49,6 +50,21 @@ function brandingOf(clip: Clip): {
   }
 }
 
+/** A small "write this again" button beside a field's label. Takes as long as
+ *  the model does, so it locks and says so while it works. */
+function RegenerateButton({ what, onClick }: { what: string; onClick: () => Promise<void> }): JSX.Element {
+  return (
+    <AsyncButton
+      className="text-[11px] text-accent hover:underline disabled:opacity-60"
+      busyLabel="Writing…"
+      onClick={onClick}
+      title={`Write a new ${what} from what is said in this clip. Nothing is saved until you press Save metadata.`}
+    >
+      ↻ Regenerate
+    </AsyncButton>
+  )
+}
+
 export default function ClipEditor({
   clip,
   onChanged,
@@ -66,6 +82,8 @@ export default function ClipEditor({
   const [description, setDescription] = useState(clip.description)
   const [hashtags, setHashtags] = useState(clip.hashtags.join(' '))
   const [keywords, setKeywords] = useState((clip.keywords ?? []).join(', '))
+  const [altTitles, setAltTitles] = useState(clip.alt_titles ?? [])
+  const [regenError, setRegenError] = useState('')
   const [firstComment, setFirstComment] = useState(clip.first_comment ?? '')
   const [suggestedComment, setSuggestedComment] = useState(clip.suggested_comment ?? '')
   const [playlistId, setPlaylistId] = useState(clip.playlist_id ?? '')
@@ -121,6 +139,8 @@ export default function ClipEditor({
     setDescription(clip.description)
     setHashtags(clip.hashtags.join(' '))
     setKeywords((clip.keywords ?? []).join(', '))
+    setAltTitles(clip.alt_titles ?? [])
+    setRegenError('')
     setFirstComment(clip.first_comment ?? '')
     setSuggestedComment(clip.suggested_comment ?? '')
     setPlaylistId(clip.playlist_id ?? '')
@@ -152,6 +172,31 @@ export default function ClipEditor({
       flash(`Error: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setBusy(null)
+    }
+  }
+
+  // Write one part again from what is said in the clip. Nothing is saved: the
+  // new text lands in the box and Save metadata keeps it. A description keeps
+  // its links, timestamps and credits; only the caption part is replaced.
+  const regenerate = async (field: 'title' | 'description' | 'keywords'): Promise<void> => {
+    setRegenError('')
+    try {
+      const got = await api.regenerateClip(clip.id, {
+        fields: [field],
+        title,
+        description,
+        hashtags: hashtags.split(/\s+/).filter(Boolean),
+        keywords: keywords
+          .split(',')
+          .map((k) => k.trim())
+          .filter(Boolean)
+      })
+      if (got.title !== undefined) setTitle(got.title)
+      if (got.alt_titles !== undefined) setAltTitles(got.alt_titles)
+      if (got.description !== undefined) setDescription(got.description)
+      if (got.keywords !== undefined) setKeywords(got.keywords.join(', '))
+    } catch (e) {
+      setRegenError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -271,12 +316,15 @@ export default function ClipEditor({
         <div className="space-y-4 min-w-0">
       <div className="space-y-3">
         <div>
-          <label className="label">Title</label>
+          <div className="flex items-center gap-2">
+            <label className="label">Title</label>
+            <RegenerateButton what="title" onClick={() => regenerate('title')} />
+          </div>
           <input className="input mt-1" value={title} onChange={(e) => setTitle(e.target.value)} />
-          {(clip.alt_titles ?? []).filter((a) => a !== title).length > 0 && (
+          {altTitles.filter((a) => a !== title).length > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-1.5 text-[11px]">
               <span className="text-muted">Try instead:</span>
-              {(clip.alt_titles ?? [])
+              {altTitles
                 .filter((a) => a !== title)
                 .map((alt) => (
                   <button
@@ -291,7 +339,10 @@ export default function ClipEditor({
           )}
         </div>
         <div>
-          <label className="label">Description</label>
+          <div className="flex items-center gap-2">
+            <label className="label">Description</label>
+            <RegenerateButton what="description" onClick={() => regenerate('description')} />
+          </div>
           <textarea
             className="input mt-1 h-20 resize-none"
             value={description}
@@ -300,7 +351,10 @@ export default function ClipEditor({
         </div>
         <VideoHashtagsField value={hashtags} onChange={setHashtags} id={`clip-tags-${clip.id}`} />
         <div>
-          <label className="label">Search keywords (comma-separated)</label>
+          <div className="flex items-center gap-2">
+            <label className="label">Search keywords (comma-separated)</label>
+            <RegenerateButton what="keywords" onClick={() => regenerate('keywords')} />
+          </div>
           <input
             className="input mt-1"
             value={keywords}
@@ -309,6 +363,7 @@ export default function ClipEditor({
           />
           <p className="text-[11px] text-muted mt-1">Sent as YouTube tags; never shown to viewers.</p>
         </div>
+        {regenError && <p className="text-xs text-error">{regenError}</p>}
         <FirstCommentField
           publishId={clip.id}
           value={firstComment}
